@@ -1,0 +1,36 @@
+.venv/
+tools/*/.venv/
+__pycache__/
+*.pyc
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+evals/out/
+*.db
+*.db-wal
+*.db-shm
+config.toml
+# private files: the assistant's style, notes about the owner, credentials, logs
+soul.md
+about-me.md
+OWNER-CONFIG-ADDITIONS.toml
+*.env
+.env*
+*-tokens.json
+*.log
+.DS_Store
+dist/
+*.egg-info/
+# internal working files and local tool state
+.superpowers/
+docs/superpowers/
+todo.md
+# Swift voice service build output (tools/voice)
+.build/
+.swiftpm/
+docs/build-notes-*
+docs/e2e-results-*
+
+# brand sources: the font and renders stay local
+docs/brand/source/fonts/
+docs/brand/source/out/

@@ -1,0 +1,156 @@
+# Copy to ~/.config/local-assistant/config.toml and chmod 600 (the bridge refuses a readable file).
+# Placeholders such as +300000000000 and the all-zero UUID must be replaced with your own values.
+bot_number = "+300000000000"   # the Signal number the bot is registered with: full number, + and country code
+# Signal account IDs (ACI, a UUID) allowed to talk to the bot: your own account. Finding it: setup_assistant.md, 2.4.
+# Send the bot a message, then, with the bridge stopped:
+#   signal-cli -Djava.net.preferIPv4Stack=true -a <bot-number> receive
+#   signal-cli -Djava.net.preferIPv4Stack=true -a <bot-number> listContacts --all-recipients
+allowed_acis = ["00000000-0000-0000-0000-000000000000"]
+#timezone = "Europe/Amsterdam"   # default: the system time zone
+# Her name: she answers to it, greets you with it on calls, and your Signal shows it ("Estia (AI)"). Every home names
+# its own: 1-20 letters, spaces or hyphens (ours is called Tiffany).
+name = "Estia"
+# Her Signal profile picture: a PNG or JPEG of at most 5 MB (a full path, ~ allowed), sent when the bridge starts and
+# again only after the file changes. Left out: Estia's e. (docs/brand/estia-avatar.png); "" for none. Keep your own
+# outside the repo folder: a missing or unusable file is skipped (she runs on, Signal keeps the picture it has).
+#avatar = "~/Pictures/her-picture.png"
+# The one language she listens and speaks in: en, es, it, ko, pt, nl, pl, de, ja, ru or fr (README, Languages).
+# Only the starting value: a typed /language in Signal changes it later (and wins over this line).
+language = "en"
+ollama_base_url = "http://127.0.0.1:11434/v1"
+#model = "local-worker"          # default: the alias made in setup_assistant.md, 2.2 (or another tag you made the same way)
+signal_cli = "signal-cli"       # on PATH (Homebrew's default), or a full path
+digest_time = "09:15"           # the morning digest (calendar, then mail), every day; before 12:00
+#host_label = "the Mac"          # top level, not under [health]: how status messages name this machine, e.g. "the study Mac"
+
+# Health checks: alerts only for real problems, as Signal notes. The Mac is checked every interval_hours.
+[health]
+interval_hours = 4              # how often the Mac is checked while all is fine
+confirm_minutes = 5             # a new problem is checked again after this long before it is reported
+disk_free_min_percent = 10
+#watch_logs = ["~/Library/Logs/my-service"]   # log folders scanned for ERROR lines; default: the local-assistant log folder
+# Other services to watch, besides the built-in checks. Each entry is an HTTP address or a launchd service. None by default.
+# http: a plain http:// address on this Mac or your home network; a JSON "status" that is not healthy (ready, ok, up...) counts as a problem.
+# launchd: a service such as system/com.example.my-agent; stuck_after_minutes (launchd only) reports a problem when the
+# service has not run for that many minutes.
+#extra_checks = [
+#  { label = "my-service", http = "http://127.0.0.1:8080/health" },
+#  { label = "my-agent", launchd = "system/com.example.my-agent" },
+#  { label = "my-backup", launchd = "system/com.example.backup", stuck_after_minutes = 1500 },
+#]
+
+# Projects Gemma may look at, read-only: git repositories directly in root. On by default: the README, AGENTS.md,
+# todo.md and recent commits of each repository in root are readable to the model.
+[projects]
+#root = "~/dev"                 # default: ~/dev
+default = "summary"             # every project: project_status (README start, AGENTS.md, todo, commits)
+docs = []                       # e.g. ["my-project", "local-assistant"]: also project_read and project_search on the docs
+#code = []                      # a level for source files; for now it works like docs
+
+# Mail, read-only (Microsoft Graph, delegated Mail.Read). Off without [mail]. Work or school (Microsoft 365) mailboxes only.
+# IDs come from the app registration (Microsoft Entra admin center, "Accounts in this organizational directory only"):
+# Directory (tenant) ID is tenant_id, Application (client) ID is client_id. They are identifiers, not secrets.
+# Sign in each mailbox once on the Mac: scripts/mail-login.sh <address> (with its calendar in [[calendar.sources]], the
+# sign-in asks for Calendars.Read too; add --mail-only to sign in mail alone). Gmail is not built in: setup_assistant.md.
+#[mail]
+#tenant_id = "00000000-0000-0000-0000-000000000000"
+#client_id = "00000000-0000-0000-0000-000000000000"
+#reply_days = 7            # "needs a reply" window
+#keep_days = 30            # mail headers kept this long
+#sync_minutes = 5          # how often the headers are synced
+#first_sync_days = 30      # how far back the first sync reads
+#prefilter = true          # newsletters, mailing lists and auto-replies sorted by their headers (no model)
+# Optional: AgentJev, a small local yes/no model you run yourself (github.com/malevrigns/agent-jev, Apache-2.0).
+# Its server listens on 127.0.0.1; this guide starts it on port 8147. Plain http, this Mac only. Leave it out to skip it.
+#jev_url = "http://127.0.0.1:8147"
+#jev_threshold = 0.9       # AgentJev this sure (0.5 to 1) that a mail needs nothing -> noise without Gemma
+#[[mail.accounts]]
+#name = "work"             # shown in the digest and to Gemma
+#address = "you@example.com"
+
+# Voice notes through the local voice service (tools/voice; install: scripts/install-voice-daemon.sh).
+# Off without [voice]: take the # off [voice] and the lines below. An empty [voice] uses these defaults (voice af_heart).
+# voice: the Kokoro voice for English spoken answers and calls; setup writes the one that goes with her name
+# (female: af_heart, af_bella, bf_emma; male: am_michael; /voices lists all).
+#[voice]
+#url = "http://127.0.0.1:8150"
+#voice = "af_heart"
+#speed = 1.1
+#max_spoken_chars = 1500     # longer answers are cut at a sentence: "The rest is in the text."
+#max_audio_bytes = 10000000  # voice notes up to 10 MB / 3 minutes
+
+# Lights and plugs on the home network (Kasa; Tapo untested), through tools/tapo with python-kasa. Off without [tapo].
+# List the devices: scripts/tapo-discover.sh. Older Kasa devices need no login; newer Kasa firmware and Tapo devices
+# need the TP-Link login (Tapo is untested). Save it with scripts/set-tapo-credentials.sh.
+# Names as in the app; fixed addresses through DHCP reservations; rule: normal, ask first or never off.
+#[tapo]
+#helper_timeout = 15     # seconds per device call
+#confirm_seconds = 120   # how long an "ask first" action waits for your yes
+#[[tapo.devices]]
+#name = "living room lamp"
+#host = "192.168.1.20"
+#kind = "light"          # light or plug
+#rule = "normal"
+
+# Calendars, read-only. Off without [calendar]; an empty [calendar] turns on one Google calendar, read through its secret
+# iCal address (tools/ical; the address: scripts/set-calendar-url.sh, never here).
+#[calendar]
+#digest = true            # the calendar block at the top of the morning digest
+#helper_timeout = 30      # seconds the calendar helper may take per read (at most 30)
+# Several calendars (up to 8), in this order. name: short, lowercase letters, digits, - or _; label: how it is shown
+# (optional). A Google calendar's address: scripts/set-calendar-url.sh <name> (the one named "calendar" is the address
+# saved without a name). With mailbox (a [[mail.accounts]] name, each once): that mailbox's Outlook calendar, read with
+# Calendars.Read only (setup_assistant.md, "Calendar (once)": an administrator grants it, or scripts/mail-login.sh again).
+#[[calendar.sources]]
+#name = "calendar"
+#label = "Family"
+#[[calendar.sources]]
+#name = "school"
+#label = "School"
+#[[calendar.sources]]
+#name = "work"
+#mailbox = "work"
+
+# Voice calls with her over Signal (needs [voice]; setup: setup_assistant.md "Calls (once)", tools/call-tunnel).
+# Off without [calls]; an empty [calls] uses the defaults below. With it the bridge runs the JVM build of signal-cli.
+# The four paths default to the build folder tools/call-tunnel/build.sh and install-signal-cli-jvm.sh use:
+# <data_dir>/vendor, where <data_dir> is ~/Library/Application Support/local-assistant
+# (LOCAL_ASSISTANT_VENDOR changes that folder when you build).
+#[calls]
+#signal_cli = "~/Library/Application Support/local-assistant/vendor/signal-cli-0.14.9-jvm/signal-cli-0.14.9/bin/signal-cli"   # default: the 0.14.9 build; else the path install-signal-cli-jvm.sh printed
+#java_home = "/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home"   # Homebrew openjdk (keg-only): write its path out in full (default: /usr/libexec/java_home, which does not find it)
+#tunnel = "~/Library/Application Support/local-assistant/vendor/signal-call-tunnel/signal-call-tunnel/target/release/signal-call-tunnel"
+#socket_dir = "~/Library/Application Support/local-assistant/calls"   # default; ~/.la-calls if a long home folder makes this too long. Set by hand: under 65 characters (Unix sockets)
+#speed = 1.05                 # Kokoro speed on calls (voice notes keep [voice] speed)
+#end_of_turn_seconds = 1.8    # a pause this long ends your turn (laid back: room to think)
+#idle_prompt_seconds = 90     # "Take your time, I'm here." after this much silence
+#idle_hangup_seconds = 600    # then goodbye
+#max_call_minutes = 60
+#summary = true               # a short summary text after a call with 2+ turns
+#fillers = false              # "hmm, let me think" lines while she thinks (off: she answers when ready)
+#acknowledge = true           # a short "Got it." once a request of 5+ words is taken in (not before a device answer)
+#answer_after_seconds = 5     # let it ring (about twice) before she answers
+
+# Web search: Ollama's free web search first, Brave's web search as the backup. Keys only in web.env (0600), written by
+# scripts/set-web-keys.sh from the login keychain. Off without [web].
+#[web]
+#country = "NL"                # Brave's search country (two letters) or ALL
+#brave_monthly_cap = 2000      # Brave searches per month (its free plan's limit); 0 = Ollama only
+
+# Places and routes: Google Places (New) + Routes; key GOOGLE_MAPS_API_KEY in web.env (scripts/set-web-keys.sh).
+# Off without [maps]. Setup: setup_assistant.md "Places and routes (once)".
+#[maps]
+#home = "Street 1, 1000 AA Town"   # private file; sent to Google to find it and for routes from/to home; "near me" searches get only a ~1 km area
+#daily_cap = 30                    # requests per API and day (Google's free monthly allowance with room to spare)
+#region = "NL"                     # two-letter region bias sent to Google; leave it out to send none
+
+# Spotify by text message (Premium; your own app's Client ID; setup: setup_assistant.md "Spotify (once)").
+# Off without [spotify]. Voice control is not allowed by Spotify, so calls and voice notes never control music.
+#[spotify]
+#client_id = "0123456789abcdef0123456789abcdef"
+#default_device = "Kitchen speaker"   # default: Spotify's active device; otherwise the first one listed
+#volume_start = 30            # a speaker that was not playing starts here
+#volume_cap = 60              # never louder than this
+#[spotify.bose]               # fixed addresses, to wake a Bose SoundTouch speaker from standby (local API, port 8090)
+#"Kitchen speaker" = "192.168.1.40"
+#"Bedroom speaker" = "192.168.1.41"

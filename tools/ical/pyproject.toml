@@ -1,0 +1,25 @@
+[project]
+name = "local-assistant-calendar"
+version = "0.1.0"
+description = "Calendar helper for local-assistant: one Google calendar per run (its iCal address), expanded in its own environment"
+requires-python = ">=3.13"
+license = "MIT"
+# icalendar 7.3.0 (BSD-2-Clause, 2026-08-19) and recurring-ical-events 3.8.2 (LGPL-3.0-or-later, 2026-04-30; with
+# x-wr-timezone, python-dateutil, tzdata, click): pure Python, parsing only, no network code of their own (checked
+# 2026-10-09). Change the pins deliberately, after reading the release notes.
+dependencies = ["icalendar==7.3.0", "recurring-ical-events==3.8.2"]
+
+[dependency-groups]
+dev = ["pytest>=8.3", "mypy>=1.13"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+files = ["helper.py", "tests"]
+
+[[tool.mypy.overrides]]
+module = ["recurring_ical_events"]  # ships no type information
+ignore_missing_imports = true

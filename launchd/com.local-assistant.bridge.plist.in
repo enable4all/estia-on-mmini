@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.local-assistant.bridge</string>
+  <!-- LaunchDaemon: starts at boot without a login, runs as @USER@ (signal-cli data and the database are in its home) -->
+  <key>UserName</key>
+  <string>@USER@</string>
+  <key>GroupName</key>
+  <string>staff</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@REPO@/.venv/bin/local-assistant</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>@HOME@</string>
+    <key>PATH</key>
+    <string>@BREW_PREFIX@/bin:/usr/bin:/bin</string>
+    <key>LANG</key>
+    <string>en_US.UTF-8</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>@REPO@</string>
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>@HOME@/Library/Logs/local-assistant/launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>@HOME@/Library/Logs/local-assistant/launchd.log</string>
+</dict>
+</plist>

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.local-assistant.voice</string>
+  <!-- LaunchDaemon: the voice service (tools/voice) on 127.0.0.1:8150, runs as @USER@ like the bridge;
+       its models and Neural Engine cache are in that home -->
+  <key>UserName</key>
+  <string>@USER@</string>
+  <key>GroupName</key>
+  <string>staff</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@REPO@/tools/voice/.build/release/voice-service</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>@HOME@</string>
+    <key>LANG</key>
+    <string>en_US.UTF-8</string>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>@REPO@/tools/voice</string>
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>@HOME@/Library/Logs/local-assistant/voice.log</string>
+  <key>StandardErrorPath</key>
+  <string>@HOME@/Library/Logs/local-assistant/voice.log</string>
+</dict>
+</plist>

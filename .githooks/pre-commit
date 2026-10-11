@@ -1,0 +1,18 @@
+#!/bin/sh
+# Privacy check of the staged files before every commit (scripts/privacy_scan.py --staged).
+# Opt in once per clone: git config core.hooksPath .githooks
+# That replaces .git/hooks. If you already have a pre-commit hook (gitleaks, say), call this file from it instead:
+#   "$(git rev-parse --show-toplevel)/.githooks/pre-commit" || exit 1
+# A finding or an error stops the commit: the scan's exit code must never be lost.
+cd "$(git rev-parse --show-toplevel)" || exit 2
+if [ -x .venv/bin/python ]; then
+  python=.venv/bin/python
+else
+  python=python3
+fi
+"$python" -I scripts/privacy_scan.py --staged
+status=$?
+if [ "$status" -ne 0 ]; then
+  echo "pre-commit: the privacy check did not pass (exit $status); nothing was committed." >&2
+  exit 1
+fi

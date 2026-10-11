@@ -1,0 +1,50 @@
+[project]
+name = "local-assistant"
+version = "0.1.0"
+description = "Estia: a private AI thinking partner living at home, on your own Mac, reached only through Signal (local model via Ollama)"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.13"
+dependencies = []
+
+[project.scripts]
+local-assistant = "local_assistant.app:main"
+
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "ASYNC"]
+# E501: the formatter handles code lines. RUF001-003: Greek text and en dashes are intended.
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+# tests poll for conditions with short sleeps on purpose, and touch small temp files directly
+"tests/**" = ["ASYNC110", "ASYNC240"]
+# the Gemma test set reads its sample photo directly
+"evals/**" = ["ASYNC240"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+files = ["src", "tests", "evals", "scripts"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.4.0",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.10",
+]

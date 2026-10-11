@@ -1,0 +1,180 @@
+diff --git a/signal-call-tunnel/src/control.rs b/signal-call-tunnel/src/control.rs
+index 583ab4b..335ae8a 100644
+--- a/signal-call-tunnel/src/control.rs
++++ b/signal-call-tunnel/src/control.rs
+@@ -29,7 +29,7 @@ pub enum ControlMessage {
+         sender_identity_key: Vec<u8>,
+         receiver_identity_key: Vec<u8>,
+     },
+-    ReceivedIce { candidates: Vec<Vec<u8>> },
++    ReceivedIce { candidates: Vec<Vec<u8>>, sender_device_id: u32 },
+     Accept,
+     Hangup,
+ }
+@@ -115,7 +115,8 @@ pub fn parse_message(line: &str) -> Result<ControlMessage> {
+             } else {
+                 Vec::new()
+             };
+-            Ok(ControlMessage::ReceivedIce { candidates })
++            let sender_device_id = v["senderDeviceId"].as_u64().unwrap_or(1) as u32;
++            Ok(ControlMessage::ReceivedIce { candidates, sender_device_id })
+         }
+         "accept" => Ok(ControlMessage::Accept),
+         "hangup" => Ok(ControlMessage::Hangup),
+diff --git a/signal-call-tunnel/src/main.rs b/signal-call-tunnel/src/main.rs
+index 24abd1c..6732b02 100644
+--- a/signal-call-tunnel/src/main.rs
++++ b/signal-call-tunnel/src/main.rs
+@@ -94,6 +94,11 @@ fn main() -> Result<()> {
+                 let device = PipeAudioDevice::new(socket_path)
+                     .context("failed to create pipe audio device")?;
+                 let audio_config = AudioConfig {
++                    // Local patch: pipe mode carries synthetic audio; no WebRTC APM on it.
++                    high_pass_filter_enabled: false,
++                    aec_enabled: false,
++                    ns_enabled: false,
++                    agc_enabled: false,
+                     audio_backend: AudioBackend::Custom(Arc::new(device)),
+                     ..Default::default()
+                 };
+@@ -277,7 +282,7 @@ fn main() -> Result<()> {
+             ControlMessage::Proceed {
+                 call_id: cid,
+                 ice_servers,
+-                hide_ip,
++                hide_ip: _,
+             } => {
+                 let call_id = CallId::from(cid);
+                 info!("Proceeding with call: call_id={}", cid);
+@@ -316,7 +321,8 @@ fn main() -> Result<()> {
+                     };
+ 
+                 let call_context = NativeCallContext::new(
+-                    hide_ip,
++                    // Local patch: relay-only ICE; signal-cli 0.14.9 always sends hideIp=false.
++                    true,
+                     ice_server_list,
+                     outgoing_audio_track,
+                     outgoing_video_track,
+@@ -411,7 +417,7 @@ fn main() -> Result<()> {
+                     error!("Failed to process received answer: {}", e);
+                 }
+             }
+-            ControlMessage::ReceivedIce { candidates } => {
++            ControlMessage::ReceivedIce { candidates, sender_device_id } => {
+                 debug!("Received {} ICE candidates", candidates.len());
+ 
+                 let ice_candidates: Vec<signaling::IceCandidate> = candidates
+@@ -423,7 +429,7 @@ fn main() -> Result<()> {
+                     ice: signaling::Ice {
+                         candidates: ice_candidates,
+                     },
+-                    sender_device_id: 1 as DeviceId,
++                    sender_device_id: sender_device_id as DeviceId,
+                 };
+ 
+                 if let Err(e) = call_manager.received_ice(
+diff --git a/signal-call-tunnel/src/pipe_audio.rs b/signal-call-tunnel/src/pipe_audio.rs
+index d9c1260..2604d09 100644
+--- a/signal-call-tunnel/src/pipe_audio.rs
++++ b/signal-call-tunnel/src/pipe_audio.rs
+@@ -144,6 +144,15 @@ impl PipeAudioDevice {
+         send_to_webrtc: &AtomicBool,
+         terminate: &AtomicBool,
+     ) {
++        // Local patch: real-time (time-constraint) scheduling for this clock thread, as CoreAudio uses for
++        // its IO threads. Without it macOS may coalesce the 10 ms sleeps to ~90 ms for background or idle
++        // processes, so most windows are dropped and the call sounds garbled.
++        promote_to_realtime();
++        let mut stat_ticks: u32 = 0;
++        let mut stat_resets: u32 = 0;
++        let mut stat_worst = Duration::ZERO;
++        let mut stat_last = Instant::now();
++
+         let tick = Duration::from_millis(WINDOW_MS);
+         let bytes_per_window = WEBRTC_WINDOW * BYTES_PER_SAMPLE;
+         // Cap buffered audio at ~80 ms each way to bound added latency.
+@@ -219,6 +228,21 @@ impl PipeAudioDevice {
+             } else {
+                 // We fell behind; reset to avoid a runaway catch-up loop.
+                 next_tick = now;
++                stat_resets += 1;
++            }
++            let woke = Instant::now();
++            stat_worst = stat_worst.max(woke - stat_last);
++            stat_last = woke;
++            stat_ticks += 1;
++            if stat_ticks == 500 {
++                info!(
++                    "pipe audio clock: 500 ticks, {} late resets, worst gap {} ms",
++                    stat_resets,
++                    stat_worst.as_millis()
++                );
++                stat_ticks = 0;
++                stat_resets = 0;
++                stat_worst = Duration::ZERO;
+             }
+         }
+     }
+@@ -272,6 +296,61 @@ fn fill_capture(stream: &mut UnixStream, buf: &mut Vec<u8>, max: usize) -> std::
+     }
+ }
+ 
++/// Local patch: ask macOS for time-constraint (real-time) scheduling for the calling thread: a 10 ms period
++/// with up to 2 ms of work per period. No privileges needed. Logs and carries on if it is refused.
++#[cfg(target_os = "macos")]
++fn promote_to_realtime() {
++    #[repr(C)]
++    struct MachTimebaseInfo {
++        numer: u32,
++        denom: u32,
++    }
++    #[repr(C)]
++    struct TimeConstraintPolicy {
++        period: u32,
++        computation: u32,
++        constraint: u32,
++        preemptible: i32,
++    }
++    unsafe extern "C" {
++        fn mach_timebase_info(info: *mut MachTimebaseInfo) -> i32;
++        fn mach_thread_self() -> u32;
++        fn thread_policy_set(thread: u32, flavor: u32, policy_info: *mut TimeConstraintPolicy, count: u32) -> i32;
++    }
++    const THREAD_TIME_CONSTRAINT_POLICY: u32 = 2;
++    const THREAD_TIME_CONSTRAINT_POLICY_COUNT: u32 = 4;
++
++    let mut timebase = MachTimebaseInfo { numer: 0, denom: 0 };
++    // SAFETY: plain Mach calls with valid pointers to stack values that outlive the calls.
++    let rc = unsafe {
++        if mach_timebase_info(&mut timebase) != 0 || timebase.numer == 0 {
++            -1
++        } else {
++            let ticks = |ns: u64| (ns * u64::from(timebase.denom) / u64::from(timebase.numer)) as u32;
++            let mut policy = TimeConstraintPolicy {
++                period: ticks(WINDOW_MS * 1_000_000),
++                computation: ticks(2_000_000),
++                constraint: ticks(WINDOW_MS * 1_000_000),
++                preemptible: 1,
++            };
++            thread_policy_set(
++                mach_thread_self(),
++                THREAD_TIME_CONSTRAINT_POLICY,
++                &mut policy,
++                THREAD_TIME_CONSTRAINT_POLICY_COUNT,
++            )
++        }
++    };
++    if rc == 0 {
++        info!("pipe audio: clock thread is real-time");
++    } else {
++        warn!("pipe audio: real-time scheduling refused ({}); timing may suffer", rc);
++    }
++}
++
++#[cfg(not(target_os = "macos"))]
++fn promote_to_realtime() {}
++
+ /// Remove and return one `WEBRTC_WINDOW`-sample window from `buf`, padding the
+ /// tail with silence when fewer than a full window of samples is buffered.
+ fn take_window(buf: &mut Vec<u8>) -> Vec<i16> {

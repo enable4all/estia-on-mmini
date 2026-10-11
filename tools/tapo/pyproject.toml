@@ -1,0 +1,21 @@
+[project]
+name = "local-assistant-devices"
+version = "0.1.0"
+description = "Device helper for local-assistant: python-kasa (Kasa and Tapo, home network only) in its own environment"
+requires-python = ">=3.13"
+license = "MIT"
+# python-kasa: GPL-3.0-or-later; reviewed 2026-10-08 (release 0.11.0.1 of 2026-10-04; aiohttp, asyncclick,
+# cryptography, mashumaro). Change the pin deliberately, after reading the release notes.
+dependencies = ["python-kasa==0.11.0.1"]
+
+[dependency-groups]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "mypy>=1.13"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["."]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+files = ["helper.py", "tests"]

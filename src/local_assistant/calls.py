@@ -1,0 +1,812 @@
+"""Voice calls with her (the assistant, by the config's name) over Signal.
+
+CallManager reads signal-cli's call events and answers only allowed callers; strangers are ignored, never rejected
+(a reject would send them something). It connects to the call helper's audio socket in a private folder and runs a
+laid-back conversation: listen (long thinking pauses are fine), transcribe, one turn through the app (the same tools
+as text), speak sentence by sentence, and let the caller talk over her. Audio lives only in memory; logs hold
+metadata only. The app is the Host: it stores the turns, runs Gemma and sends notes.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import functools
+import logging
+import os
+import random
+import re
+import time
+from collections.abc import AsyncIterator, Callable, Mapping
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Protocol
+from zoneinfo import ZoneInfo
+
+from local_assistant import prompts
+from local_assistant.call_audio import FRAME_S, RATE, CallAudio, faint_noise, pcm48_to_wav16k, wav_to_pcm48
+from local_assistant.config import DEFAULT_NAME
+from local_assistant.language import ENGLISH, INTERRUPTIONS, YES_WORDS
+from local_assistant.voice import Transcript, VoiceError, sentences, spoken_text
+
+log = logging.getLogger(__name__)
+
+LEAD_MS = 300  # faint noise before an answer: wakes the call's audio before the first word
+PAUSE_AFTER_FILLER_S = 0.35  # "Got it." … a short pause … the answer
+INTERRUPTION_END_S = 1.2  # the end of what the caller says over her (shorter than a turn: a cough resumes sooner)
+RESUME_BACK_S = 0.5  # after a cough she carries on a little before where she stopped
+MAX_FALSE_BARGE = 3
+CONNECT_SECONDS = 10.0
+NOT_READY_NOTE_SECONDS = 600.0
+
+FILLERS = {"uh", "um", "umm", "hmm", "mm", "mhm", "ah", "oh", "huh", "eh", "er"} | {
+    "äh", "ähm", "öhm", "euh", "ehm", "ehh", "eee", "yyy", "ээ", "эм", "мм", "음", "어", "えー", "えっと", "あの"
+}  # fmt: skip
+# one word alone over her that counts: "stop", "wait", a yes ... in every language (and her name: name_words)
+ONE_WORD_INTERRUPTIONS = (
+    {"stop", "wait", "no", "yes", "yeah", "okay", "ok", "hold", "sorry", "hey"}
+    | INTERRUPTIONS
+    | {word for word in YES_WORDS if " " not in word}
+)
+_WORD = re.compile(r"(?:[^\W\d_]|')+")  # letters of any script (and apostrophes): "don't", "café", "привет"
+_NO_SPACES = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]")  # Japanese is written without spaces
+_STOP = {"stop", "wait", "hold"}
+_STOP_FILL = {"on", "please", "a", "second", "sec", "minute", "moment", "ok", "okay", "just"}  # and her name
+
+
+class CallSignal(Protocol):
+    def call_events(self) -> AsyncIterator[dict[str, Any]]: ...
+
+    async def accept_call(self, aci: str, call_id: int) -> dict[str, Any]: ...
+
+    async def hangup_call(self, aci: str, call_id: int) -> None: ...
+
+
+class Voice(Protocol):
+    async def transcribe(self, audio: bytes, *, language: str | None = None) -> Transcript: ...
+
+    async def speak(self, text: str, *, language: str | None = None) -> bytes: ...
+
+    async def health(self) -> Mapping[str, object] | None: ...
+
+
+@dataclass(frozen=True)
+class Turn:
+    """What to say after the user spoke."""
+
+    text: str  # Gemma's words, in the call's language
+    reply_id: int | None = None  # the stored answer, cut where the user talked over it
+    asks_yes: bool = False  # a device waits for the user's yes: the last sentence is spoken whole
+    end_call: bool = False  # hang up once this was spoken (unless the user talked over it)
+    code_text: str = ""  # code's own words after Gemma's (a device question or result): always said in English
+
+
+class Host(Protocol):
+    def call_started(self, aci: str) -> None: ...
+
+    def call_ended(self) -> None: ...
+
+    async def call_turn(self, aci: str, text: str, on_tools: Callable[[], None]) -> Turn: ...
+
+    def call_interrupted(self, reply_id: int, heard: str) -> None: ...
+
+    async def call_drop_waiting(self, aci: str) -> None:
+        """A device action waiting for the user's yes is dropped (they never heard the question whole, said
+        stop or wait, or the answer was abandoned); a device that did switch is still reported."""
+
+    async def call_note(self, aci: str, text: str) -> None: ...
+
+    async def call_summary(self, aci: str, lines: list[str], minutes: int) -> None: ...
+
+
+@dataclass(frozen=True)
+class CallSettings:
+    socket_dir: Path
+    end_of_turn_s: float = 1.8
+    idle_prompt_s: float = 90.0
+    idle_hangup_s: float = 600.0
+    max_s: float = 3600.0
+    summary: bool = True
+    turn_timeout_s: float = 45.0
+    thinking_after_s: float = 0.7  # a thinking line comes first when the answer takes longer than this
+    fillers: bool = False  # "hmm, let me think" / "let me check" lines while she thinks (user: off, sounded unnatural)
+    acknowledge: bool = True  # a short "Got it." as soon as a request of 5+ words is taken in (user: on)
+    greetings: tuple[str, ...] = ()  # English: one of these, never the same twice in a row; () = hers by name
+    answer_after_s: float = 5.0  # let it ring about twice before answering (user: more natural)
+
+
+# Whisper writes noise as words: sound labels (*sad music*, [Music]) and, on a short sound, its favourite fillers
+# ("Thank you" is about a quarter of its output on noise). Some phrases are never said on a call at all.
+_SOUND_LABEL = re.compile(r"[*\[(♪][^*\])♪]*[*\])♪]")
+_NOISE_WORDS = frozenset({"thank you", "thank", "thanks", "you", "so", "i", "oh", "hmm", "mm", "the", "a"}) | {
+    "merci", "danke", "gracias", "grazie", "obrigado", "obrigada", "bedankt", "dank je", "dank je wel", "dziękuję",
+    "спасибо", "감사합니다", "ありがとう", "ありがとうございます", "ありがとうございました",
+}  # fmt: skip
+_NEVER_SAID = (
+    "thanks for watching",
+    "thank you for watching",
+    "please subscribe",
+    "subtitles by",
+    "like and subscribe",
+    # the same in the other languages: subtitle credits and sign-offs from Whisper's training videos
+    "tv gelderland",
+    "sous-titrage",
+    "sous-titres réalisés",
+    "продолжение следует",
+    "субтитры сделал",
+    "ご視聴",
+    "시청해 주셔서",
+    "시청해주셔서",
+)
+NEVER_SAID_MAX_WORDS = 6  # such a phrase is noise only when it is (nearly) all that was heard
+# subtitle credits nobody says on a call: noise however long the transcript ("Sous-titres réalisés par la communauté
+# d'Amara.org" has 8 words)
+_CREDITS = ("amara.org", "im auftrag des zdf", "a cura di qtss", "dimatorzok")
+NOISE_VOICED_S = 0.6  # a filler word on less sustained voice than this (key clicks are none) is noise
+# Less voiced sound than this is not sent to speech recognition at all: just above the 10-frame start run, so a brisk
+# "yes" or "no" (0.15-0.3 s of voice) still counts; is_noise_transcript sorts out the rest.
+MIN_VOICED_S = 0.12
+
+
+def is_noise_transcript(text: str, sustained_s: float) -> bool:
+    """Whether a transcript is noise Whisper turned into words, in any language: only sound labels, a subtitle credit,
+    a short transcript that is a phrase never said on a call (inside a longer sentence it is real), or a lone filler
+    word on little sustained voice (`listen`'s sustained_s: typing is loud often, never for long). A short real answer
+    ("yes", "stop") is never noise."""
+    heard = " ".join(_SOUND_LABEL.sub(" ", text.lower()).split())
+    found = _WORD.findall(heard)  # words in any language ("Привет" is words, "*music*" is none)
+    if not found:
+        return True
+    words = " ".join(found)
+    if any(credit in heard for credit in _CREDITS):
+        return True
+    if len(found) <= NEVER_SAID_MAX_WORDS and any(phrase in heard or phrase in words for phrase in _NEVER_SAID):
+        return True
+    return words in _NOISE_WORDS and sustained_s < NOISE_VOICED_S
+
+
+def real_words(text: str) -> list[str]:
+    """The words of a transcript, in any language, without fillers ("um", "äh") and without Whisper's sound labels
+    ("*sad music*" is no word)."""
+    return [word for word in _WORD.findall(_SOUND_LABEL.sub(" ", text.lower())) if word not in FILLERS]
+
+
+ACK_MIN_WORDS = 5  # a shorter turn ("how are you?", "yes", "thanks") gets its answer without a "got it" (owner)
+
+
+def turn_words(text: str) -> int:
+    """How many words the caller said: fillers and sound labels left out; Japanese, written without spaces, counts
+    about two characters a word."""
+    return sum(max(1, len(word) // 2) if _NO_SPACES.search(word) else 1 for word in real_words(text))
+
+
+@functools.cache
+def name_words(name: str) -> frozenset[str]:
+    """Her name as a transcript's words: "Mary-Jane" is "mary" and "jane"."""
+    return frozenset(real_words(name))
+
+
+def is_interruption(text: str, *, name: str) -> bool:
+    """Talking over her counts only with real words: two or more, or one clear word like "stop" or her name (in any
+    of the languages; Japanese, without spaces, counts its characters). A cough, a noise or "um" transcribes as
+    nothing, "-" or a filler, and she carries on."""
+    words = real_words(text)
+    units = sum(len(word) if _NO_SPACES.search(word) else 1 for word in words)
+    return units >= 2 or (len(words) == 1 and words[0] in ONE_WORD_INTERRUPTIONS | name_words(name))
+
+
+def is_lone_stop(text: str, *, name: str) -> bool:
+    """ "Stop", "wait", "hold on", "wait a second", "stop Estia": she goes quiet and listens; Gemma is not asked."""
+    words = real_words(text)
+    return (
+        bool(words)
+        and len(words) <= 3 + len(name_words(name))  # four words, a longer name counted as one
+        and any(w in _STOP for w in words)
+        and all(w in _STOP | _STOP_FILL | name_words(name) for w in words)
+    )
+
+
+_LAST_SENTENCE_END = re.compile(r"""[.!?…]["')\]]*(?=\s)""")
+
+
+def whole_sentences(text: str) -> str:
+    """An answer that was cut off at the token limit ends at its last whole sentence (she never stops mid-sentence);
+    an answer that ends properly, or has no sentence end at all, stays as it is."""
+    stripped = text.rstrip()
+    if not stripped or stripped[-1] in ".!?…\"')]":
+        return stripped
+    ends = list(_LAST_SENTENCE_END.finditer(stripped))
+    return stripped[: ends[-1].end()] if ends else stripped
+
+
+def speakable(note: str) -> str:
+    """A device note said aloud: "Devices: heater off" becomes "Done: heater off."."""
+    if note.startswith("Devices: "):
+        return "Done: " + note.removeprefix("Devices: ").replace(" · ", ", ").rstrip(".") + "."
+    return note
+
+
+@functools.cache
+def _goodbye(name: str) -> re.Pattern[str]:
+    """A plain goodbye, maybe with her name after it."""
+    return re.compile(
+        r"^(?:(?:ok|okay|alright|right|well|thanks|thank you|great|cool|so)\s+)*"
+        r"(?:bye(?: bye)*|goodbye|bye for now|talk (?:to you )?(?:later|soon)|see you(?: later| soon)?|hang up)"
+        rf"(?:\s+(?:{re.escape(' '.join(real_words(name)))}|then|now|for now))*$"
+    )
+
+
+_WRAP_UP = re.compile(
+    r"\b(?:that (?:will|'ll|should|would) do(?: it)?|that'?s? (?:is )?(?:all|it|everything|enough)(?: for (?:now|today))?"
+    r"|that is (?:all|it|everything)|nothing (?:else|more)|no more questions|i'?m done|we'?re done)\b"
+)
+
+
+def is_wrap_up(text: str) -> bool:
+    """A short "that will do for now" / "that's all" / "nothing else": the user is finishing. After such a turn the
+    call ends once her answer is spoken, unless the answer asks something ("I'm good" is not one: it also answers
+    "how are you?"). Longer turns that only contain such words ("that's all I know, what do you think?") are not."""
+    words = re.findall(r"[a-z']+", text.lower())
+    if not words or len(words) > 8 or "?" in text:
+        return False
+    return bool(_WRAP_UP.search(" ".join(words)))
+
+
+_HANG_UP = re.compile(
+    r"\b(?:shall we|should we|let'?s|you can|you may|please|can you|could you|go ahead and|ok|okay)\s+hang\s+up\b"
+)
+
+
+def wants_hang_up(text: str) -> bool:
+    """The user asks her to end the call ("shall we hang up?", "you can hang up now"): she answers, then hangs up,
+    even when her answer asks something."""
+    return bool(_HANG_UP.search(" ".join(re.findall(r"[a-z']+", text.lower()))))
+
+
+def is_goodbye(text: str, *, name: str) -> bool:
+    """A plain goodbye ("okay bye bye", "talk to you later", "goodbye Estia"): she says bye and hangs up without
+    asking Gemma. Anything subtler ("that's all for today, thanks") goes to Gemma, which can end the call too."""
+    return bool(_goodbye(name).match(" ".join(real_words(text))))
+
+
+def _parts(text: str) -> list[str]:
+    """Text to speak on a call, sentence by sentence (even a one-word answer)."""
+    return sentences(spoken_text(text, min_chars=1, rest="")) or ([text.strip()] if text.strip() else [])
+
+
+def socket_path(accepted: dict[str, Any], connected: dict[str, Any], folder: Path, call_id: int) -> Path:
+    """The call helper's audio socket: the "unix:<path>" it reported, else its documented name (the call id as an
+    unsigned number). It must lie in our private folder (ValueError otherwise)."""
+    for source in (accepted, connected):
+        for key in ("inputDeviceName", "outputDeviceName"):
+            value = source.get(key)
+            if isinstance(value, str) and value.startswith("unix:"):
+                path = Path(value.removeprefix("unix:"))
+                if not path.is_absolute() or path.parent.resolve() != folder.resolve():
+                    raise ValueError("the call's audio socket is outside the private folder")
+                return path
+    return folder / f"signal-call-{call_id & 0xFFFFFFFFFFFFFFFF}.sock"
+
+
+class _Ended(Exception):
+    """The call ended (hung up, timed out or signal-cli restarted)."""
+
+
+@dataclass
+class _Call:
+    aci: str
+    call_id: int
+    started: float
+    started_wall: float
+    language: str  # a whole call is in one language (/language waits until it ends)
+    spoken: prompts.CallLines  # her code-written lines in that language
+    events: asyncio.Queue[dict[str, Any]] = field(default_factory=asyncio.Queue)
+    ended: asyncio.Event = field(default_factory=asyncio.Event)
+    lines: list[str] = field(default_factory=list)
+    user_turns: int = 0
+    dropped: bool = False
+    unfinished: bool = False  # the call ended while an answer was still being worked on
+
+
+class CallManager:
+    def __init__(
+        self,
+        signal: CallSignal,
+        voice: Voice,
+        host: Host,
+        allowed: frozenset[str],
+        settings: CallSettings,
+        *,
+        tz: ZoneInfo | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        wall: Callable[[], float] = time.time,
+        rng: random.Random | None = None,
+        language: str = ENGLISH,
+        name: str = DEFAULT_NAME,
+    ) -> None:
+        self._signal = signal
+        self._voice = voice
+        self._host = host
+        self._allowed = frozenset(aci.lower() for aci in allowed)
+        self.settings = settings
+        self._tz = tz
+        self._clock = clock
+        self._wall = wall
+        self._rng = rng or random.Random()
+        self.language = language  # the next call's language (/language sets it)
+        self.name = name  # hers: greetings, "stop <name>", the summary's transcript
+        self._last_line = ""
+        self._last_greeting = ""  # kept apart: one greeting per call, and the next call's must differ
+        self._call: _Call | None = None
+        self._task: asyncio.Task[None] | None = None
+        self._audio: CallAudio | None = None
+        self._clips: dict[tuple[str, str], bytes] = {}  # canned lines at 48 kHz by (language, text) (no user data)
+        self._last: tuple[float, int] | None = None  # the last call: wall start, minutes
+        self._not_ready_at: float | None = None
+        self.saying = ""  # the clip being spoken now
+        self.said: list[str] = []  # clips finished (played whole or cut off), latest last; the newest 20 kept
+
+    @property
+    def in_call(self) -> bool:
+        return self._call is not None
+
+    @property
+    def speaking(self) -> bool:
+        return self._audio is not None and self._audio.speaking.is_set()
+
+    def status_line(self) -> str:
+        if self._call is not None:
+            return f"Calls: in a call since {self._hhmm(self._call.started_wall)}"
+        if self._last is not None:
+            return f"Calls: ready (last call {self._hhmm(self._last[0])}, {self._last[1]} min)"
+        return "Calls: ready"
+
+    def _hhmm(self, stamp: float) -> str:
+        return datetime.fromtimestamp(stamp, self._tz).strftime("%H:%M")
+
+    async def run_forever(self) -> None:
+        folder = self.settings.socket_dir
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(folder, 0o700)
+        for stale in folder.glob("signal-call-*.sock"):
+            stale.unlink(missing_ok=True)
+        async for event in self._signal.call_events():
+            try:
+                await self._on_event(event)
+            except Exception:
+                log.exception("calls: a call event failed")
+
+    async def hangup(self) -> None:
+        """Hang up a running call (the bridge is stopping)."""
+        call = self._call
+        if call is not None and not call.ended.is_set():
+            with contextlib.suppress(Exception):
+                await self._signal.hangup_call(call.aci, call.call_id)
+
+    async def _on_event(self, event: dict[str, Any]) -> None:
+        state = event.get("state")
+        call_id = event.get("callId")
+        call = self._call
+        if call is not None and (call_id == call.call_id or (call_id is None and state == "ENDED")):
+            call.events.put_nowait(event)
+            return
+        if state != "RINGING_INCOMING" or not isinstance(call_id, int):
+            return
+        aci = str(event.get("uuid") or "").lower()
+        if aci not in self._allowed:
+            log.info("calls: a call from an account that is not allowed was ignored")
+            return
+        if call is not None:
+            log.info("calls: a second call was ignored")
+            return
+        if not await self._voice_ready():
+            await self._not_ready(aci)
+            return
+        language = self.language
+        lines = prompts.call_lines(language, name=self.name)
+        self._call = _Call(aci, call_id, self._clock(), self._wall(), language, lines)
+        self._task = asyncio.create_task(self._run_call(self._call), name="call")
+
+    async def _rings_out(self, call: _Call) -> bool:
+        """Let it ring (about twice) before answering; True when the caller hung up meanwhile."""
+        deadline = self._clock() + self.settings.answer_after_s
+        while (left := deadline - self._clock()) > 0:
+            try:
+                event = await asyncio.wait_for(call.events.get(), left)
+            except TimeoutError:
+                return False
+            if event.get("state") == "ENDED":
+                log.info("calls: the caller hung up while it rang")
+                call.ended.set()
+                return True
+        return False
+
+    async def _voice_ready(self) -> bool:
+        health = await self._voice.health()
+        return health is not None and health.get("stt") == "ready" and health.get("tts") == "ready"
+
+    async def _not_ready(self, aci: str) -> None:
+        now = self._clock()
+        if self._not_ready_at is not None and now - self._not_ready_at < NOT_READY_NOTE_SECONDS:
+            return
+        self._not_ready_at = now
+        log.info("calls: a call rang while the voice service was not ready")
+        await self._host.call_note(aci, prompts.CALL_NOT_READY)
+
+    async def _run_call(self, call: _Call) -> None:
+        self._host.call_started(call.aci)
+        log.info("calls: answering")
+        audio: CallAudio | None = None
+        tasks: list[asyncio.Task[Any]] = []
+        path: Path | None = None
+        try:
+            if await self._rings_out(call):
+                return
+            accepted = await self._signal.accept_call(call.aci, call.call_id)
+            connected = await self._wait_connected(call)
+            path = socket_path(accepted, connected, self.settings.socket_dir, call.call_id)
+            reader, writer = await self._connect(path)
+            audio = CallAudio(reader, writer)
+            self._audio = audio
+            tasks = [asyncio.create_task(audio.pump()), asyncio.create_task(self._watch(call, audio))]
+            await asyncio.wait_for(audio.started.wait(), CONNECT_SECONDS)
+            await self._converse(call, audio)
+        except (_Ended, ConnectionError) as exc:
+            if not call.ended.is_set():
+                call.dropped = True
+                log.warning("calls: the call's audio ended (%s)", type(exc).__name__)
+        except VoiceError:
+            call.dropped = True
+            log.warning("calls: the voice service failed during the call")
+        except Exception:
+            call.dropped = True
+            log.exception("calls: the call failed")
+        finally:
+            for task in tasks:
+                task.cancel()
+            if audio is not None:
+                audio.close()
+            if not call.ended.is_set():
+                with contextlib.suppress(Exception):
+                    await self._signal.hangup_call(call.aci, call.call_id)
+            if path is not None:
+                path.unlink(missing_ok=True)
+            minutes = max(1, round((self._clock() - call.started) / 60))
+            self._audio = None
+            self._call = None
+            self.saying = ""
+            self._last = (call.started_wall, minutes)
+            self._host.call_ended()
+            log.info("calls: ended after %d min, %d turns", minutes, call.user_turns)
+            await self._after(call, minutes)
+
+    async def _after(self, call: _Call, minutes: int) -> None:
+        with contextlib.suppress(Exception):
+            if call.dropped:
+                await self._host.call_note(call.aci, prompts.CALL_DROPPED)
+            if call.unfinished:  # the caller may think it was done: say it was not
+                await self._host.call_note(call.aci, prompts.CALL_UNFINISHED)
+            if self.settings.summary and call.user_turns >= 2:
+                await self._host.call_summary(call.aci, call.lines, minutes)
+
+    async def _wait_connected(self, call: _Call) -> dict[str, Any]:
+        async with asyncio.timeout(30):
+            while True:
+                event = await call.events.get()
+                if event.get("state") == "CONNECTED":
+                    return event
+                if event.get("state") == "ENDED":
+                    call.ended.set()
+                    raise _Ended(str(event.get("reason")))
+
+    async def _connect(self, path: Path) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        deadline = self._clock() + CONNECT_SECONDS
+        while True:
+            try:
+                return await asyncio.open_unix_connection(str(path))
+            except (FileNotFoundError, ConnectionRefusedError):
+                if self._clock() >= deadline:
+                    raise
+                await asyncio.sleep(0.1)
+
+    async def _watch(self, call: _Call, audio: CallAudio) -> None:
+        while True:
+            event = await call.events.get()
+            if event.get("state") == "ENDED":
+                reason = str(event.get("reason") or "signal-cli")
+                log.info("calls: ended by %s", reason)
+                if reason.startswith("tunnel") or reason == "signal_cli_restarted":
+                    call.dropped = True  # the user gets the "dropped on my side" note
+                call.ended.set()
+                audio.stop_speaking()
+                audio.close()
+                return
+
+    async def _converse(self, call: _Call, audio: CallAudio) -> None:
+        s = self.settings
+        lines = call.spoken
+        greetings = (s.greetings or lines.greetings) if call.language == ENGLISH else lines.greetings
+        self._last_greeting = greeting = self._pick(greetings, last=self._last_greeting)
+        pending = await self._say_line(audio, greeting, call.language, barge=True)
+        prompted = False
+        question_waiting = False  # her last answer asked for a device's yes, and it was heard whole
+        hearing_trouble = 0
+        while not call.ended.is_set():
+            left = s.max_s - audio.frames_in * FRAME_S  # call time, like the idle timers
+            if left <= 0:
+                await self._say_line(audio, prompts.CALL_MAX_BYE, ENGLISH)
+                return
+            cutting_in = pending is not None
+            if pending is None:
+                wait = s.idle_prompt_s if not prompted else max(1.0, s.idle_hangup_s - s.idle_prompt_s)
+                clip, info = await audio.listen(end_silence_s=s.end_of_turn_s, no_speech_s=min(wait, left))
+                if not clip:
+                    next_step = "listening on" if wait > left else "goodbye" if prompted else "checking in"
+                    # the line's levels (metadata): a caller too quiet to start an utterance shows up here
+                    log.info(
+                        "calls: no speech in %.0f s (floor %s, peak %s); %s",
+                        min(wait, left),
+                        info.get("floor"),
+                        info.get("peak"),
+                        next_step,
+                    )
+                    if wait > left:  # the length cap, not silence
+                        continue
+                    if not prompted:
+                        prompted = True
+                        await self._say_line(audio, lines.idle, call.language)
+                        continue
+                    await self._say_line(audio, prompts.CALL_IDLE_BYE, ENGLISH)
+                    return
+                prompted = False
+                voiced_s = float(info.get("voiced_s", 99.0))
+                if voiced_s < MIN_VOICED_S:  # a click or a bump: not worth asking speech recognition
+                    log.info(
+                        "calls: noise (voiced %.2f s, peak %s, floor %s); listening on",
+                        voiced_s,
+                        info.get("peak"),
+                        info.get("floor"),
+                    )
+                    continue
+                try:
+                    text = (await self._voice.transcribe(pcm48_to_wav16k(clip), language=call.language)).text
+                except VoiceError:
+                    hearing_trouble += 1
+                    if hearing_trouble >= 2:
+                        raise
+                    await self._say_line(audio, lines.hearing, call.language)
+                    continue
+                hearing_trouble = 0
+                sustained_s = float(info.get("sustained_s", voiced_s))
+                log.info(
+                    "calls: heard %d words (speech %.1f s, voiced %.2f s, sustained %.2f s, peak %s, floor %s)",
+                    len(text.split()),
+                    float(info.get("speech_s", 0.0)),
+                    voiced_s,
+                    sustained_s,
+                    info.get("peak"),
+                    info.get("floor"),
+                )
+                if is_noise_transcript(text, sustained_s):  # typing or noise heard as "thank" or "*music*": silence
+                    log.info("calls: noise heard as words; listening on")
+                    continue
+            else:
+                text, pending = pending, None
+            if not real_words(text):  # a cough, a noise, a breath: she just keeps listening (no "sorry?")
+                log.info("calls: a sound without words; listening on")
+                continue
+            if is_lone_stop(text, name=self.name):
+                await self._host.call_drop_waiting(call.aci)  # like any answer but yes, a stop drops the question
+                question_waiting = False
+                continue  # quiet, listening
+            if is_goodbye(text, name=self.name):
+                call.lines.append(f"User: {text}")
+                await self._say_line(audio, self._pick(lines.bye), call.language)
+                return  # hung up in _run_call
+            call.lines.append(f"User: {text}")
+            call.user_turns += 1
+            said = f"{prompts.CUTTING_IN} {text}" if cutting_in else text
+            # a "got it" only for a request: never before the answer to a device question (it comes at once, and a
+            # sound must not seem a yes), never after a few words ("how are you?" needs no "got it")
+            acknowledge = s.acknowledge and not question_waiting and turn_words(text) >= ACK_MIN_WORDS
+            turn = await self._turn(call, audio, said, acknowledge=acknowledge)
+            interruption, heard = await self._speak(call, audio, turn, last_whole=turn.asks_yes)
+            call.lines.append(f"{self.name}: {heard}")
+            question_waiting = turn.asks_yes and interruption is None
+            if interruption is not None:
+                if turn.reply_id is not None:
+                    self._host.call_interrupted(turn.reply_id, heard)
+                if turn.asks_yes:  # cut off before the question was asked whole: no yes may act on it
+                    await self._host.call_drop_waiting(call.aci)
+                pending = interruption
+            elif (
+                turn.end_call
+                or wants_hang_up(text)
+                or (is_wrap_up(text) and not f"{turn.text} {turn.code_text}".rstrip().endswith("?"))
+            ):
+                return  # she said goodbye (or answered the user's wrap-up) whole: hung up in _run_call
+
+    async def _turn(self, call: _Call, audio: CallAudio, text: str, *, acknowledge: bool) -> Turn:
+        """The app's answer. A short "Got it." first when `acknowledge` (the request was taken in). A varied
+        thinking line when the answer takes a moment after that (then a short pause before the answer), a "let me
+        check" line when a tool runs (each at most once). An answer that takes too long, outlives the call or is
+        left by an error is cancelled (never left running beside the next turn or after the call) and any device
+        question it raised is dropped; when the call ended meanwhile, the user gets a note that it was not done."""
+        s = self.settings
+        tools = asyncio.Event()
+        task = asyncio.create_task(self._host.call_turn(call.aci, text, tools.set))
+        ended = asyncio.create_task(call.ended.wait())
+        thought = checked = not s.fillers  # without fillers she simply answers when the answer is ready
+        line_end: float | None = None
+        started = think_from = self._clock()
+        lines = call.spoken
+        try:
+            if acknowledge:  # "Got it." while the answer is already being worked on: the request was taken in
+                await self._say_line(audio, self._pick(lines.acknowledge), call.language)
+                line_end = think_from = self._clock()  # a thinking line only after a real wait beyond it
+            while not task.done():
+                now = self._clock()
+                if now - started >= s.turn_timeout_s:
+                    log.warning("calls: an answer took over %.0f s", s.turn_timeout_s)
+                    await self._abandon(call, task)
+                    return Turn(lines.lost)
+                check = tools.is_set() and not checked
+                think = not thought and not checked and now - think_from >= s.thinking_after_s
+                if check or think:
+                    checked = checked or check
+                    thought = True
+                    line = self._pick(lines.checking if check else lines.thinking)
+                    await self._say_line(audio, line, call.language)
+                    line_end = self._clock()
+                    continue
+                waits: set[asyncio.Future[Any]] = {task, ended}
+                waiter: asyncio.Task[bool] | None = None
+                if not checked and not tools.is_set():
+                    waiter = asyncio.create_task(tools.wait())
+                    waits.add(waiter)
+                limit = started + s.turn_timeout_s - now if thought else think_from + s.thinking_after_s - now
+                await asyncio.wait(waits, timeout=max(0.0, limit), return_when=asyncio.FIRST_COMPLETED)
+                if waiter is not None:
+                    waiter.cancel()
+                if task.done():
+                    break
+                if call.ended.is_set():
+                    raise _Ended("ended while answering")
+        except BaseException:  # the call ended, the voice failed, or the call is being stopped
+            if not task.done():
+                call.unfinished = True
+                await self._abandon(call, task)
+            raise
+        finally:
+            ended.cancel()
+        if line_end is not None:
+            gap = PAUSE_AFTER_FILLER_S - (self._clock() - line_end)
+            if gap > 0:
+                await asyncio.sleep(gap)
+        try:
+            return task.result()
+        except Exception:
+            log.exception("calls: the answer failed")
+            await self._host.call_drop_waiting(call.aci)
+            return Turn(lines.lost)
+
+    def _pick(self, lines: tuple[str, ...], *, last: str | None = None) -> str:
+        """A line from `lines`, never the one said last (or never `last`, for lines with their own memory)."""
+        avoid = self._last_line if last is None else last
+        choices = [line for line in lines if line != avoid] or list(lines)
+        picked = self._rng.choice(choices)
+        if last is None:
+            self._last_line = picked
+        return picked
+
+    async def _abandon(self, call: _Call, task: asyncio.Task[Turn]) -> None:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+        await self._host.call_drop_waiting(call.aci)
+
+    async def _clip(self, text: str, language: str) -> bytes:
+        clip = self._clips.get((language, text))
+        if clip is None:
+            clip = wav_to_pcm48(await self._voice.speak(text, language=language))
+            if len(self._clips) < 32:
+                self._clips[(language, text)] = clip
+        return clip
+
+    async def _say_line(self, audio: CallAudio, text: str, language: str, *, barge: bool = False) -> str | None:
+        """A code-written line in `language`, spoken whole; with barge-in it returns what the caller said over it."""
+        self.saying = text
+        result = await self._say_checked(audio, faint_noise(LEAD_MS) + await self._clip(text, language), barge)
+        self._done(text)
+        return result[0] if result else None
+
+    def _done(self, text: str) -> None:
+        self.said = [*self.said[-19:], text]
+        self.saying = ""
+
+    async def _speak(self, call: _Call, audio: CallAudio, turn: Turn, *, last_whole: bool) -> tuple[str | None, str]:
+        """Gemma's answer sentence by sentence (the next one is made while one plays), then code's own words: in
+        English, so a device question is always clear (on an English call they simply follow). On a call in another
+        language a turn that waits for a device's yes says only code's question: Gemma's words about the device are
+        left out (in Dutch it claimed a switch that was still waiting for the yes); they are stored as usual. Returns
+        what the caller said over it (or None) and what they heard of it."""
+        if call.language == ENGLISH:
+            spoken = [(_parts(f"{turn.text} {turn.code_text}"), ENGLISH)]
+        elif turn.asks_yes and turn.code_text.strip():
+            spoken = [(_parts(turn.code_text), ENGLISH)]
+        else:
+            spoken = [(_parts(turn.text), call.language), (_parts(turn.code_text), ENGLISH)]
+        said = [(part, language) for parts_, language in spoken for part in parts_]
+        parts = [part for part, _ in said]
+        if not parts:
+            return None, ""
+        clips: asyncio.Queue[bytes | VoiceError] = asyncio.Queue(maxsize=1)
+
+        async def produce() -> None:
+            for part, language in said:
+                try:
+                    await clips.put(wav_to_pcm48(await self._voice.speak(part, language=language)))
+                except VoiceError as exc:
+                    await clips.put(exc)
+                    return
+                except Exception as exc:  # e.g. a body that is not a WAV: the call must not wait forever
+                    await clips.put(VoiceError(f"speech failed: {type(exc).__name__}"))
+                    return
+
+        producer = asyncio.create_task(produce())
+        try:
+            for index, part in enumerate(parts):
+                item = await self._next_clip(clips, audio)
+                if isinstance(item, VoiceError):
+                    raise item
+                self.saying = part
+                lead = faint_noise(LEAD_MS) if index == 0 else b""
+                whole = last_whole and index == len(parts) - 1
+                result = await self._say_checked(audio, lead + item, barge=not whole, fresh=index == 0)
+                self._done(part)
+                if result is not None:
+                    text, fraction = result
+                    cut = part[: int(len(part) * fraction)].rsplit(" ", 1)[0] if fraction < 1 else part
+                    heard = " ".join([*parts[:index], cut]).strip()
+                    return text, f"{heard} …".strip()
+            return None, " ".join(parts)
+        finally:
+            producer.cancel()
+            self.saying = ""
+
+    @staticmethod
+    async def _next_clip(clips: asyncio.Queue[bytes | VoiceError], audio: CallAudio) -> bytes | VoiceError:
+        while True:
+            try:
+                return await asyncio.wait_for(clips.get(), 1.0)
+            except TimeoutError:
+                if audio.closed.is_set():
+                    raise ConnectionError("the call's audio ended") from None
+
+    async def _say_checked(
+        self, audio: CallAudio, pcm: bytes, barge: bool, *, fresh: bool = True
+    ) -> tuple[str, float] | None:
+        """Say `pcm`; when the caller talks over it, listen and check the words: an interruption returns
+        (what they said, how much of the clip went out); a cough or a noise resumes a little before the stop."""
+        offset = 0
+        false_alarms = 0
+        while True:
+            said = await audio.say(pcm[offset:], barge=barge, fresh=fresh and offset == 0 and false_alarms == 0)
+            if not said.barged:
+                return None
+            stop = offset + 2 * int(said.played_s * RATE)
+            clip, info = await audio.listen(
+                preroll=said.preroll, floor=said.floor, end_silence_s=INTERRUPTION_END_S, max_s=60.0
+            )
+            try:
+                language = self._call.language if self._call is not None else self.language
+                text = (await self._voice.transcribe(pcm48_to_wav16k(clip), language=language)).text if clip else ""
+            except VoiceError:
+                text = ""
+            noise = is_noise_transcript(text, float(info.get("sustained_s", 0.0)))  # typing heard as "*music*"
+            if (not noise and is_interruption(text, name=self.name)) or false_alarms >= MAX_FALSE_BARGE:
+                return ("" if noise else text), min(1.0, stop / max(1, len(pcm)))  # noise never reaches Gemma
+            false_alarms += 1
+            log.info("calls: a sound without words; carrying on")
+            offset = max(0, stop - 2 * int(RESUME_BACK_S * RATE))
