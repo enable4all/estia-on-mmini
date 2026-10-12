@@ -68,7 +68,7 @@ Gmail is not built in; [setup_assistant.md, "Gmail (not built in)"](setup_assist
 
 ### Music and saved lists
 
-Built, not live yet. Music needs a Spotify Premium account and a Spotify developer app (see `setup_assistant.md`, "Spotify (once)"), and it hasn't been tested against the real Spotify so far.
+Music needs a Spotify Premium account and a Spotify developer app (see `setup_assistant.md`, "Spotify (once)").
 
 Music works by text message only, because Spotify's rules don't allow voice control. Calls and voice notes won't start it. Try "play some jazz", "play my liked songs on <speaker>", "next", "pause", "louder" or "what's playing?".
 
@@ -398,7 +398,6 @@ Keys and sign-ins go through these scripts, never through chat and never into th
 - Terminal chat: talk to her from a terminal on the Mac.
 - Agent bridge: next after terminal chat.
 - Richer memory (a proposal, not built): profile sections with dates, `/undo`, a monthly review of what was learned, a small knowledge base from a folder of your notes, and searchable chat and call summaries. Live so far: the personality file, and profile facts sorted into categories (Family, Work, Music and so on).
-- Spotify: a first live test against a real Spotify Premium account and app.
 - Backups: the database and Signal's data aren't backed up yet.
 
 ## Good to know
