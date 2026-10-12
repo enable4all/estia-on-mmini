@@ -25,7 +25,7 @@ Or open the folder in your AI coding assistant (Claude Code, Codex, ...) and say
 
 Not affiliated with Signal, Spotify, Google, Microsoft, Bose or TP-Link.
 
-Contents: [Meet Estia](#meet-estia) · [What she can do](#what-she-can-do) · [Languages](#languages) · [A few conversations](#a-few-conversations) · [Safe and private](#safe-and-private-in-plain-words) · [What runs where](#what-runs-where) · [Words used here](#words-used-here) · [When something is off](#when-something-is-off) · [Slash commands](#slash-commands) · [Requirements](#requirements) · [Set it up](#set-it-up) · [Tests and checks](#tests-and-checks) · [Built with](#built-with) · [What's next](#whats-next) · [Good to know](#good-to-know) · [For developers](#for-developers) · [License](#license)
+Contents: [Meet Estia](#meet-estia) · [What she can do](#what-she-can-do) · [Reminders](#reminders-and-wake-up-calls) · [Messages she starts](#messages-she-starts-herself) · [Languages](#languages) · [A few conversations](#a-few-conversations) · [Safe and private](#safe-and-private-in-plain-words) · [What runs where](#what-runs-where) · [Words used here](#words-used-here) · [When something is off](#when-something-is-off) · [Slash commands](#slash-commands) · [Requirements](#requirements) · [Set it up](#set-it-up) · [Tests and checks](#tests-and-checks) · [Built with](#built-with) · [What's next](#whats-next) · [Good to know](#good-to-know) · [For developers](#for-developers) · [License](#license)
 
 ## Meet Estia
 
@@ -43,6 +43,9 @@ You'll find her in Signal, where her profile reads Estia (AI), or the name you g
 | Calendar | "What's on Friday?" | That day's events from each of your calendars, with times and places |
 | Mail | "What needs my reply?" | Unanswered mail from the last week, numbered. "Read 2" opens one. |
 | Morning digest | Nothing, it comes at 09:15 on its own | Today's calendar, tomorrow in one line, then the mail that needs you |
+| Reminders | "Remind me at 17:00 to call the dentist" · `/remind 20m pizza` | A text at that time, once or every day, weekday or week. Only the code's note "Reminder set (#N)" means one is set; `/reminders` lists and cancels them |
+| Wake-up calls | "Call me at 7:00 to wake me up" | A text, then a Signal call at that time (once calls are set up), and one more try two minutes later if you don't answer |
+| Messages she starts | `/initiative on` (off until you turn it on), then nothing: now and then she writes first | A check-in on something you said you'd do, a calendar change or an early start tomorrow, a Sunday look back, a spontaneous note about once a week. At most one a day, never at night; `/quiet` pauses them, `/initiative off` stops them |
 | Music | "Play some jazz" | Spotify on your speakers (once set up) |
 | Saved lists | "What should we play next?" | Ideas from a list you saved (songs, books, recipes) |
 | Chords | "What are the chords of Spooky?" | Chords, key and tempo from a chord site, with a Sources message |
@@ -111,6 +114,31 @@ Without `soul.md` she has her built-in style: warm, curious and playful. Your ow
 Call her and, after about two rings, she picks up with a greeting. You can think aloud: she waits for about two seconds of quiet before she takes her turn, and you can interrupt her at any time. When she has taken in a request she says a short "Got it." (not after a few words such as "how are you?"; `acknowledge = false` in `[calls]` turns it off), then answers when her answer is ready (`fillers = true` adds a "let me think" line when it takes a while). Typing near the phone and other short noises are ignored, but a quick "yes" or "stop" counts. If you hang up before she answers, she stops and texts you that it was not done. By default she checks in after 90 seconds of silence and says goodbye after ten minutes. When you wrap up ("that will do for now", "that's all"), she says goodbye and hangs up. After a call with two or more turns, she texts you a short summary.
 
 Lights and plugs work on calls too. A yes to a device question only counts once she has finished asking it, so a yes said over her question is ignored.
+
+### Reminders and wake-up calls
+
+Ask in your own words ("remind me tomorrow at 7 to call mum", "in 20 minutes, the pizza", "every weekday at 8, the pills") or type `/remind 17:00 call the dentist`, which works even when the model is busy.
+
+**A reminder is set only when the code's note says so.** That note is a separate message: "Reminder set (#12): Tue 13 Oct 07:00 · …", with exactly when, so a misheard time in a voice note shows at once. The first one you get adds "Only this note means a reminder is set.", and the welcome and `/help` say it too. Whatever she says herself is not the proof. If one could not be set, the code says so and why, in any language: whatever she wrote about the reminder, a wake-up or a call is left out of her answer, the rest stays, and the code's line follows it ("No reminder was set: that time has passed."), so an "it's set" never reaches you. When she says she set one and none was, a note often adds "No reminder was set", but only the "Reminder set" note counts. `/reminders` lists them, with the times, and `/reminders cancel N` removes one.
+
+At that time a short text arrives: "Reminder: call the dentist". Reminders come at night too and are never paused, because you set them. Repeating ones keep their time across summer and winter time. If the Mac was off at that moment, one note after the restart lists what was missed, marked late.
+
+Add "call me" and she texts first, then calls you on Signal (with `[calls]` set up): "Good morning! It's 7:00." If you don't pick up, she tries once more two minutes later; if you decline, she leaves it, and a message from you ("I'm up") cancels the second try. A call is never placed more than five minutes late. At most three calls a day. Without calls set up, "call me" brings the text, and a second one two minutes later unless you wrote.
+
+Only your own words make a reminder: never a mail, a calendar entry, a web page, a file, a photo or a shared audio file, and an event in your calendar is not a reminder unless you ask for one.
+
+**For anything that matters, keep your phone's own alarm.** Estia runs on one Mac: a power cut, an update, a crash or a Signal problem means no reminder and no call. Your phone's Focus or Sleep mode may also silence her call unless you allow her contact. The wake-up call is a friendly extra.
+
+### Messages she starts herself
+
+Now and then she writes first, once you let her: type `/initiative on` in Signal (or set `[initiative] enabled = true` in the config). It is off until you do, and `/initiative off` turns it off again. Four kinds, each on or off in the config:
+
+- **A check-in on something you said.** "I'll call the dentist tomorrow" may bring, the day after, "Did you get hold of the dentist?". `/reminders` lists these check-ins under their own heading, and `/reminders cancel cN` drops one.
+- **A calendar change, or an early start.** A meeting in the next 24 hours that moved or disappeared, or, at 20:00, a first event tomorrow before the morning digest would come. Written by the code, from a fresh read of the calendar.
+- **A look back.** Sunday at 19:00: three short lines about your week, from your own messages only, and one question.
+- **A spontaneous note,** about once a week at a random time, from what she knows about you and the moment. Not in the first week, she may skip it when nothing good comes to mind, and it pauses for four weeks after two in a row get no reply.
+
+At most one a day, never between 22:00 and 08:00, and never while you are chatting or on a call. Each ends with a line that says why it came, like "(weekly look back · /quiet to pause)". `/quiet` pauses them all until `/quiet off`; reminders you set still come. The code finds every reason to write and checks every limit first; the model only writes the words, in a call of its own that never sees your mail, calendar, the web or the chat history, and the code checks them before anything is sent. Whether it goes well is counted in `/status` (replies within a day, uses of `/quiet`); you decide whether she may write more often (`improvise_per_week` in `[initiative]`).
 
 ### The Mac itself
 
@@ -209,6 +237,8 @@ These are paraphrased, so the real wording will vary. The music example assumes 
 - **Mail and calendar are read-only.** She cannot send, move, delete or mark mail, and she cannot change calendar events.
 - **What she reads can't give her orders.** Web pages, search and map results, mail, calendar entries, project files and shared audio files are things she reads for you, never instructions. If an answer drew on them, a device change waits for your yes. Text in photos counts as information too.
 - **She only learns from you.** Facts come from what you say, or from a page you explicitly ask her to learn from. Mail, calendar entries, web and map results never teach her anything.
+- **Reminders come only from you.** She sets a reminder or a wake-up call only when you ask in your own words, never because a mail, a page, a calendar entry or a shared audio file says so. She calls only your account, and only for a reminder you set.
+- **When she writes first, it comes from you.** The code decides when, and a message she starts only uses your own words, your profile and the moment: never mail, calendar entries, the web or a page. A text that claims she did something, asks for a code or a password, or holds a link is not sent at all.
 - **A shared audio file isn't you talking.** An audio file shared from another app counts as someone else's words. She can summarise it, but she won't learn from it, count it as your yes, or switch a device because of it. (A voice note forwarded inside Signal may still count as yours.)
 - **Every device has a rule.** Each device is `normal`, `ask first` or `never off`. If a device change turns up in a message that isn't about devices, it also waits for your yes.
 - **She can't run commands.** The model has no shell. Its project tools read only tracked documents, never secret-like files such as `.env`.
@@ -293,6 +323,9 @@ Setup also downloads: the model (from ollama.com), the voice models (from Huggin
 | "Spotify needs a new sign-in" | Spotify sign-ins last about six months | Run `scripts/spotify-login.sh` |
 | "… isn't answering" for a device | Switched off at the wall, or a new network address | Check the plug. If its address changed, run `scripts/tapo-discover.sh`. |
 | Replies stop | Signal's safety number changed | Confirm the number in Signal first. See `setup_assistant.md`, Operations. |
+| "Late, I was offline …" with a list of reminders | The Mac or the bridge was down when they were due | Nothing: they came late, marked so. "(may be a repeat)" means one was being sent when it stopped. Keep your phone's alarm for what matters. |
+| "Wake-up: 07:00 … No call: …" | The call could not be placed: voice still loading, calls off, a call already running, or three calls that day | The text says which. `/reminders` shows what was missed in the last week |
+| A message you didn't ask for, ending "(… · /quiet to pause)" | One of the messages she starts herself (at most one a day, never at night) | Reply if you like. `/quiet` pauses them, `/initiative off` turns them off; `[initiative]` in the config turns each kind off |
 | No reply at all | Bridge or Mac is down | SSH into the Mac and run `scripts/check.sh`, then read `~/Library/Logs/local-assistant/bridge.log`. If SSH fails, the Mac itself is off or offline. |
 
 ## Slash commands
@@ -310,6 +343,10 @@ Setup also downloads: the model (from ollama.com), the voice models (from Huggin
 | `/voice voices`, `/voice name <voice>` | List the voices, and switch voice notes and calls to one (kept after a restart) |
 | `/soul` | Show the personality file in use, or why none is |
 | `/language`, `/language <name or code>` | List the 11 languages (the current one marked), or switch to one: `/language nl`, `/language dutch` |
+| `/remind [call] [daily\|weekdays] <when> <text>` | Set a reminder without the model. `<when>` is `17:00`, `2026-10-13 07:00`, `20m`, `2h` or `3d`; `call` adds a wake-up call. Example: `/remind call 07:00 wake up` |
+| `/reminders`, `/reminders cancel N` or `all` | Your reminders with their numbers, and what was missed or failed in the last week; cancel one or all |
+| `/initiative on`, `/initiative off`, `/initiative` | Let her write first now and then (off until you turn it on), stop it, or see which |
+| `/quiet`, `/quiet off` | Pause the messages she starts herself, or let her write first again. Reminders you set always come |
 | `/help` | The list above |
 
 ## Requirements
@@ -371,7 +408,7 @@ Keys and sign-ins go through these scripts, never through chat and never into th
 - Before every commit, `scripts/verify.sh` runs ruff (lint and format), mypy in strict mode and pytest. The tests run offline, with fakes for Signal, the voice service, the device helper and the model.
 - The helpers have their own tests: `tools/voice` has Swift tests (`swift test`), and `tools/tapo` and `tools/ical` have pytest suites (`uv run pytest -q`).
 - For the real model, `uv run python -m evals.gemma_suite` runs test cases against Gemma on your Mac. It uses the model in your config (`local-worker` when `model` is unset); `EVAL_MODEL=<tag>` runs it with another tag. To pass, every safety case must pass and at least 90% of the rest. The model doesn't give the same answer every time, so run the suite twice before trusting a prompt change. `EVAL_LANGUAGE=nl` runs the safety cases and three language cases with the rule line for that language. `EVAL_NAME=<name>` gives her another name (default Estia). Without `EVAL_SOUL` she has her built-in style, and two cases check it: a light joke when invited, none on a worry.
-- For a phone walk-through, `docs/e2e-checklist.md` lists what to check from a real phone: texts, voice, calls, lights, mail, calendar, music, web search and languages.
+- For a phone walk-through, `docs/e2e-checklist.md` lists what to check from a real phone: texts, voice, calls, lights, mail, calendar, music, web search, languages, reminders and wake-up calls, and the messages she starts.
 - To check health without Signal, run `scripts/check.sh` on the Mac (for example over SSH). It covers the case where the bridge itself is down, since the bridge can't report its own outage. Other services can be watched with `[health] extra_checks`; none are watched by default.
 
 ## Built with
@@ -404,7 +441,7 @@ Keys and sign-ins go through these scripts, never through chat and never into th
 
 - Everything depends on the Mac. If it's asleep or offline, so is Estia. Ollama starts when you log in, so a restart needs a login too: see `setup_assistant.md`, 2.8, for sleep, restarts and automatic login.
 - Replies usually take a few seconds, at most about half a minute. The first one after a restart or a quiet spell is a little slower while the model loads.
-- After a restart she skips messages older than ten minutes and tells you she was offline, so you can ask again.
+- After a restart she skips messages older than ten minutes and tells you she was offline, so you can ask again. Reminders that came due meanwhile arrive in one late note.
 - Voice notes must be in the current language (`/language`), up to three minutes long and 10 MB. Long spoken answers stop at the end of a sentence, and the rest is in the text.
 - She runs on a local model and can get things wrong. Check anything important, especially web answers; that's what the Sources message is for.
 

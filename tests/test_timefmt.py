@@ -14,6 +14,7 @@ from tests.conftest import T0, TZ
 
 def test_local_stamp_matches_signal_timestamp() -> None:
     assert local_stamp(T0, TZ) == "[Thu 8 Oct 09:32]"
+    assert local_stamp(T0, TZ, year=True) == "[Thu 8 Oct 2026 09:32]"  # the newest message: Gemma knows the year
 
 
 def test_winter_time_uses_plus_one() -> None:

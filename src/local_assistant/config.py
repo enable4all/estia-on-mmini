@@ -5,6 +5,7 @@ The file says who may talk to the bot, so it must be private (mode 0600).
 
 from __future__ import annotations
 
+import dataclasses
 import ipaddress
 import os
 import re
@@ -289,6 +290,27 @@ class Config:
     calls_fillers: bool = False  # "hmm, let me think" lines while she thinks (user: off)
     calls_acknowledge: bool = True  # a short "Got it." as soon as a request of 5+ words is taken in (user: on)
     calls_answer_after_seconds: float = 5.0  # let it ring about twice
+    calls_wake_call: bool = True  # "call me" reminders place a Signal call (with [calls] only: see wake_calls)
+    calls_max_calls_per_day: int = 3  # call reminders a day (a retry is part of the same one)
+
+    # reminders the user sets ("remind me at 17:00 to ..."): on without the [reminders] section
+    reminders_enabled: bool = True
+    reminders_max_open: int = 50
+    reminders_max_per_day: int = 20  # new reminders a day
+
+    # messages she starts herself (initiative): opt-in, off unless enabled here or by the user's typed /initiative on
+    # (the state table's value wins); /quiet pauses them all
+    initiative_enabled: bool = False
+    initiative_followups: bool = True  # 1: a check-in on something the user said they would do
+    initiative_calendar: bool = True  # 2: a calendar change or an early start tomorrow (needs [calendar])
+    initiative_lookback: bool = True  # 3: a Sunday evening look back with one question
+    initiative_improvise: bool = True  # 4: a spontaneous note
+    initiative_max_per_day: int = 1  # all kinds together
+    initiative_followups_per_week: int = 2
+    initiative_improvise_per_week: int = 1
+    initiative_quiet_hours: str = "22:00-08:00"  # none of them then; "" for none
+    initiative_lookback_time: str = "Sun 19:00"
+    initiative_early_check: str = "20:00"
 
     # Spotify by text message (the official Web API, the user's own app: a Client ID, PKCE); off without [spotify]
     spotify_client_id: str = ""
@@ -340,6 +362,11 @@ class Config:
         return self.calls_socket_dir or _default_call_socket_dir(self.data_dir)
 
     @property
+    def wake_calls(self) -> bool:
+        """Whether a "call me" reminder places a Signal call (it needs [calls]); else it is a text."""
+        return self.calls_enabled and self.calls_wake_call
+
+    @property
     def tapo_enabled(self) -> bool:
         return bool(self.tapo_devices)
 
@@ -388,7 +415,8 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
         raw = tomllib.loads(path.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{path}: {exc}") from exc
-    return parse_config(raw)
+    # her style file lives next to the config that was loaded (another --config never reads the default soul.md)
+    return dataclasses.replace(parse_config(raw), soul_path=path.parent / "soul.md")
 
 
 def parse_config(raw: dict[str, object]) -> Config:
@@ -464,6 +492,8 @@ def parse_config(raw: dict[str, object]) -> Config:
         **_spotify_settings(raw.get("spotify")),
         **_web_settings(raw.get("web")),
         **_maps_settings(raw.get("maps")),
+        **_reminder_settings(raw.get("reminders")),
+        **_initiative_settings(raw.get("initiative")),
         soul_path=DEFAULT_CONFIG_PATH.parent / "soul.md",
     )
 
@@ -906,6 +936,8 @@ class _CallsSettings(TypedDict, total=False):
     calls_fillers: bool
     calls_acknowledge: bool
     calls_answer_after_seconds: float
+    calls_wake_call: bool
+    calls_max_calls_per_day: int
 
 
 def _calls_settings(calls: object, *, voice: bool) -> _CallsSettings:
@@ -955,6 +987,12 @@ def _calls_settings(calls: object, *, voice: bool) -> _CallsSettings:
     acknowledge = calls.get("acknowledge", True)
     if not isinstance(acknowledge, bool):
         raise ConfigError("calls.acknowledge must be true or false")
+    wake_call = calls.get("wake_call", True)
+    if not isinstance(wake_call, bool):
+        raise ConfigError("calls.wake_call must be true or false")
+    per_day = calls.get("max_calls_per_day", 3)
+    if isinstance(per_day, bool) or not isinstance(per_day, int) or not 1 <= per_day <= 10:
+        raise ConfigError("calls.max_calls_per_day must be a whole number from 1 to 10")
     settings: _CallsSettings = {
         "calls_enabled": True,
         "calls_speed": float(speed),
@@ -966,6 +1004,8 @@ def _calls_settings(calls: object, *, voice: bool) -> _CallsSettings:
         "calls_fillers": fillers,
         "calls_acknowledge": acknowledge,
         "calls_answer_after_seconds": numbers["answer_after_seconds"],
+        "calls_wake_call": wake_call,
+        "calls_max_calls_per_day": per_day,
     }
     if "signal_cli" in paths:
         settings["calls_signal_cli"] = paths["signal_cli"]
@@ -1078,4 +1118,125 @@ def _maps_settings(maps: object) -> _MapsSettings:
         "maps_home": " ".join(home.split()),
         "maps_daily_cap": cap,
         "maps_region": region.strip().upper(),
+    }
+
+
+class _ReminderSettings(TypedDict, total=False):
+    reminders_enabled: bool
+    reminders_max_open: int
+    reminders_max_per_day: int
+
+
+def _reminder_settings(reminders: object) -> _ReminderSettings:
+    """The [reminders] table as Config keyword arguments; reminders are on without it."""
+    if reminders is None:
+        return {}
+    if not isinstance(reminders, dict):
+        raise ConfigError("[reminders] must be a table")
+    enabled = reminders.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ConfigError("reminders.enabled must be true or false")
+    limits: dict[str, int] = {}
+    for key, default, high in (("max_open", 50, 500), ("max_per_day", 20, 200)):
+        value = reminders.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= high:
+            raise ConfigError(f"reminders.{key} must be a whole number from 1 to {high}")
+        limits[key] = value
+    return {
+        "reminders_enabled": enabled,
+        "reminders_max_open": limits["max_open"],
+        "reminders_max_per_day": limits["max_per_day"],
+    }
+
+
+WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def minutes_of(value: str) -> int:
+    """ "08:15" as minutes after midnight (ValueError when it is no time)."""
+    if not _HHMM.match(value):
+        raise ValueError(f"not a time like 08:15: {value!r}")
+    hours, minutes = value.split(":")
+    return int(hours) * 60 + int(minutes)
+
+
+def quiet_hours_of(value: str) -> tuple[int, int] | None:
+    """ "22:00-08:00" as (start, end) minutes, across midnight; "" (or an equal start and end) for none."""
+    if not value.strip():
+        return None
+    start, separator, end = value.strip().partition("-")
+    if not separator:
+        raise ValueError(f"not like 22:00-08:00: {value!r}")
+    hours = (minutes_of(start.strip()), minutes_of(end.strip()))
+    return None if hours[0] == hours[1] else hours
+
+
+def weekday_time_of(value: str) -> tuple[int, int]:
+    """ "Sun 19:00" as (weekday, minutes): Monday is 0."""
+    day, _, moment = value.strip().partition(" ")
+    if day[:3].lower() not in WEEKDAYS:
+        raise ValueError(f"not like Sun 19:00: {value!r}")
+    return WEEKDAYS.index(day[:3].lower()), minutes_of(moment.strip())
+
+
+class _InitiativeSettings(TypedDict, total=False):
+    initiative_enabled: bool
+    initiative_followups: bool
+    initiative_calendar: bool
+    initiative_lookback: bool
+    initiative_improvise: bool
+    initiative_max_per_day: int
+    initiative_followups_per_week: int
+    initiative_improvise_per_week: int
+    initiative_quiet_hours: str
+    initiative_lookback_time: str
+    initiative_early_check: str
+
+
+def _initiative_settings(initiative: object) -> _InitiativeSettings:
+    """The [initiative] table as Config keyword arguments; off unless `enabled = true` (opt-in), each kind on once they
+    are. Only the form is checked here: a kind that needs a part that is not set up (the calendar notes without
+    [calendar]) is simply off, and doctor says so."""
+    if initiative is None:
+        return {}
+    if not isinstance(initiative, dict):
+        raise ConfigError("[initiative] must be a table")
+    switches: dict[str, bool] = {}
+    for key in ("enabled", "followups", "calendar", "lookback", "improvise"):
+        value = initiative.get(key, key != "enabled")  # opt-in; the kinds are on once she may start messages
+        if not isinstance(value, bool):
+            raise ConfigError(f"initiative.{key} must be true or false")
+        switches[key] = value
+    limits: dict[str, int] = {}
+    for key, default, high in (("max_per_day", 1, 5), ("followups_per_week", 2, 7), ("improvise_per_week", 1, 7)):
+        number = initiative.get(key, default)
+        if isinstance(number, bool) or not isinstance(number, int) or not 1 <= number <= high:
+            raise ConfigError(f"initiative.{key} must be a whole number from 1 to {high}")
+        limits[key] = number
+    texts: dict[str, str] = {}
+    for key, fallback, check, example in (
+        ("quiet_hours", "22:00-08:00", quiet_hours_of, '"22:00-08:00" (or "" for none)'),
+        ("lookback_time", "Sun 19:00", weekday_time_of, '"Sun 19:00"'),
+        ("early_check", "20:00", minutes_of, '"20:00"'),
+    ):
+        text = initiative.get(key, fallback)
+        try:
+            if not isinstance(text, str):
+                raise ValueError(key)
+            check(text)
+        except ValueError:
+            raise ConfigError(f"initiative.{key} must look like {example}") from None
+        texts[key] = text.strip()
+    return {
+        "initiative_enabled": switches["enabled"],
+        "initiative_followups": switches["followups"],
+        "initiative_calendar": switches["calendar"],
+        "initiative_lookback": switches["lookback"],
+        "initiative_improvise": switches["improvise"],
+        "initiative_max_per_day": limits["max_per_day"],
+        "initiative_followups_per_week": limits["followups_per_week"],
+        "initiative_improvise_per_week": limits["improvise_per_week"],
+        "initiative_quiet_hours": texts["quiet_hours"],
+        "initiative_lookback_time": texts["lookback_time"],
+        "initiative_early_check": texts["early_check"],
     }

@@ -8,8 +8,10 @@ from zoneinfo import ZoneInfo
 
 from local_assistant import prompts
 from local_assistant.context import ContextBuilder
+from local_assistant.initiative import Initiative
 from local_assistant.language import ENGLISH, LANGUAGE_KEY, find
 from local_assistant.profile import Profile
+from local_assistant.reminders import ReminderError, Reminders, parse_when
 from local_assistant.soul import SOUL_MAX_CHARS
 from local_assistant.store import Message, Store
 from local_assistant.timefmt import local_date, local_datetime
@@ -56,6 +58,8 @@ class StatusInfo:
     messages: int
     restarts: int
     parts: tuple[str, ...] = ()  # what each part that is turned on last did (part_status), one line each
+    reminders: str = ""  # "Reminders: 3 open · next Tue 13 Oct 07:00 (call) · 0 failed" (times and counts only)
+    initiative: tuple[str, ...] = ()  # the messages she starts: counts, the improvised note, the last skips
 
 
 StatusProvider = Callable[[], Awaitable[StatusInfo]]
@@ -79,6 +83,8 @@ class Commands:
         language: str = ENGLISH,
         set_language: Callable[[str], None] | None = None,
         voice_languages: VoiceLanguages | None = None,
+        reminders: Reminders | None = None,
+        initiative: Initiative | None = None,
     ) -> None:
         self._store = store
         self._profile = profile
@@ -92,6 +98,8 @@ class Commands:
         self._language = language
         self._set_language = set_language
         self._voice_languages = voice_languages
+        self._reminders = reminders
+        self._initiative = initiative
 
     async def handle(self, message: Message) -> str:
         command, _, rest = message.text.strip().partition(" ")
@@ -117,10 +125,90 @@ class Commands:
                 return self._voice_settings("voices")
             case "/language":
                 return await self._language_setting(args)
+            case "/remind":
+                return self._remind(args, message)
+            case "/reminders":
+                return self._reminder_list(args, message)
+            case "/quiet":
+                return self._quiet(args.lower())
+            case "/initiative":
+                return self._initiative_switch(args.lower())
             case "/help":
                 return prompts.HELP
             case _:
                 return f"Unknown command {command}.\n\n{prompts.HELP}"
+
+    def _remind(self, args: str, message: Message) -> str:
+        """/remind [call] [daily|weekdays|weekly] <when> <text>: the same checks and note as Gemma's tool."""
+        if self._reminders is None:
+            return prompts.REMINDERS_OFF
+        words = args.split()
+        call, repeat = False, "none"
+        while words and words[0].lower() in ("call", "daily", "weekdays", "weekly"):
+            flag = words.pop(0).lower()
+            call, repeat = (True, repeat) if flag == "call" else (call, flag)
+        if not words:
+            return prompts.REMINDER_USAGE
+        try:
+            (kind, value), used = parse_when(words)
+            if not words[used:]:
+                return prompts.REMINDER_USAGE
+            created = self._reminders.set(
+                message.peer_aci,
+                text=" ".join(words[used:]),
+                at=str(value) if kind == "at" else None,
+                in_minutes=value if kind == "in" else None,
+                call=call,
+                repeat=repeat,
+                source="command",
+                source_message_id=message.id,
+            )
+        except ReminderError as exc:
+            return f"Not set: {exc}."
+        return created.note
+
+    def _reminder_list(self, args: str, message: Message) -> str:
+        """/reminders: the list; /reminders cancel N, cN (a check-in) or all."""
+        if self._reminders is None:
+            return prompts.REMINDERS_OFF
+        words = args.lower().split()
+        if not words:
+            return self._reminders.listing(message.peer_aci)
+        if len(words) != 2 or words[0] != "cancel":
+            return prompts.REMINDERS_USAGE
+        target = words[1].lstrip("#")
+        try:
+            if target == "all":
+                return self._reminders.cancel_all(message.peer_aci)
+            if target.startswith("c") and target[1:].isdecimal():
+                return self._reminders.cancel_checkin(message.peer_aci, int(target[1:]))
+            if target.isdecimal():
+                return self._reminders.cancel(message.peer_aci, int(target))
+        except ReminderError as exc:
+            reason = str(exc)
+            return f"{reason[:1].upper()}{reason[1:]}."
+        return prompts.REMINDERS_USAGE
+
+    def _quiet(self, args: str) -> str:
+        """/quiet pauses every message she starts herself until /quiet off; reminders the user set still come."""
+        if self._initiative is None or not self._initiative.enabled:
+            return prompts.QUIET_DISABLED
+        if args in ("", "on"):
+            return self._initiative.set_quiet(True)
+        if args == "off":
+            return self._initiative.set_quiet(False)
+        return prompts.QUIET_USAGE
+
+    def _initiative_switch(self, args: str) -> str:
+        """/initiative on|off: whether she may message first at all (opt-in). Only a typed command reaches it, never a
+        voice note, a call or Gemma; it wins over the config."""
+        if self._initiative is None:
+            return prompts.QUIET_DISABLED
+        if not args:
+            return self._initiative.state_text()
+        if args in ("on", "off"):
+            return self._initiative.set_enabled(args == "on")
+        return prompts.INITIATIVE_USAGE
 
     def _soul(self) -> str:
         soul = self._context.soul()
@@ -254,5 +342,7 @@ class Commands:
                 f"History: {info.messages} messages, database {info.db_bytes / 1_000_000:.1f} MB",
                 f"Signal connection restarts: {info.restarts}",
                 *info.parts,
+                *([info.reminders] if info.reminders else []),
+                *info.initiative,
             ]
         )

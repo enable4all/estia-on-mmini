@@ -9,6 +9,8 @@ Environment:
   FAKE_SIGNAL_CRASH_ONCE   exit after delivering the first envelope, once per folder
   FAKE_SIGNAL_NO_CALLS     answer subscribeCallEvents with an error (a signal-cli without calls)
   FAKE_SIGNAL_AVATAR_ERROR answer an updateProfile with an avatar with an error
+  FAKE_SIGNAL_CALL_END     after startCall (call id 42, its ringing event before the reply, as signal-cli 0.14.9
+                           does): end the call with this reason (e.g. ring_timeout); unset, it rings until hung up
 
 An inbox line with a top-level "method" (e.g. a callEvent) is written as it is: a notification, in order.
 launch.json records argv and the call-related environment of the latest start.
@@ -101,6 +103,19 @@ def main() -> None:
                 write({"jsonrpc": "2.0", "error": {"code": -1, "message": "attachment not found"}, "id": request_id})
         elif method == "subscribeCallEvents" and not os.environ.get("FAKE_SIGNAL_NO_CALLS"):
             write({"jsonrpc": "2.0", "result": 1, "id": request_id})
+        elif method == "startCall":
+            recipient = (request.get("params", {}).get("recipient") or [""])[0]
+            ringing = {"callId": 42, "state": "RINGING_OUTGOING", "uuid": recipient, "isOutgoing": True}
+            write({"jsonrpc": "2.0", "method": "callEvent", "params": {"subscription": 1, "result": ringing}})
+            write({"jsonrpc": "2.0", "result": {"callId": 42, "state": "RINGING_OUTGOING"}, "id": request_id})
+            if os.environ.get("FAKE_SIGNAL_CALL_END"):
+                ended = {
+                    "callId": 42,
+                    "state": "ENDED",
+                    "reason": os.environ["FAKE_SIGNAL_CALL_END"],
+                    "isOutgoing": True,
+                }
+                write({"jsonrpc": "2.0", "method": "callEvent", "params": {"subscription": 1, "result": ended}})
         elif method == "acceptCall":
             call_id = request.get("params", {}).get("callId")
             result = {"callId": call_id, "state": "CONNECTING", "codec": "opus", "sampleRate": 48000}

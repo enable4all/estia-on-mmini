@@ -154,6 +154,13 @@ class SignalClient:
         self._check_allowed(aci)
         await self.request("hangupCall", {"callId": call_id})
 
+    async def start_call(self, aci: str) -> dict[str, Any]:
+        """Place a Signal call to `aci` (an allowed account only: a wake-up call or a call reminder). Its ringing event
+        comes before this reply; the reply names the call id (and may name the call helper's socket)."""
+        self._check_allowed(aci)
+        result = await self.request("startCall", {"recipient": [aci]})
+        return result if isinstance(result, dict) else {}
+
     async def send(self, aci: str, text: str) -> int:
         self._check_allowed(aci)
         result = await self.request("send", {"recipient": [aci], "message": text})

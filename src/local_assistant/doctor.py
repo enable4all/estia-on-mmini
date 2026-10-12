@@ -2,8 +2,9 @@
 was found and, when something is missing, the command that fixes it.
 
 Read-only: nothing is installed, started or sent; signal-cli is not run (only its account list is read), the
-database is only read (the language chosen with /language), and no secret or private value is printed (key files:
-present, private and which keys only; never the bot's number).
+database is only read (the language chosen with /language, the reminders' times and counts), and no secret or
+private value is printed (key files: present, private and which keys only; never the bot's number or a reminder's
+text).
 Key files are looked for next to the config file (for the default config, where the bridge reads them).
 
 An optional part whose setup is in place shows what its last real use did, from the bridge's status.json
@@ -40,12 +41,15 @@ from local_assistant.config import (
     load_config,
     read_avatar,
 )
+from local_assistant.initiative import ENABLED_KEY, QUIET_KEY, Settings
 from local_assistant.keyfile import read_keys
 from local_assistant.language import CODES, ENGLISH, LANGUAGE_KEY
 from local_assistant.mail_auth import TokenStore
 from local_assistant.part_status import Record, calendar_mailbox, calendar_part, describe, label_of, mail_part, read
+from local_assistant.reminders import FAILED, PROBLEM_DAYS, STUCK_S, iso, summary
 from local_assistant.soul import load_soul
 from local_assistant.spotify_auth import SpotifyTokens
+from local_assistant.store import Store
 
 Status = Literal["ok", "untested", "warn", "fail"]
 MARKS: dict[Status, str] = {"ok": "✓", "untested": "○", "warn": "!", "fail": "✗"}
@@ -125,6 +129,9 @@ def run(config_path: Path, probe: Probe) -> list[Finding]:
         _personality(config_path.parent, cfg.name),
         _language(cfg, probe),
     ]
+    if cfg.reminders_enabled:
+        findings.append(_reminders(cfg, probe.now()))
+    findings.append(_initiative(cfg, probe.now()))
     records = read(cfg.data_dir / "status.json")  # what the bridge saw; nothing known without it
     findings += _optional_parts(cfg, config_path.parent, probe, _States(cfg, config_path.parent, records, probe.now()))
     findings.append(_daemon())
@@ -209,19 +216,106 @@ def _personality(folder: Path, name: str) -> Finding:
     return Finding("ok", "Personality", "soul.md")
 
 
-def _current_language(cfg: Config) -> str:
-    """The language in use: the one chosen with /language (the database's state table), else the config's.
-
-    Only read: while the bridge runs, through its write-ahead log; while it is stopped (no log), as an unchanging file,
-    so nothing is created next to it. A database that is missing or cannot be read leaves the config's."""
+def _read_only(cfg: Config) -> sqlite3.Connection:
+    """The bridge's database, only read: while the bridge runs, through its write-ahead log; while it is stopped (no
+    log), as an unchanging file, so nothing is created next to it (sqlite3.Error when it is missing)."""
     database = cfg.db_path
     mode = "mode=ro" if database.with_name(database.name + "-wal").exists() else "mode=ro&immutable=1"
+    return sqlite3.connect(f"{database.as_uri()}?{mode}", uri=True)
+
+
+def _current_language(cfg: Config) -> str:
+    """The language in use: the one chosen with /language (the database's state table), else the config's. A
+    database that is missing or cannot be read leaves the config's."""
     try:
-        with closing(sqlite3.connect(f"{database.as_uri()}?{mode}", uri=True)) as conn:
+        with closing(_read_only(cfg)) as conn:
             row = conn.execute("SELECT value FROM state WHERE key = ?", (LANGUAGE_KEY,)).fetchone()
     except sqlite3.Error:
         return cfg.language
     return row[0] if row is not None and row[0] in CODES else cfg.language
+
+
+def _reminders(cfg: Config, now: float) -> Finding:
+    """The reminders as /status shows them (times and counts, never their text); a warning for a failed one in the
+    last 7 days or one stuck firing (a note is tried for an hour)."""
+    try:
+        with closing(_read_only(cfg)) as conn:
+            rows = conn.execute(
+                "SELECT due_at, call, status, updated_at FROM reminders WHERE status IN ('open', 'firing')"
+                " ORDER BY due_at, id"
+            ).fetchall()
+            marks = ", ".join("?" for _ in FAILED)
+            failed = conn.execute(
+                f"SELECT COUNT(*) FROM reminders WHERE outcome IN ({marks}) AND updated_at >= ?",
+                (*FAILED, iso(now - PROBLEM_DAYS * 86_400)),
+            ).fetchone()[0]
+    except sqlite3.Error:  # no database yet, or one from before reminders (the bridge adds them at its next start)
+        return Finding("ok", "Reminders", prompts.DOCTOR_REMINDERS_NONE)
+    first = (float(rows[0][0]), bool(rows[0][1]) and cfg.wake_calls) if rows else None
+    stuck = sum(1 for row in rows if row[2] == "firing" and row[3] < iso(now - STUCK_S))
+    text = summary(len(rows), first, int(failed), tz=cfg.timezone, now=now)
+    if stuck:
+        text += prompts.DOCTOR_REMINDERS_STUCK.format(count=stuck)
+    if failed or stuck:
+        return Finding("warn", "Reminders", text, prompts.DOCTOR_REMINDERS_FIX)
+    return Finding("ok", "Reminders", text)
+
+
+def _initiative(cfg: Config, now: float) -> Finding:
+    """The messages she starts (opt-in: the user's /initiative on or off wins over the config): off, or which kinds are
+    on (the calendar notes need [calendar]), the quiet hours, /quiet, the last four weeks as counts and the last skip
+    per kind (reason words, never text); a warning when one could not be sent in the last 7 days."""
+    try:
+        store = Store.open_read_only(cfg.db_path)
+        try:
+            switch = store.get_state(ENABLED_KEY)
+        finally:
+            store.close()
+    except sqlite3.Error:  # no database yet: the config decides
+        switch = None
+    if switch == "off":
+        return Finding("ok", "Initiative", prompts.DOCTOR_INITIATIVE_OFF_BY_USER)
+    if switch != "on" and not cfg.initiative_enabled:
+        return Finding("ok", "Initiative", prompts.DOCTOR_INITIATIVE_OFF)
+    settings = Settings.of(cfg)
+    kinds = [
+        label
+        for on, label in (
+            (settings.followups, "check-ins"),
+            (settings.calendar, "calendar notes"),
+            (settings.lookback, "look back"),
+            (settings.improvise, "improvised note"),
+        )
+        if on
+    ]
+    on = "on (/initiative on)" if switch == "on" else "on"
+    text = f"{on}: {', '.join(kinds) or 'no kind'} · quiet hours {cfg.initiative_quiet_hours or 'none'}"
+    if cfg.initiative_calendar and not cfg.calendar_enabled:
+        text += " · calendar notes off (no [calendar])"
+    try:
+        store = Store.open_read_only(cfg.db_path)
+        try:
+            quiet = bool(store.get_state(QUIET_KEY))
+            entries = store.initiative_entries(since=iso(now - 28 * 86_400))
+        finally:
+            store.close()
+    except sqlite3.Error:  # no database yet, or one from before (the bridge adds the log at its next start)
+        return Finding("ok", "Initiative", text)
+    sent = [e for e in entries if e.kind != "announce" and e.outcome in ("sent", "unknown")]
+    answered = sum(1 for entry in sent if entry.replied_at is not None)
+    text += f" · last 4 weeks: {len(sent)} sent, {answered} answered within a day"
+    if quiet:
+        text += " · paused (/quiet)"
+    last: dict[str, str] = {}
+    for entry in entries:
+        if entry.outcome in ("skipped", "failed"):
+            last[entry.kind] = entry.reason or entry.outcome
+    if last:
+        text += " · last skipped: " + ", ".join(f"{prompts.INITIATIVE_KINDS[k]} {why}" for k, why in last.items())
+    week_ago = iso(now - PROBLEM_DAYS * 86_400)
+    if any(entry.outcome == "failed" and entry.created_at >= week_ago for entry in entries):
+        return Finding("warn", "Initiative", text, prompts.DOCTOR_INITIATIVE_FIX)  # one in the last 7 days
+    return Finding("ok", "Initiative", text)
 
 
 def _language(cfg: Config, probe: Probe) -> Finding:

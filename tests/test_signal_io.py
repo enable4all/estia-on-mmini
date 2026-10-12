@@ -294,6 +294,22 @@ async def test_a_signal_cli_restart_ends_any_call(fake_dir: Path, monkeypatch: p
         await client.stop()
 
 
+async def test_a_call_is_placed_only_to_an_allowed_account(fake_dir: Path) -> None:
+    client = make_client(calls=True)
+    await client.start()
+    try:
+        result = await client.start_call(ME)
+        assert result["callId"] == 42
+        ringing = client._call_events.get_nowait()  # signal-cli sends the ringing event before startCall's reply
+        assert (ringing["state"], ringing["isOutgoing"], ringing["uuid"]) == ("RINGING_OUTGOING", True, ME)
+        with pytest.raises(NotAllowedError):
+            await client.start_call(STRANGER)
+        calls = [(r["method"], r["params"]) for r in requests(fake_dir) if r["method"] == "startCall"]
+        assert calls == [("startCall", {"recipient": [ME]})]
+    finally:
+        await client.stop()
+
+
 async def test_accept_and_hangup_only_for_allowed_callers(fake_dir: Path) -> None:
     client = make_client(calls=True)
     await client.start()

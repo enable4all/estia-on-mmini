@@ -62,9 +62,25 @@ def test_messages_get_local_stamps_and_roles(store: Store) -> None:
     built = context.build(conv)
     assert built[0]["role"] == "system"
     assert built[1:] == [
-        {"role": "user", "content": "[Thu 8 Oct 09:32] hello Gemma"},
+        {"role": "user", "content": "[Thu 8 Oct 2026 09:32] hello Gemma"},  # the newest message: with the year
         {"role": "assistant", "content": "Hi!"},
     ]
+
+
+def test_only_the_newest_message_shows_the_year(store: Store) -> None:
+    # Gemma knows the year for dates (set_reminder) from the newest stamp; older stamps stay as they were sent, so
+    # the conversation before it is the same prefix as in the last answer (Ollama's cache), apart from that one stamp
+    _, context = make(store)
+    conv = store.current_conversation()
+    first = say(store, conv, "hello", T0)
+    reply(store, conv, "Hi!", first, T0 + 5_000)
+    say(store, conv, "remind me on 20 May", T0 + 60_000)
+    built = context.build(conv)
+    assert [m["content"] for m in built if m["role"] == "user"] == [
+        "[Thu 8 Oct 09:32] hello",
+        "[Thu 8 Oct 2026 09:33] remind me on 20 May",
+    ]
+    assert "2026" not in built[0]["content"]  # the system prompt carries no date
 
 
 def test_snapshot_is_frozen_until_refreshed(store: Store) -> None:
@@ -166,7 +182,7 @@ def test_the_current_photo_message_carries_its_image(store: Store) -> None:
     assert built[-1] == {
         "role": "user",
         "content": [
-            {"type": "text", "text": "[Thu 8 Oct 09:32] [photo] what is this?"},
+            {"type": "text", "text": "[Thu 8 Oct 2026 09:32] [photo] what is this?"},
             {"type": "image_url", "image_url": {"url": URI}},
         ],
     }
@@ -178,7 +194,7 @@ def test_earlier_photo_messages_are_marked_no_longer_visible(store: Store) -> No
     photo = say(store, conv, "[photo] what is this?", T0)
     reply(store, conv, "A blue wallpaper.", photo, T0 + 5_000)
     built = context.build(conv)
-    assert built[1] == {"role": "user", "content": "[Thu 8 Oct 09:32] [photo, no longer visible] what is this?"}
+    assert built[1] == {"role": "user", "content": "[Thu 8 Oct 2026 09:32] [photo, no longer visible] what is this?"}
 
 
 def test_calibration_counts_text_parts_only(store: Store) -> None:
@@ -200,7 +216,7 @@ def test_a_recent_photo_is_shown_again_with_its_own_message(store: Store) -> Non
     built = context.build(conv, images={photo.id: [URI]})
     assert built[1]["content"][0] == {"type": "text", "text": "[Thu 8 Oct 09:32] [photo] what is this?"}
     assert built[1]["content"][1] == {"type": "image_url", "image_url": {"url": URI}}
-    assert built[-1] == {"role": "user", "content": "[Thu 8 Oct 09:33] what colour was it?"}
+    assert built[-1] == {"role": "user", "content": "[Thu 8 Oct 2026 09:33] what colour was it?"}
 
 
 def test_the_assistant_is_called_by_her_name() -> None:
@@ -343,3 +359,38 @@ def test_the_rules_name_the_machine_by_its_label() -> None:
     named = prompts.rules(name=NAME, host="the Mini", web=True)
     assert "You can check the Mini's health" in named and "The Mini and the projects:" in named
     assert "how the Mini (the server, the machine) is doing" in named and "transcribed on the Mini" in named
+
+
+def test_the_reminder_rules_come_only_with_reminders() -> None:
+    plain = prompts.rules(name=NAME)
+    assert "set_reminder" not in plain  # with every new part off: the rules as before
+    with_reminders = prompts.rules(name=NAME, reminders=True)
+    assert "set_reminder" in with_reminders and "list_reminders" in with_reminders
+    assert with_reminders.index("Reminders:") < with_reminders.index("Safety:")
+    assert "is not a request" in with_reminders and "never sets a reminder" in with_reminders
+    assert with_reminders.replace(f"\n\n{prompts.REMINDER_RULES}", "") == plain
+    everything = prompts.rules(name=NAME, calendar=True, calls=True, music=True, web=True, maps=True, reminders=True)
+    assert everything.index("Music:") < everything.index("Reminders:") < everything.index("Safety:")
+
+
+def test_a_message_she_started_is_her_turn_without_a_user_turn_before_it(store: Store) -> None:
+    """Two assistant turns in a row (her answer, then a message she started); its footer is never in the history."""
+    context = ContextBuilder(store, Profile(store), TZ)
+    conversation = store.current_conversation()
+    asked = store.add_incoming(conversation.id, ME, T0, "text", "I'll call the dentist tomorrow")
+    assert asked is not None
+    answer = store.add_outgoing(conversation.id, ME, "text", "Good luck with it!", asked)
+    store.mark_sent(answer, T0 + 1)
+    started = store.add_outgoing(conversation.id, ME, "text", "Did you get hold of the dentist?", None, footer="(f)")
+    store.mark_sent(started, T0 + 2)
+    built = context.build(store.current_conversation())
+    assert [m["role"] for m in built] == ["system", "user", "assistant", "assistant"]
+    assert built[-1]["content"] == "Did you get hold of the dentist?"
+    assert "(f)" not in str(built)
+
+
+def test_the_style_block_is_the_same_for_chat_and_her_own_messages(store: Store) -> None:
+    context = ContextBuilder(store, Profile(store), TZ, name="Tiffany")
+    style = context.style()
+    assert style.startswith("STYLE (built in") and "Tiffany" in style
+    assert f"\n\n{style}\n\n" in context.system_prompt(store.current_conversation())

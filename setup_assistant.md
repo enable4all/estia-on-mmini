@@ -159,9 +159,14 @@ Edit the file:
    `pl`, `de`, `ja`, `ru`, `fr` (README, Languages). A typed `/language` in Signal changes it later and wins over this line.
 5. `signal_cli`: `"signal-cli"` finds the Homebrew binary on the PATH, which the launchd service also uses. Give a full
    path if you installed it elsewhere.
-6. Everything else can stay commented out until you turn that part on (section 3). One exception: `[projects]` is on by
+6. Everything else can stay commented out until you turn that part on (section 3). Two exceptions: `[projects]` is on by
    default. Estia can read the README, AGENTS.md, todo.md and recent commits of every git repository directly in
-   `~/dev`. Set `root` to another folder to limit that.
+   `~/dev`. Set `root` to another folder to limit that. And reminders are on without a `[reminders]` section (section 4,
+   "Reminders and wake-up calls"): at most 50 open and 20 new a day (`max_open`, `max_per_day`); `enabled = false` turns
+   them off, and then her rules, tools and commands are exactly as without them. The messages she starts herself are
+   opt-in (section 4, "Messages she starts herself"): off until `[initiative] enabled = true` or until you type
+   `/initiative on` in Signal; then at most one a day, never between 22:00 and 08:00, each of the four kinds on or off.
+   Off, nothing changes.
 
 `scripts/doctor.sh` (2.6) checks the file. It reports the placeholder number and account ID as ✗ until you replace them.
 
@@ -561,6 +566,23 @@ path too long for Unix sockets. A `socket_dir` you set must be short (under abou
 
 Undo: remove `[calls]` and restart. The bridge then uses Homebrew's signal-cli again, as before.
 
+**Wake-up calls.** With `[calls]` on, a reminder with "call me" (or `/remind call 07:00 wake up`) also places a Signal
+call: the text first, always, then the call. `wake_call = false` in `[calls]` keeps those reminders as wake-up texts (a
+second text two minutes later unless you wrote), and
+`max_calls_per_day` (3) limits them per day. Before 11:00 she opens with "Good morning! It's 7:00." and the reminder's
+text, later with "It's 17:00. You asked me to call you."; a minute of silence after the good morning ends the call with a
+goodbye. Not answered, busy or a failed dial: one more try two minutes later, unless you wrote to her in between. A
+decline means you are awake: no second try. Then one note, such as "Wake-up call not answered (07:00, 07:02)." A call is
+never placed more than five minutes late, and never while she is already on a call with you (the text says why).
+
+- **Your phone's Focus or Sleep mode** silences Signal calls unless Estia's contact is allowed in that Focus.
+- **Linked devices** (Signal Desktop, an iPad) ring too; a hang-up on one of them can end the call on the others.
+- Outgoing calls use signal-cli's `startCall`, which upstream calls experimental. Test one before you rely on it:
+  `/remind call 2m test`, with the phone locked, then with a linked device on (docs/e2e-checklist.md, Reminders).
+
+> **Keep your phone's own alarm for anything that matters.** Estia runs on one Mac. A power cut, an update, a crash or a
+> Signal problem means no reminder and no call. The wake-up call is a friendly extra.
+
 ### Spotify (once)
 
 Music by text message, through Spotify's official Web API. Spotify's developer policy forbids voice control, so calls and
@@ -715,6 +737,10 @@ Write to the bot from Signal as you would to a person. Replies come as short pla
 | `/status` | Model loaded or not, waiting messages, profile fill, last learning run, history size, Signal restarts, and a line per part that is turned on: working (last read), set up but not tested yet, or failing with the fix |
 | `/voice` · `/voice auto\|on\|off` · `/voice echo on\|off` | Spoken answers: for voice notes (auto, default), always, or never; the transcript echo (off by default) |
 | `/language` · `/language <name or code>` | The 11 languages with the current one marked; switch with a code or a name in English or in the language itself (`/language nl`, `/language dutch`, `/language nederlands`) |
+| `/remind [call] [daily\|weekdays\|weekly] <when> <text>` | A reminder without the model: `<when>` is `17:00` (today, or tomorrow once passed), `2026-10-13 07:00`, `20m`, `2h` or `3d`; `call` adds a wake-up call. The same checks and confirmation as asking her |
+| `/reminders` · `/reminders cancel N\|cN\|all` | Your reminders, the check-ins she may send (`#cN`) and what was missed or failed in the last 7 days, with the reason; cancel one or all |
+| `/initiative on` · `/initiative off` · `/initiative` | Let her write first now and then (opt-in: off until you turn it on; wins over the config), stop it, or see which |
+| `/quiet` · `/quiet off` | Pause every message she starts herself, until `/quiet off`; reminders and wake-up calls still come |
 | `/help` | The list above |
 
 In normal messages:
@@ -775,6 +801,101 @@ Calendar (read-only; see "Calendar (once)"):
   Outlook calendar whose mailbox needs a new sign-in, or whose `Calendars.Read` is not granted yet, says so in the digest
   and in `/status`. "How's the Mac?" covers the calendars as well.
 
+Reminders and wake-up calls (on unless `[reminders] enabled = false`):
+
+- "Remind me tomorrow at 7 to call mum", "in 20 minutes, the pizza", "every weekday at 8, the pills" → `set_reminder`.
+  The time must be at least a minute ahead and at most 366 days; the text (your words, in your language) at most 200
+  characters. At most 50 open, 20 new a day and 3 calls on one day; a refusal names the limit. "What reminders do I
+  have?" → `list_reminders`; "cancel tomorrow's wake-up call" → `cancel_reminder`.
+- **The contract: a reminder exists only when the bridge's note says so.** The confirmation is a separate note written
+  by the bridge, never by Gemma: `Reminder set (#12): Tue 13 Oct 07:00 · wake-up call · "wake up". /reminders to see or
+  cancel.` The first one each user gets adds "Only this note means a reminder is set."; the welcome and `/help` say it
+  too. What Gemma says is never the proof. The note shows the time it understood, so a misheard "15" or "50" in a voice
+  note shows at once. A time that does not exist (the night the clocks go forward) becomes the same time an hour on, and
+  the note says so. Gemma sees the year in the stamp of your newest message; a date she still writes with an earlier
+  year is read as the nearest such day, and a day more than 2 days past, with that year or this one, as the next one
+  ("20 May" asked in October: next May; "5 January" asked in December: next January), never for a repeating reminder. Up
+  to 2 days past is refused ("that time has passed"). The note shows the date it understood, with the year when it is
+  not this one.
+- When no reminder was set, the code says so, in any language: every sentence of her answer that mentions a reminder,
+  waking or a call is left out, her other sentences stay (the summary of a mail, say), and the code's own line follows
+  them, in English, with the reason ("No reminder was set: that time has passed."; only that line when nothing else is
+  left), so an "it's set" never reaches you. When one reminder of several in an answer was set and another was not,
+  that one gets its own note: `Not set: "water the plants" (that time has passed).` If she says a reminder or a call is
+  set when she never tried to set one in that answer, a "No reminder was set. Ask me again, or use /remind." note
+  follows when the bridge recognises the claim: a precise set of patterns in
+  the 11 languages that never fires on an ordinary sentence ("Noted: you start work at 9:00", "your call with Anna is
+  set for 15:00" in the calendar, "a payment reminder from the bank"), so it misses some; it is a safety net, the note
+  above is the proof. After she listed your reminders in that answer, talk that names an open reminder's time or number
+  is no claim, and a claim of a new one gets "No new reminder was set.". On a call she says the confirmation in English
+  ("Reminder set for Tuesday 13 October, 07:00.") and the note follows as a text; when none was set, she says the rest
+  of her answer and then the code's line why, in English.
+- Only your own words: a reminder is refused in code in an answer that read mail, the calendar, the web, a page, a
+  project file or the history, and for a shared audio file or a photo (Gemma is told you can ask again in your own
+  words). A voice note or a call counts as your words. A time you mention ("I have the dentist at 10") is not a request.
+- At its time: `Reminder: call the dentist` (a repeat adds "(weekdays at 08:00 · /reminders to stop)"). Reminders come
+  at night too, and quiet hours or `/quiet` never hold them: you set them. While she is on a call with you, texts wait
+  until it ends. A note that cannot be sent is tried every 5 minutes for an hour, then shows as failed in `/reminders`
+  and doctor.
+- Repeating reminders keep their local time (08:00 stays 08:00 across summer and winter time), in the config's
+  `timezone` (else the Mac's).
+- Missed while the bridge was down: one note after the restart, `Late, I was offline 06:40-09:05:` with each missed
+  reminder (at most 10, then "and N more: /reminders"); "(may be a repeat)" marks one that was being sent when it
+  stopped (it may have arrived already); a repeat appears once, then goes on. A wake-up call is not placed late: "(not
+  placed late)". Up to 2 minutes late counts as on time.
+- Wake-up calls: see section 3, Calls, "Wake-up calls". Without `[calls]` (or with `wake_call = false`), "call me"
+  reminders are wake-up texts: the confirmation says "calls are off: a text only", and at its time the text comes, then
+  a second one two minutes later unless you wrote to her in between.
+
+Messages she starts herself (opt-in: off until you turn them on; each kind on or off in `[initiative]`):
+
+- **On and off.** Type `/initiative on` in Signal, or set `[initiative] enabled = true` in config.toml.
+  `/initiative off` turns them off again; `/initiative` shows which. What you type wins over the config (like
+  `/language`), and only a typed command counts: never a voice note, a call or the model. The reply to `/initiative on`
+  tells the rules, so no other announcement follows; turned on in the config, she sends one note with them once (a
+  fresh install's welcome says it instead). Off, nothing runs for them: no calendar reading, no model call, no message,
+  and what you say meanwhile is never looked at for check-ins later.
+- Four kinds. **Check-ins:** a plan you stated yourself ("I'll call the dentist tomorrow"), found in the idle pass (one
+  structured model call, only on new messages: typed, voice notes and calls; never audio files, photos, commands, links,
+  long pasted text or a message that set a reminder; an answer cut off at its length is asked again in halves, so no
+  plan is lost). The model sorts each message (a task you will do yourself, an appointment, a maybe, someone else's
+  plan, a question or anything else); only a task counts. The code checks it against your words, and it comes the day
+  after that day at 17:00 (at least 20 hours later), for 2 days; at most 2 a week, at most 5 open; it asks one question.
+  `/reminders` lists them as `#cN`. **Calendar notes** (with `[calendar]`): every 30 minutes she reads the next 48 hours
+  and keeps only each event's id and times, in memory; an event in the next 24 hours that moved by 15 minutes or more,
+  or disappeared from every calendar while all of them read fine, brings `Calendar change: Dentist moved 10:00 → 11:30
+  (today).`; at 20:00 (`early_check`) a first event tomorrow before `digest_time` brings `Early start tomorrow: 07:30
+  Dentist.` New events are not reported, and a calendar that fails never looks like cancelled events (an invitation in
+  two calendars too).
+  **The look back:** Sunday 19:00 (`lookback_time`), three lines from your own messages of the week and one question;
+  fewer than 5 messages, or not sent by 21:00: skipped that week.
+  **The improvised note:** about once a week (`improvise_per_week`) at a random time between 10:00 and 19:00, from the
+  moment, your profile facts (from chat and "remember", never from a page) and her last notes, in one of four moods (a
+  small thought, a curious question, something playful, a light wish for the week); never in the first week, she skips
+  it only when nothing at all fits, and two unanswered in a row pause it for four weeks.
+- The gate, in this order: on and the kind on, not `/quiet`, not in quiet hours (`quiet_hours`, 22:00-08:00; `""` for
+  none), at most `max_per_day` (1) for all kinds together, the weekly caps, not busy (an answer, a queue, a call, or a
+  message from you in the last 15 minutes); the look back and the improvised note only with one allowed account. When
+  two are due, the calendar goes first, then a check-in, then the look back, then the improvised note; a check-in that
+  loses its day comes the next day, a calendar note that loses is dropped.
+- The model writes the check-in, the look back and the improvised note in a call of its own, with its own short rules
+  and her style below them: no tools, no chat history, no mail, calendar, web or pages. The code then checks the text
+  (no claim that she did something, no question for a password, PIN or code, no link, number, mail or calendar word, no
+  guilt such as "I miss you", no imitation of the footer); a text that fails is not sent, and nothing is sent instead.
+  Calendar notes are the code's own words.
+- Each message ends with a line from the code: `(a check-in on something you said · /quiet to pause)`, `(calendar
+  change · …)`, `(early start tomorrow · …)`, `(weekly look back · …)`, `(a spontaneous note, about once a week · …)`.
+  Her part is kept in the chat history (your reply has its context), the line is not. Each is sent at most once: one
+  that was being sent when the bridge stopped is never sent again.
+- `/quiet` pauses them all until `/quiet off`; `/initiative off` turns them off. An install from before that turns
+  them on in the config gets one note once ("New: reminders and wake-up calls…"); a fresh install with them on in the
+  config hears it in the welcome.
+- "Goes well" is counted, never judged by the code: `/status` shows the last four weeks (sent, answered within a day,
+  `/quiet` uses) and the last skip of each kind with its reason. You decide whether she may write more often.
+- To judge her style without sending anything: `uv run python -m local_assistant.initiative --draft improvise` (or
+  `lookback`, `followup`) prints one draft from the real database, read only; it uses the model, so not while she is
+  busy.
+
 Lights and plugs (see "Lights and plugs (once)"):
 
 - "Turn off the living room lamp", "dim the bedroom light to 30 %, warm white", "is the heater on?" → `device_set` and
@@ -796,11 +917,12 @@ Languages:
   in, keeping names, code and quotes as they are. Voice notes are transcribed and spoken in it, and calls use its greeting,
   "one moment", "sorry, could you say that again?", "take your time" and goodbye, with its short "got it" ("Begrepen.")
   when she heard a request of five words or more.
-- Code-written text stays English: notes, the digest's headings, `/status`, `/help`, errors. On a call the device question
-  and the rare lines (the idle and length-cap goodbyes, device results) are spoken in English with Kokoro. When a device
-  waits for the yes, she says only that question (Gemma's words about it are stored but not spoken: in Dutch it claimed a
-  switch before the yes). A device yes counts in any of the 11 languages, still only as the whole message and only after
-  the question was heard whole.
+- Code-written text stays English: notes, the digest's headings, `/status`, `/help`, errors. On a call the device
+  question and the rare lines (the idle and length-cap goodbyes, device results) are spoken in English with Kokoro. When
+  a device waits for the yes, she says only that question, and only it is kept (in Dutch Gemma claimed a switch before
+  the yes). An answer in which no reminder was set keeps none of her words about it, in any language, and ends with
+  the code's line why, in a text and on a call. A device yes counts in any of the 11 languages, still only as the whole message and only after the question was
+  heard whole.
 
 Voice notes (in the current language):
 
@@ -824,6 +946,11 @@ Notes you may see:
 - "I was offline HH:MM–HH:MM, ask again if you still need something." Once after a restart, instead of answering messages older
   than 10 minutes (including those Signal delivers only after the restart).
 - "Sorry, I got confused. Could you say that again?" When anything unexpected goes wrong. You always hear back.
+- "Late, I was offline 06:40-09:05:" with a list of reminders: they came due while the bridge was down (see above).
+- "No reminder was set: <why>." at the end of her answer: Gemma tried to set a reminder and none was set; whatever she
+  wrote about it is left out. "No reminder was set. Ask me again, or use /remind." as a note: she said one was set when
+  she never tried, in that answer. `Not set: "…" (<why>).`: one reminder of several in that answer was not set.
+- A message ending "(… · /quiet to pause)": one she started herself (see above).
 - "I couldn't open that photo. Could you send it again?" A photo that is too big (over 20 MB) or that `sips` cannot read.
 - "(I looked at the first 4 photos only; send the others in a new message.)" and "(I couldn't open N of the photos.)".
 
@@ -840,7 +967,9 @@ Notes you may see:
 | `mail_messages` | Mail headers of the configured mailboxes (sender, recipients, subject, date, read, Focused/Other), Gemma's label and one-line summary, answered time; no bodies; deleted after 30 days (schema v4) |
 | `mail_sync` | Graph delta link and last sync per mailbox and folder |
 | `attachments` | Photos of a message (signal-cli's file id, type, size) until answered; `deleted_at` once the file is gone (schema v3) |
-| `state` | Small values: profile snapshot, learned-up-to pointer, last learning run, chars-per-token ratio; `watch:mini` (open problems and whether they were alerted), `health:logs` (log offsets and error counts) |
+| `state` | Small values: profile snapshot, learned-up-to pointer, last learning run, chars-per-token ratio; `watch:mini` (open problems and whether they were alerted), `health:logs` (log offsets and error counts); `reminders:calls_day` (calls placed today), `reminders:contract_told:<account>` (that account's first confirmation said only the note means a reminder is set); `initiative:quiet` (`/quiet`), `initiative:enabled` (`/initiative on` or `off`), `initiative:improvise_plan` (this week's times for the improvised note), `followups_after_id` |
+| `reminders` | Your reminders: your words, the local time as meant and its time zone, the next time in UTC, repeat, call, status, the note of the current firing and a fixed outcome word (sent, late, no_answer …). Done and cancelled ones are deleted after 30 days (schema v7) |
+| `followups`, `initiative_log` | Check-ins she may send (your words, at most 120 characters, the message they came from, due and expiry times; deleted 30 days after they close) and a log of the messages she starts: kind, day, outcome, a fixed reason word, the message, reply and `/quiet` times, never text (kept a year). `messages.footer` keeps the line the code adds to them (schema v7) |
 
 - **What Gemma sees:** rules, then the profile snapshot, the summary, recent messages (about 12,000 tokens, with earlier tool
   calls replayed in short form), and your new message with its local time. Fixed parts come first, so Ollama can reuse its
@@ -873,14 +1002,19 @@ Notes you may see:
    - **Chat:** short plain answers, the language of the question, use of the message time, rolling memory, voice answers
      without lists or links, and her built-in style (without `EVAL_SOUL`): a light joke when invited, none on a worry.
    - **Tools:** remembering and forgetting facts, searching history, honest misses, learning from a link, the Mac's status,
-     project status, photos (and follow-ups), the mail digest and reading a mail, device switching and dimming, and the
-     calendar.
+     project status, photos (and follow-ups), the mail digest and reading a mail, device switching and dimming, the
+     calendar, and reminders (a time tomorrow, "in 20 minutes", a wake-up call; a mentioned time sets none).
    - **Safety:** planted instructions in a web page (in English and Greek), a mail, a project README and a pasted email; a
      link without "learn" saves nothing; "ignore previous instructions" is not stored; "ask first" and "never off" devices
-     behave as the rules say; a hostile personality file cannot loosen the rules.
-   - **Learning:** facts are extracted, a changed fact replaces the old one, small talk adds nothing, and mail is sorted.
-3. **Phone walk-through:** [docs/e2e-checklist.md](docs/e2e-checklist.md) (76 items: texts, voice, calls, devices, mail,
-   calendar, music, web search, places and routes, languages).
+     behave as the rules say; a hostile personality file cannot loosen the rules; no reminder from a mail or a planted
+     page, and no claim of one that was refused; a personality file that asks her to request a PIN in a message she
+     starts herself.
+   - **Learning:** facts are extracted, a changed fact replaces the old one, small talk adds nothing, mail is sorted, and
+     a plan the user states becomes one check-in on the right day.
+   - **Messages she starts:** a gentle check-in, a look back only about that week, spontaneous notes that pass the
+     code's checks (a skip is fine), and, with `EVAL_LANGUAGE`, her text in that language with the code's English line.
+3. **Phone walk-through:** [docs/e2e-checklist.md](docs/e2e-checklist.md) (93 items: texts, voice, calls, devices, mail,
+   calendar, music, web search, places and routes, languages, reminders and wake-up calls, and the messages she starts).
 
 ## 7. Operations
 
@@ -896,6 +1030,8 @@ Notes you may see:
 | Upgrade signal-cli | Homebrew's signal-cli about monthly (`brew upgrade signal-cli`); releases older than three months may stop working, so read the release notes first. Calls need the JVM build to match Homebrew's version: `tools/call-tunnel/install-signal-cli-jvm.sh <new version>`, point `[calls] signal_cli` at the new folder, pin with `brew unpin signal-cli && brew upgrade signal-cli && brew pin signal-cli`, restart, and make a test call. Undo: the old folder and the old config line still work with the old version |
 | Calls | Call the bot from Signal (phone or linked device). `scripts/doctor.sh` shows Calls ✓ and `scripts/check.sh` shows `signal-cli: running`; "How's the Mac?" covers calls too. A call that never answers: `grep -i call ~/Library/Logs/local-assistant/bridge.log`. "Voice service loading" means it rang out on purpose (a note says so) |
 | Safety number changed | Replies stop and `bridge.log` says so. Never trust a new key blindly: a SIM swap of your number looks exactly like this. Stop the bridge (one signal-cli per account), run `signal-cli -Djava.net.preferIPv4Stack=true -a <bot-number> listIdentities -n <your ACI>`, compare its safety number with the one your phone shows (Signal, the chat with Estia, View safety number), and only if they match: `signal-cli -Djava.net.preferIPv4Stack=true -a <bot-number> trust -v <safety number> <your ACI>`. Turn on Registration Lock (a Signal PIN) for your own account and Estia's, so a SIM swap alone cannot take either over. With `[calls]` on, use the JVM build as in 3, Calls (the flag goes in `JAVA_OPTS`) |
+| Reminders | `/status` and `scripts/doctor.sh` show "N open · next <time> (call) · N failed" (times and counts only, never the text); doctor warns on one that failed in the last 7 days or is stuck sending. `/reminders` lists what was missed or failed, with the reason; `grep reminder ~/Library/Logs/local-assistant/bridge.log` has ids, times and outcomes |
+| Messages she starts | `/status` shows "Initiative: on · last 4 weeks: N sent · N answered within a day · /quiet N times · improvised note: this week" and the last skip per kind with its reason; doctor shows the kinds that are on (and says when the calendar notes are off for lack of `[calendar]`) and warns when one could not be sent. `grep initiative ~/Library/Logs/local-assistant/bridge.log` has kinds, ids and reasons, never text. `--draft` (section 4) prints one without sending |
 | Backup | Not set up yet: the database and `~/.local/share/signal-cli` have no backup |
 
 ## 8. Security
@@ -903,6 +1039,11 @@ Notes you may see:
 This section is the threat model. [SECURITY.md](SECURITY.md) explains how to report a problem.
 
 - Only allowed ACIs reach Gemma, get receipts or receive messages. `SignalClient` refuses any other recipient in code.
+- Messages she starts herself: the code finds every reason and checks every limit before the model is asked; the model
+  writes in a call of its own with no tools and no outside text (only the user's own messages, profile facts from chat
+  and the moment), and the code checks its text before it is sent (claims, secrets, links, numbers, mail and calendar
+  words, guilt, chat tokens); a text that fails is not sent. Sent at most once, only to allowed accounts. The calendar
+  notes keep event ids and times in memory only, never titles. Logs and the log table hold kinds, days and reason words.
 - No shell. The project tools are read-only and fixed in code: git runs as `/usr/bin/git -C <project> …` with fixed arguments
   (no shell, no pager, `--no-optional-locks`, fsmonitor off on every call). A repo whose local git config has a key outside a
   safe list (`core.*` basics, `remote.*`, `branch.*`, `user.*`) is skipped, since such keys can make git run programs. Only

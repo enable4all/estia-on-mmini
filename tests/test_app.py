@@ -3,6 +3,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import stat
 import sys
 import tempfile
@@ -33,6 +34,7 @@ from local_assistant.profiler import UNANNOUNCED_KEY
 from local_assistant.signal_io import SignalClient
 from local_assistant.spotify import Spotify
 from local_assistant.store import Store
+from local_assistant.tools import TOOL_SCHEMAS
 from local_assistant.watchers import Problem
 from local_assistant.web_search import WebResult
 from tests.conftest import ME, STRANGER
@@ -46,6 +48,8 @@ from tests.test_photos import png
 from tests.test_voice import M4A, closed_port_url
 
 NAME = DEFAULT_NAME  # her name in these tests (a fresh install's)
+# a fresh install's welcome: reminders and the messages she starts are on without their sections
+WELCOME = prompts.welcome(name=NAME, reminders=True)  # her own messages are opt-in: no line for them
 
 FAKE = Path(__file__).parent / "fakes" / "fake_signal_cli.py"
 # Recent timestamps: messages sent before the bridge started and older than 10 minutes count as
@@ -858,7 +862,7 @@ async def test_the_calendar_gets_its_tools_rules_and_status_line(tmp_path: Path)
         app = App(cfg, store, SignalClient([sys.executable, str(FAKE)], cfg.allowed_acis), FakeGemma(), Fetcher())
         assert "calendar_agenda" in [schema["function"]["name"] for schema in app.tools.schemas]
         assert app.context.system_prompt(store.current_conversation()).startswith(
-            prompts.rules(name=NAME, calendar=True)
+            prompts.rules(name=NAME, calendar=True, reminders=True)
         )
         assert await app._status_lines() == ["Calendar: ok (0 events in the next 7 days)"]
     finally:
@@ -1852,9 +1856,10 @@ async def test_a_fresh_install_says_welcome_once(tmp_path: Path, monkeypatch: py
     """Nothing in the store yet: one welcome written by code, kept as a sent note (out of Gemma's history), once."""
     harness = await start(tmp_path, monkeypatch, FakeGemma(text("Hi Alex!")), welcome=True)
     try:
-        await until(lambda: sent(harness.folder) == [prompts.welcome(name=NAME)])
+        await until(lambda: sent(harness.folder) == [WELCOME])
         [request] = [r for r in requests(harness.folder) if r["method"] == "send"]
         assert request["params"]["recipient"] == [ME]
+        await until(lambda: harness.app.store.get_state(WELCOME_KEY) is not None)  # stored once signal-cli answered
         note = harness.app.store.message(1)
         assert (note.direction, note.kind, note.status, note.peer_aci) == ("out", "note", "sent", ME)
         assert harness.app.store.get_state(WELCOME_KEY)
@@ -1868,7 +1873,7 @@ async def test_a_fresh_install_says_welcome_once(tmp_path: Path, monkeypatch: py
     try:
         deliver(restarted.folder, "/help", T0 + 1)
         await until(lambda: sent(restarted.folder)[-1] == prompts.HELP)
-        assert sent(restarted.folder).count(prompts.welcome(name=NAME)) == 1
+        assert sent(restarted.folder).count(WELCOME) == 1
     finally:
         await stop(restarted)
 
@@ -1964,7 +1969,7 @@ async def test_a_welcome_that_could_not_be_sent_is_tried_at_the_next_start(
     harness = await start(tmp_path, monkeypatch, FakeGemma(), welcome=True)
     try:
         await until(lambda: harness.app.store.get_state(ALIVE_KEY) is not None)  # the start is done
-        assert sent(harness.folder) == [prompts.welcome(name=NAME)] * 3  # three tries, like any message
+        assert sent(harness.folder) == [WELCOME] * 3  # three tries, like any message
         assert harness.app.store.get_state(WELCOME_KEY) is None
         assert harness.app.store.count_messages() == 0  # nothing left for recovery to send
     finally:
@@ -1973,7 +1978,7 @@ async def test_a_welcome_that_could_not_be_sent_is_tried_at_the_next_start(
     restarted = await start(tmp_path, monkeypatch, FakeGemma(), welcome=True)
     try:
         await until(lambda: restarted.app.store.get_state(WELCOME_KEY) is not None)
-        assert sent(restarted.folder) == [prompts.welcome(name=NAME)] * 4
+        assert sent(restarted.folder) == [WELCOME] * 4
         assert restarted.app.store.message(1).status == "sent"
     finally:
         await stop(restarted)
@@ -1985,9 +1990,7 @@ PARTNER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"  # a second allowed account (a 
 def welcomed_accounts(folder: Path) -> list[str]:
     """Each try to send the welcome, by recipient, failed ones included."""
     tries = [r["params"] for r in requests(folder) if r["method"] == "send"]
-    return [
-        aci for params in tries if params.get("message") == prompts.welcome(name=NAME) for aci in params["recipient"]
-    ]
+    return [aci for params in tries if params.get("message") == WELCOME for aci in params["recipient"]]
 
 
 async def test_a_welcome_one_account_missed_is_tried_again_at_the_next_start(
@@ -2072,6 +2075,10 @@ def test_the_welcome_names_only_the_parts_that_are_set_up() -> None:
     assert len(tries) == 8 and all(":" in line for line in tries)
     assert "except what web search, places and music need to send" in every
     assert "I only read your mail and calendar, never change them" in every
+    assert "Reminder set" not in every  # the contract comes with reminders only
+    with_reminders = prompts.welcome(name=NAME, reminders=True, wake_calls=True)
+    [line] = [line for line in with_reminders.splitlines() if line.startswith("- Reminders:")]
+    assert line.endswith('(a reminder is set only when my "Reminder set" note says so)')
 
 
 @pytest.mark.parametrize(
@@ -2080,7 +2087,7 @@ def test_the_welcome_names_only_the_parts_that_are_set_up() -> None:
         ({"mail_accounts": (MailAccount("family", "info@example.com"),)}, {"mail": True}),
         ({"calendar_enabled": True}, {"calendar": True}),
         ({"voice_url": "http://127.0.0.1:9"}, {"voice": True}),
-        ({"calls_enabled": True}, {"calls": True}),
+        ({"calls_enabled": True}, {"calls": True, "wake_calls": True}),
         ({"tapo_devices": (DeviceSpec("desk lamp", "192.168.1.20", "light", "normal"),)}, {"device": "desk lamp"}),
         ({"web_enabled": True}, {"web": True}),
         ({"maps_enabled": True}, {"maps": True}),
@@ -2101,7 +2108,8 @@ def test_the_welcome_follows_the_config(tmp_path: Path, settings: dict[str, Any]
     store = Store.open(cfg.db_path)
     try:
         app = App(cfg, store, SignalClient([sys.executable, str(FAKE)], cfg.allowed_acis), FakeGemma(), Fetcher())
-        assert app._welcome_text() == prompts.welcome(name=NAME, **part)
+        default: dict[str, Any] = {"reminders": True}  # her own messages are opt-in: no line for them
+        assert app._welcome_text() == prompts.welcome(name=NAME, **default | part)
     finally:
         store.close()
 
@@ -2233,5 +2241,390 @@ async def test_a_call_follows_the_language(tmp_path: Path, monkeypatch: pytest.M
         deliver(harness.folder, "/language pl", T0)
         await until(lambda: len(sent(harness.folder)) == 1)
         assert app.calls.language == "pl" and app._call_voice is not None and app._call_voice.language == "pl"
+    finally:
+        await stop(harness)
+
+
+# reminders and wake-up calls in the bridge
+
+
+class MovableClock:
+    """The bridge's clock, moved on by a test (reminders fire by it; asyncio still runs in real time)."""
+
+    def __init__(self) -> None:
+        self.offset = 0.0
+
+    def __call__(self) -> float:
+        return time.time() + self.offset
+
+
+async def test_a_reminder_from_the_command_fires_as_a_note(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = MovableClock()
+    harness = await start(tmp_path, monkeypatch, FakeGemma(), clock=clock)
+    try:
+        deliver(harness.folder, "/remind 20m take the pizza out", T0)
+        await until(lambda: any(text.startswith("Reminder set (#1):") for text in sent(harness.folder)))
+        clock.offset = 20 * 60
+        assert harness.app.reminder_scheduler is not None
+        harness.app.reminder_scheduler.notify()
+        await until(lambda: "Reminder: take the pizza out" in sent(harness.folder))
+        assert harness.gemma.calls == []  # code only
+        notes = [m for m in harness.app.store.window_messages(harness.app.store.current_conversation().id, 0)]
+        assert all("Reminder" not in m.text for m in notes)  # never in Gemma's history
+    finally:
+        await stop(harness)
+
+
+async def test_gemma_sets_a_reminder_and_code_confirms_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    when = datetime.fromtimestamp(time.time() + 3 * 3600, TZ_APP).strftime("%Y-%m-%d %H:%M")
+    gemma = FakeGemma(tool("set_reminder", at=when, text="call mum"), text("Sure, I'll remind you."))
+    harness = await start(tmp_path, monkeypatch, gemma)
+    try:
+        assert "set_reminder" in [schema["function"]["name"] for schema in harness.app.tools.schemas]
+        deliver(harness.folder, "remind me in three hours to call mum", T0)
+        await until(lambda: len(sent(harness.folder)) == 2)
+        answer, note = sent(harness.folder)
+        assert answer == "Sure, I'll remind you." and note.startswith("Reminder set (#1):") and '"call mum"' in note
+    finally:
+        await stop(harness)
+
+
+async def test_a_claimed_reminder_that_was_not_set_gets_codes_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = await start(tmp_path, monkeypatch, FakeGemma(text("Done, I'll remind you at five.")))
+    try:
+        deliver(harness.folder, "remind me at five", T0)
+        await until(lambda: sent(harness.folder) == ["Done, I'll remind you at five.", prompts.REMINDER_GUARD])
+    finally:
+        await stop(harness)
+
+
+@pytest.mark.parametrize(
+    ("answer", "kept"),
+    [
+        ("I've set a reminder for 17:00 to let you know about it.", ""),
+        (
+            "Your invoice from Acme is 120 EUR. I've noted the reminder for 17:00.",
+            "Your invoice from Acme is 120 EUR.\n",
+        ),
+        ("Er staat een factuur van Acme in. Ik heb de herinnering ingesteld.", "Er staat een factuur van Acme in.\n"),
+    ],
+)
+async def test_a_refused_reminder_leaves_her_other_words_and_codes_line_in_any_language(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answer: str, kept: str
+) -> None:
+    """In English as in any language: her sentences about the reminder never reach the user or the history; her
+    others do, with code's line why after them, in the one message (no second note)."""
+    gemma = FakeGemma(tool("set_reminder", at="2030-01-01 07:00", text="invoice"), text(answer))
+    harness = await start(tmp_path, monkeypatch, gemma)
+    try:
+        deliver(harness.folder, "remind me of the invoice", T0)
+        await until(lambda: len(sent(harness.folder)) >= 1)
+        await asyncio.sleep(0.2)
+        line = "No reminder was set: that is more than 366 days ahead."
+        assert sent(harness.folder) == [f"{kept}{line}"]
+        assert harness.app.store.message(2).text == f"{kept}{line}"
+    finally:
+        await stop(harness)
+
+
+async def test_in_another_language_a_refused_reminder_gets_only_codes_words(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dutch Gemma may say "Ik heb de herinnering ingesteld" after set_reminder refused: the user gets code's line
+    instead, and the history keeps that, never the claim (as for a device question)."""
+    claim = "Ik heb de herinnering om 17:00 voor je ingesteld."
+    gemma = FakeGemma(tool("set_reminder", at="2030-01-01 07:00", text="mama bellen"), text(claim))
+    harness = await start(tmp_path, monkeypatch, gemma, language="nl")
+    try:
+        deliver(harness.folder, "herinner me aan mama", T0)
+        await until(lambda: len(sent(harness.folder)) >= 1)
+        await asyncio.sleep(0.2)
+        assert sent(harness.folder) == ["No reminder was set: that is more than 366 days ahead."]
+        assert harness.app.store.message(2).text == "No reminder was set: that is more than 366 days ahead."
+    finally:
+        await stop(harness)
+
+
+async def test_on_a_call_in_another_language_a_refused_reminder_is_said_in_english_by_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gemma = FakeGemma(tool("set_reminder", at="2030-01-01 07:00", text="koken"), text("Ik bel je om vijf uur!"))
+    harness = await start(tmp_path, monkeypatch, gemma, language="nl", **call_settings(tmp_path))
+    try:
+        app = harness.app
+        app.call_started(ME)
+        turn = await app.call_turn(ME, "bel me om vijf uur", lambda: None)
+        line = "No reminder was set: that is more than 366 days ahead."
+        assert (turn.text, turn.code_text) == ("", line)  # said in English, Gemma's words left out
+        assert turn.reply_id is not None and app.store.message(turn.reply_id).text == line  # and kept
+        assert sent(harness.folder) == []  # no second note
+    finally:
+        await stop(harness)
+
+
+@pytest.mark.parametrize("language", ["en", "nl"])
+async def test_on_a_call_her_other_words_are_said_and_codes_line_after_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, language: str
+) -> None:
+    answers = {"en": "It's sunny today. I'll call you at five!", "nl": "Het is zonnig vandaag. Ik bel je om vijf uur!"}
+    gemma = FakeGemma(tool("set_reminder", at="2030-01-01 07:00", text="koken"), text(answers[language]))
+    harness = await start(tmp_path, monkeypatch, gemma, language=language, **call_settings(tmp_path))
+    try:
+        app = harness.app
+        app.call_started(ME)
+        turn = await app.call_turn(ME, "call me at five", lambda: None)
+        hers = answers[language].split(". ")[0] + "."
+        line = "No reminder was set: that is more than 366 days ahead."
+        assert (turn.text, turn.code_text) == (hers, line)  # hers in her voice, code's line in English
+        assert turn.reply_id is not None and app.store.message(turn.reply_id).text == f"{hers} {line}"
+    finally:
+        await stop(harness)
+
+
+async def test_on_a_call_codes_line_has_the_spoken_reason(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    gemma = FakeGemma(tool("set_reminder", at="17:00", text="x" * 201), text("Ik bel je om vijf uur!"))
+    harness = await start(tmp_path, monkeypatch, gemma, language="nl", **call_settings(tmp_path))
+    try:
+        app = harness.app
+        app.call_started(ME)
+        turn = await app.call_turn(ME, "bel me om vijf uur", lambda: None)
+        line = "No reminder was set: the text is too long."  # said and kept; the text form names 200 characters
+        assert (turn.text, turn.code_text) == ("", line)
+        assert turn.reply_id is not None and app.store.message(turn.reply_id).text == line
+    finally:
+        await stop(harness)
+
+
+async def test_a_reminder_set_on_a_call_is_said_in_codes_words(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    when = datetime.fromtimestamp(time.time() + 3 * 3600, TZ_APP).strftime("%Y-%m-%d %H:%M")
+    gemma = FakeGemma(tool("set_reminder", at=when, text="cook"), text("Sure."))
+    harness = await start(tmp_path, monkeypatch, gemma, **call_settings(tmp_path))
+    try:
+        turn = await harness.app.call_turn(ME, "remind me to cook", lambda: None)
+        assert turn.text == "Sure." and turn.code_text.startswith("Reminder set for ")
+        await until(lambda: any(text.startswith("Reminder set (#1):") for text in sent(harness.folder)))
+    finally:
+        await stop(harness)
+
+
+async def test_a_wake_up_call_without_the_voice_service_is_a_text_that_says_why(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = MovableClock()
+    harness = await start(tmp_path, monkeypatch, FakeGemma(), clock=clock, **call_settings(tmp_path))
+    try:
+        deliver(harness.folder, "/remind call 1m wake up", T0)
+        await until(lambda: any(text.startswith("Reminder set (#1):") for text in sent(harness.folder)))
+        clock.offset = 60
+        assert harness.app.reminder_scheduler is not None
+        harness.app.reminder_scheduler.notify()
+        await until(lambda: any("No call: the voice service is not ready." in text for text in sent(harness.folder)))
+        assert not any(r["method"] == "startCall" for r in requests(harness.folder))
+    finally:
+        await stop(harness)
+
+
+async def test_after_a_restart_a_note_that_may_have_gone_out_is_not_sent_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def half_sent(store: Store) -> None:
+        due = time.time() - 5 * 60
+        local = datetime.fromtimestamp(due, TZ_APP).strftime("%Y-%m-%d %H:%M")
+        rid = store.add_reminder(ME, "call mum", local, TZ_APP.key, due)
+        note = store.add_outgoing(store.current_conversation().id, ME, "note", "Reminder: call mum", None)
+        store.fire_reminder(rid, note)  # the bridge stopped before signal-cli answered
+        store.set_state(ALIVE_KEY, f"{time.time() - 600:.0f}")
+
+    harness = await start(tmp_path, monkeypatch, FakeGemma(), prepare=half_sent)
+    try:
+        await until(lambda: any(text.startswith("Late, I was offline") for text in sent(harness.folder)))
+        await asyncio.sleep(0.3)
+        [late] = sent(harness.folder)
+        assert late.endswith("call mum (may be a repeat)")  # recovery never sent the old note again
+    finally:
+        await stop(harness)
+
+
+async def test_status_shows_the_reminders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    harness = await start(tmp_path, monkeypatch, FakeGemma())
+    try:
+        deliver(harness.folder, "/remind 2h take the pills", T0)
+        await until(lambda: len(sent(harness.folder)) == 1)
+        deliver(harness.folder, "/status", T0 + 1)
+        await until(lambda: len(sent(harness.folder)) == 2)
+        assert re.search(r"^Reminders: 1 open · next .* · 0 failed$", sent(harness.folder)[1], re.MULTILINE)
+    finally:
+        await stop(harness)
+
+
+async def test_with_reminders_off_nothing_changes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    harness = await start(tmp_path, monkeypatch, FakeGemma(text("Hi.")), reminders_enabled=False)
+    try:
+        app = harness.app
+        assert app.reminders is None and app.reminder_scheduler is None
+        assert app.context.system_prompt(app.store.current_conversation()).startswith(prompts.rules(name=NAME))
+        deliver(harness.folder, "hello", T0)
+        await until(lambda: sent(harness.folder) == ["Hi."])
+        assert harness.gemma.calls[0]["tools"] == TOOL_SCHEMAS
+        deliver(harness.folder, "/remind 2h x", T0 + 1)
+        await until(lambda: sent(harness.folder)[-1] == prompts.REMINDERS_OFF)
+    finally:
+        await stop(harness)
+
+
+# messages she starts herself
+
+
+def announced(store: Store) -> None:
+    store.set_state("initiative_announced", "1")
+
+
+async def test_a_message_she_starts_goes_out_with_its_footer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The app's send adds the footer; her part is kept as her text, the footer apart."""
+    now = time.time()
+
+    def planned(store: Store) -> None:
+        announced(store)
+        source = store.add_incoming(store.current_conversation().id, ME, int((now - 3 * 86_400) * 1000), "text", "x")
+        assert source is not None
+        store.set_status(source, "answered")
+        store.add_followup(ME, "call the dentist", source, now - 60, now + 86_400, at="2026-10-12T10:00:00+00:00")
+
+    gemma = FakeGemma(text(json.dumps({"text": "Did you get hold of the dentist?"})))
+    harness = await start(
+        tmp_path, monkeypatch, gemma, prepare=planned, initiative_enabled=True, initiative_quiet_hours=""
+    )
+    try:
+        assert harness.app.initiative is not None
+        await harness.app.initiative.tick()
+        footer = prompts.INITIATIVE_FOOTERS["followup"]
+        await until(lambda: sent(harness.folder) == [f"Did you get hold of the dentist?\n{footer}"])
+        [entry] = harness.app.store.initiative_entries()
+        message = harness.app.store.message(entry.message_id or 0)
+        assert (message.kind, message.text, message.footer, message.status) == (
+            "text",
+            "Did you get hold of the dentist?",
+            footer,
+            "sent",
+        )
+    finally:
+        await stop(harness)
+
+
+def chatted(store: Store) -> None:
+    out_id = store.add_outgoing(store.current_conversation().id, ME, "text", "An answer from before.", None)
+    store.mark_sent(out_id, T0 - 60_000)
+
+
+async def test_an_install_from_before_that_turns_them_on_in_the_config_gets_the_announcement_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = await start(
+        tmp_path, monkeypatch, FakeGemma(), prepare=chatted, initiative_enabled=True, initiative_quiet_hours=""
+    )
+    try:
+        assert harness.app.initiative is not None
+        await harness.app.initiative.tick()
+        line = harness.app.initiative.settings.line()  # no quiet hours here: the test may run at night
+        expected = prompts.announcement(reminders=True, wake_calls=False, initiative=line)
+        await until(lambda: sent(harness.folder) == [expected])
+        await harness.app.initiative.tick()
+        await asyncio.sleep(0.2)
+        assert sent(harness.folder) == [expected]
+    finally:
+        await stop(harness)
+
+
+async def test_a_fresh_installs_welcome_tells_and_no_announcement_follows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = await start(
+        tmp_path, monkeypatch, FakeGemma(), welcome=True, initiative_enabled=True, initiative_quiet_hours=""
+    )
+    try:
+        welcome = harness.app._welcome_text()
+        await until(lambda: sent(harness.folder) == [welcome])
+        assert "Reminders:" in welcome and "/quiet pauses that." in welcome
+        assert harness.app.initiative is not None
+        await harness.app.initiative.tick()
+        await asyncio.sleep(0.2)
+        assert sent(harness.folder) == [welcome]
+    finally:
+        await stop(harness)
+
+
+async def test_a_message_she_was_sending_at_a_crash_is_never_sent_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def half_sent(store: Store) -> None:
+        announced(store)
+        out = store.add_outgoing(store.current_conversation().id, ME, "text", "A small thought.", None, footer="(f)")
+        store.log_initiative("improvise", "2026-10-12", "sending", message_id=out, at="2026-10-12T10:00:00+00:00")
+
+    harness = await start(tmp_path, monkeypatch, FakeGemma(), prepare=half_sent)
+    try:
+        await until(lambda: harness.app.store.get_state(ALIVE_KEY) is not None)  # the start is done
+        await asyncio.sleep(0.2)
+        assert sent(harness.folder) == []
+        [entry] = harness.app.store.initiative_entries()
+        assert entry.outcome == "unknown" and harness.app.store.message(entry.message_id or 0).status == "ignored"
+    finally:
+        await stop(harness)
+
+
+async def test_quiet_and_status_through_signal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    harness = await start(tmp_path, monkeypatch, FakeGemma(), prepare=announced, initiative_enabled=True)
+    try:
+        deliver(harness.folder, "/quiet", T0)
+        await until(lambda: sent(harness.folder) == [prompts.QUIET_ON])
+        deliver(harness.folder, "/status", T0 + 1)
+        await until(lambda: len(sent(harness.folder)) == 2)
+        assert re.search(r"^Initiative: paused \(/quiet\) · last 4 weeks: 0 sent", sent(harness.folder)[1], re.M)
+        assert harness.app.profiler._after_learning is harness.app.followups is not None
+    finally:
+        await stop(harness)
+
+
+async def test_off_by_default_nothing_changes_until_the_user_types_initiative_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = await start(tmp_path, monkeypatch, FakeGemma(text("Hi.")), welcome=True, initiative_quiet_hours="")
+    try:
+        app = harness.app
+        assert app.initiative is not None and not app.initiative.enabled
+        plain = prompts.welcome(name=NAME, reminders=True)
+        await until(lambda: sent(harness.folder) == [plain])
+        assert "/quiet" not in plain
+        deliver(harness.folder, "I'll call the dentist tomorrow", T0)
+        await until(lambda: sent(harness.folder)[-1] == "Hi.")
+        assert app.followups is not None and not app.followups.has_work()  # no idle pass for it while off
+        deliver(harness.folder, "/quiet", T0 + 1)
+        await until(lambda: sent(harness.folder)[-1] == prompts.QUIET_DISABLED)
+        deliver(harness.folder, "/status", T0 + 2)
+        await until(lambda: len(sent(harness.folder)) == 4)
+        assert prompts.INITIATIVE_OFF in sent(harness.folder)[3].splitlines()
+        await app.initiative.tick()
+        deliver(harness.folder, "/initiative on", T0 + 3)
+        on = prompts.INITIATIVE_ON.format(line=app.initiative.settings.line())
+        await until(lambda: sent(harness.folder)[-1] == on)
+        assert app.initiative.enabled and app.store.get_state("initiative_announced") is not None
+        await app.initiative.tick()
+        await asyncio.sleep(0.2)
+        assert len(sent(harness.folder)) == 5  # no announcement after it: the reply told
+    finally:
+        await stop(harness)
+
+
+async def test_an_install_from_before_hears_nothing_new_while_they_are_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = await start(tmp_path, monkeypatch, FakeGemma(), prepare=chatted, initiative_quiet_hours="")
+    try:
+        assert harness.app.initiative is not None
+        await harness.app.initiative.tick()
+        await asyncio.sleep(0.2)
+        assert sent(harness.folder) == [] and harness.app.store.get_state("initiative_announced") is None
     finally:
         await stop(harness)

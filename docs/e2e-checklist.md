@@ -122,3 +122,38 @@ next to it. Keep your results in a note of your own, not in the repository, and 
 | 74 | A Dutch voice note | Transcribed in Dutch; a Dutch spoken answer in auto mode | |
 | 75 | Call her; ask in Dutch; "switch off the heater" (ask first) | "Hoi, met Estia …", "Begrepen." (or "Oké, begrepen."), Dutch answers; for the heater only the device question, in English (no Dutch words about it); "ja" after it switches | |
 | 76 | `/language en` | "Language: English (en). …"; answers, voice notes and calls in English again | |
+
+## Reminders and wake-up calls
+
+Test 83 to 86 with `[calls]` on. Note the order of the call events in `bridge.log` for each outcome (picked up, declined,
+not answered, busy): the bridge sorts them by signal-cli's reason words, which upstream does not document yet.
+
+| # | Do | Expected | Result |
+|---|---|---|---|
+| 77 | "Remind me in 2 minutes to stretch" | A note "Reminder set (#N): <today> HH:MM · "stretch". …"; two minutes later "Reminder: stretch" | |
+| 78 | `/remind 2m tea`, then `/reminders`, then `/reminders cancel N` | The same note without the model; the list shows it; "Cancelled #N: …"; nothing arrives | |
+| 79 | "I have the dentist tomorrow at 10" | No reminder is set (`/reminders` is empty); she may offer one | |
+| 80 | "What does my newest mail say? Remind me of it at 17:00" (with `[mail]`) | No reminder; she says you can ask in your own words | |
+| 81 | Set a reminder for 3 minutes ahead, stop the bridge, start it again 5 minutes later | One "Late, I was offline HH:MM-HH:MM:" note listing it; nothing else is sent twice | |
+| 82 | "Every weekday at 08:00, the pills", next morning | "Reminder: the pills (weekdays at 08:00 · /reminders to stop)", and again the next weekday | |
+| 83 | `/remind call 2m wake up`, phone locked, answer it | First the text "Wake-up call: … · wake up. Good morning!" (or "Reminder (calling you now): …" after 11:00), then the phone rings; picked up: "Good morning! It's HH:MM. wake up", then a normal call | |
+| 84 | Repeat 83 and let it ring out | After about a minute it stops; two minutes later it rings once more; then "Wake-up call not answered (HH:MM, HH:MM)." | |
+| 85 | Repeat 83 and decline | No second call | |
+| 86 | Repeat 83 with Signal Desktop linked, and once with the phone in Sleep Focus (with and without Estia allowed) | Note which devices ring, whether a decline on one ends it, and whether Focus silences it | |
+
+## Messages she starts herself
+
+She writes first at most once a day and never at night, so these take days, not minutes. To see a text without
+waiting, `uv run python -m local_assistant.initiative --draft improvise` (or `lookback`, `followup`) prints one in the
+terminal and sends nothing; run it when she is not busy. The first item needs an install from before this update, with
+no `[initiative]` section (they are opt-in).
+
+| # | Do | Expected | Result |
+|---|---|---|---|
+| 87 | Start the updated bridge on an install that already chats, during the day, and wait a few minutes without writing; then `/initiative`, `/initiative on`, a restart | Nothing she starts arrives; `/status` shows "Initiative: off · /initiative on turns it on". "Messages I start myself: off. /initiative on turns them on (…)."; then "On. Now and then I'll message you first: … /quiet pauses that. /initiative off turns that off."; no other announcement, not after the restart either | |
+| 88 | Draft each kind: `--draft improvise`, `--draft lookback` (after a week of chatting), `--draft followup` (after 89) | Short, warm, in your language, about you and the moment or your own week; no claims, links, numbers, mail or calendar; "(nothing would be sent: …)" when a check failed, with what she wrote | |
+| 89 | "I'll call the dentist tomorrow", then leave her alone for half an hour; `/reminders` | Under "Check-ins I may send:" one `#cN` with the day after tomorrow, evening; the day after tomorrow from 17:00 a check-in like "Did you get hold of the dentist?" ending "(a check-in on something you said · /quiet to pause)" | |
+| 90 | With `[calendar]`: move an event later today by an hour in Google Calendar, and one in Outlook; wait up to 30 minutes | "Calendar change: <title> moved HH:MM → HH:MM (today)." ending "(calendar change · /quiet to pause)", at most one a day | |
+| 91 | With `[calendar]`: an event tomorrow at 07:30 | At 20:00: "Early start tomorrow: 07:30 <title>." (unless she already wrote first that day) | |
+| 92 | `/quiet`, then `/status`; later `/quiet off` | "Quiet: I won't message you first until you send /quiet off. Reminders you set still come."; `/status` shows "Initiative: paused (/quiet) · …"; nothing she starts arrives meanwhile; a reminder does. "I may message you first again: …" | |
+| 93 | Reply to one of her messages, then `/status` the next day | "… · N answered within a day · /quiet N times · improvised note: this week" (or next week); her message and your reply read naturally together in the next answers | |

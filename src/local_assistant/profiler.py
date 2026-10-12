@@ -13,7 +13,7 @@ import json
 import logging
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from local_assistant import prompts
@@ -41,6 +41,14 @@ class LearnError(Exception):
     """Gemma's learning answer could not be used."""
 
 
+class IdleHook(Protocol):
+    """More idle work after learning, in the same pass (followups.FollowUps: plans the user stated)."""
+
+    def has_work(self) -> bool: ...
+
+    async def run(self) -> object: ...
+
+
 class Profiler:
     def __init__(
         self,
@@ -59,6 +67,7 @@ class Profiler:
         clock: Callable[[], float] = time.monotonic,
         busy: Callable[[], bool] = lambda: False,
         max_failures: int = 3,
+        after_learning: IdleHook | None = None,
     ) -> None:
         self._store = store
         self._profile = profile
@@ -74,6 +83,7 @@ class Profiler:
         self._clock = clock
         self._busy = busy
         self._max_failures = max_failures
+        self._after_learning = after_learning
         self._last_activity = clock()
         self._soon = False
         self._task: asyncio.Task[None] | None = None
@@ -96,7 +106,8 @@ class Profiler:
         return self._clock() - self._last_activity >= wait and self.has_work()
 
     def has_work(self) -> bool:
-        return bool(self._unlearned(limit=1)) or self._needs_summary()
+        hook = self._after_learning is not None and self._after_learning.has_work()
+        return bool(self._unlearned(limit=1)) or self._needs_summary() or hook
 
     async def run_forever(self) -> None:
         while True:
@@ -122,13 +133,19 @@ class Profiler:
                 self._soon = False  # one quick pass after /new, then the normal quiet-time rhythm
 
     async def run_once(self) -> None:
-        """Learn, then summarise; a failed learning pass does not block the summary."""
+        """Learn, then the hook (the follow-ups), then summarise; a failed step does not block the next. A failure is
+        raised at the end, so the next pass waits for the next quiet time."""
         error: LearnError | GemmaError | None = None
         changes = 0
         try:
             changes = await self.learn()
         except (LearnError, GemmaError) as exc:
             error = exc
+        if self._after_learning is not None:
+            try:
+                await self._after_learning.run()
+            except GemmaError as exc:
+                error = error or exc
         summarized = await self.summarize_if_needed()
         if changes and not summarized and self._context.is_fresh(self._store.current_conversation()):
             self._context.refresh_snapshot()  # nothing cached yet in the new conversation

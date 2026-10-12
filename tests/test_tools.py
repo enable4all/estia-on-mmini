@@ -5,19 +5,23 @@ from typing import Any
 
 import pytest
 
+from local_assistant import prompts
 from local_assistant.config import Config, ExtraCheck
 from local_assistant.fetcher import FetchError, Page
 from local_assistant.maps import Place, Route
 from local_assistant.music_tools import MusicTools
 from local_assistant.profile import ApplyResult, Op, Profile
 from local_assistant.projects import Projects
+from local_assistant.reminders import Reminders
 from local_assistant.store import SourceKind, Store
 from local_assistant.tools import (
     CALENDAR_SCHEMAS,
     DEVICE_SCHEMAS,
     LEARN_NEXT_STEP,
     MAPS_SCHEMAS,
+    REMINDER_SCHEMAS,
     TOOL_SCHEMAS,
+    ReminderAttempt,
     Tools,
     Turn,
     tool_schemas,
@@ -1016,3 +1020,221 @@ async def test_a_bad_argument_or_no_route_leaves_room_to_try_again(store: Store)
         "Not looked up: Google Maps found no route"
     )
     assert (await tools.call(current, "route", '{"to": "Airport", "mode": "transit"}')).startswith("Route by transit")
+
+
+# reminders: only from the user's own words; code confirms
+
+
+def with_reminders(store: Store, *, calls: bool = True) -> tuple[Tools, Reminders]:
+    profile = Profile(store)
+    reminders = Reminders(store, TZ, calls=calls, clock=lambda: T0 / 1000)  # Thu 8 Oct 09:32
+    return Tools(store, profile, TZ, FakeFetch(), reminders=reminders), reminders
+
+
+def test_the_reminder_tools_are_offered_only_with_reminders(store: Store) -> None:
+    tools, _ = with_reminders(store)
+    names = [schema["function"]["name"] for schema in tools.schemas]
+    assert names[len(TOOL_SCHEMAS) :] == ["set_reminder", "list_reminders", "cancel_reminder"]  # after the base ones
+    assert tools.schemas[: len(TOOL_SCHEMAS)] == TOOL_SCHEMAS
+    assert REMINDER_SCHEMAS[0]["function"]["parameters"]["required"] == ["text"]
+    plain = Tools(store, Profile(store), TZ, FakeFetch())
+    assert "set_reminder" not in [schema["function"]["name"] for schema in plain.schemas]
+
+
+async def test_set_reminder_saves_and_leaves_the_confirmation_to_code(store: Store) -> None:
+    tools, _ = with_reminders(store)
+    current = turn(store, "remind me tomorrow at 7 to call mum")
+    result = await tools.call(current, "set_reminder", json.dumps({"at": "2026-10-09 07:00", "text": "call mum"}))
+    assert result.startswith("Set as #1 for Fri 9 Oct 07:00;")
+    assert current.reminder_set and current.reminder_notes == [
+        'Reminder set (#1): Fri 9 Oct 07:00 · "call mum". /reminders to see or cancel.\n'
+        "Only this note means a reminder is set."  # the first one only
+    ]
+    assert current.reminder_spoken == ["Reminder set for Friday 9 October, 07:00."]
+    assert current.reminder_attempts == [ReminderAttempt("call mum")]  # stored: no reason
+    [saved] = store.open_reminders(ME)
+    assert (saved.source, saved.source_message_id, saved.call) == ("chat", current.message.id, False)
+
+
+async def test_set_reminder_in_minutes_with_a_call_and_a_repeat(store: Store) -> None:
+    tools, _ = with_reminders(store)
+    current = turn(store, "call me in 20 minutes")
+    arguments = {"at": "", "in_minutes": 20, "text": "call", "call": True, "repeat": "none"}
+    assert (await tools.call(current, "set_reminder", json.dumps(arguments))).startswith("Set as #1")
+    wake = turn(store, "wake me up every weekday at 6:30, call me", ts=T0 + 200_000)
+    arguments = {"at": "06:30", "in_minutes": 0, "text": "wake up", "call": "true", "repeat": "weekdays"}
+    assert (await tools.call(wake, "set_reminder", json.dumps(arguments))).startswith("Set as #2")
+    first, second = store.open_reminders(ME)
+    assert (first.call, first.due_at) == (True, T0 / 1000 + 1200)
+    assert (second.call, second.repeat, second.local_time) == (True, "weekdays", "2026-10-09 06:30")
+
+
+@pytest.mark.parametrize(
+    ("at", "local_time"),
+    [
+        ("2025-10-09 07:00", "2026-10-09 07:00"),  # "tomorrow at 7" with a year Gemma guessed
+        ("2024-10-09 06:30", "2026-10-09 06:30"),
+        ("2025-01-02 09:00", "2027-01-02 09:00"),  # the nearest 2 Jan is next year's
+        ("2026-10-09 07:00", "2026-10-09 07:00"),  # this year's date ahead: as written
+        ("2025-05-20 09:00", "2027-05-20 09:00"),  # "20 May" in October: the nearest is long past, the next is meant
+        ("2024-10-05 09:00", "2027-10-05 09:00"),  # 3 days past: the next one
+        ("2026-05-20 09:00", "2027-05-20 09:00"),  # this year's too: long past means the next one
+        ("2026-10-05 09:00", "2027-10-05 09:00"),
+    ],
+)
+async def test_a_year_before_this_one_is_a_guess_and_the_nearest_such_day_is_meant(
+    store: Store, at: str, local_time: str
+) -> None:
+    # older stamps show no year ("[Thu 8 Oct 09:32]"): an earlier year is Gemma's guess, the month and day the user's
+    tools, _ = with_reminders(store)
+    current = turn(store, "remind me tomorrow at 7 to call mum")
+    result = await tools.call(current, "set_reminder", json.dumps({"at": at, "text": "call mum"}))
+    assert result.startswith("Set as #1")
+    [saved] = store.open_reminders(ME)
+    assert saved.local_time == local_time
+
+
+@pytest.mark.parametrize("at", ["2025-10-08 07:00", "2025-10-06 09:00", "2026-10-08 07:00", "2026-10-06 09:00"])
+async def test_a_time_that_just_passed_stays_passed(store: Store, at: str) -> None:
+    # today at 07:00 (it is 09:32) or up to 2 days ago stays passed, with a guessed year or this one
+    tools, _ = with_reminders(store)
+    current = turn(store, "remind me today at 7")
+    result = await tools.call(current, "set_reminder", json.dumps({"at": at, "text": "x"}))
+    assert result.startswith("Not set: that time has passed.") and store.open_reminders(ME) == []
+
+
+async def test_codes_confirmation_shows_the_date_it_understood(store: Store) -> None:
+    tools, _ = with_reminders(store)
+    current = turn(store, "remind me on 20 May at 9 to renew the passport")
+    result = await tools.call(current, "set_reminder", json.dumps({"at": "2026-05-20 09:00", "text": "passport"}))
+    assert result.startswith("Set as #1 for Thu 20 May 2027 09:00;")
+    assert current.reminder_notes[0].startswith("Reminder set (#1): Thu 20 May 2027 09:00 · ")
+
+
+async def test_a_repeating_reminder_from_a_day_long_past_is_refused(store: Store) -> None:
+    tools, _ = with_reminders(store)
+    current = turn(store, "every day at 7 from 20 May")
+    arguments = {"at": "2026-05-20 07:00", "text": "pills", "repeat": "daily"}
+    result = await tools.call(current, "set_reminder", json.dumps(arguments))
+    assert result.startswith("Not set: that time has passed.") and store.open_reminders(ME) == []
+
+
+async def test_a_refused_time_tells_gemma_why_and_sets_nothing(store: Store) -> None:
+    tools, _ = with_reminders(store)
+    current = turn(store, "remind me yesterday")
+    result = await tools.call(current, "set_reminder", json.dumps({"at": "2026-10-07 07:00", "text": "x"}))
+    assert result.startswith("Not set: that time has passed.") and "don't say a reminder is set" in result
+    assert not current.reminder_set and current.reminder_notes == [] and store.open_reminders(ME) == []
+    assert current.reminder_tried  # the answer gets code's guard note, whatever language she answers in
+    assert current.reminder_attempts == [ReminderAttempt("x", "that time has passed")]  # each try, with code's why
+
+
+async def test_a_refused_try_keeps_the_plain_reason_and_gemma_the_tools_words(store: Store) -> None:
+    tools, _ = with_reminders(store)
+    current = turn(store, "remind me")
+    result = await tools.call(current, "set_reminder", json.dumps({"text": "x"}))
+    assert result.startswith("Not set: give a time: at (HH:MM or YYYY-MM-DD HH:MM) or in_minutes.")  # for Gemma
+    assert current.reminder_attempts == [ReminderAttempt("x", "no time was given")]  # for the user
+    long = await tools.call(current, "set_reminder", json.dumps({"at": "17:00", "text": "x" * 201}))
+    assert long.startswith("Not set: the reminder's text is longer than 200 characters.")
+    assert current.reminder_attempts[1] == ReminderAttempt(
+        "x" * 201, "the text is longer than 200 characters", "the text is too long"
+    )
+
+
+@pytest.mark.parametrize(
+    ("first", "arguments"),
+    [
+        ("mail_digest", {}),
+        ("calendar_agenda", {"start": "tomorrow"}),
+        ("read_link", {"url": "https://example.com/page"}),
+        ("search_history", {"query": "dentist"}),
+        ("project_status", {"project": "garden"}),
+    ],
+)
+async def test_no_reminder_after_outside_text(store: Store, first: str, arguments: dict[str, str]) -> None:
+    tools, _ = with_reminders(store)
+    current = turn(store, "look at https://example.com/page and remind me of it at 17:00")
+    await tools.call(current, first, json.dumps(arguments))
+    result = await tools.call(current, "set_reminder", json.dumps({"at": "17:00", "text": "the page"}))
+    assert result == prompts.REMINDER_OWN_WORDS
+    assert store.open_reminders(ME) == [] and not current.reminder_set and current.reminder_tried
+    assert current.reminder_attempts == [
+        ReminderAttempt("the page", prompts.REMINDER_WHY_OWN_WORDS, prompts.REMINDER_WHY_OWN_WORDS_SPOKEN)
+    ]
+
+
+async def test_no_reminder_after_a_web_search(store: Store) -> None:
+    profile = Profile(store)
+    reminders = Reminders(store, TZ, clock=lambda: T0 / 1000)
+    web = FakeWeb({"ajax": [WebResult("Ajax", "https://example.com/ajax", "example.com", "", "Ajax won")]})
+    tools = Tools(store, profile, TZ, FakeFetch(), web=web, reminders=reminders)
+    current = turn(store, "when do Ajax play? remind me then")
+    await tools.call(current, "web_search", json.dumps({"query": "Ajax next match"}))
+    assert await tools.call(current, "set_reminder", json.dumps({"at": "17:00", "text": "Ajax"})) == (
+        prompts.REMINDER_OWN_WORDS
+    )
+
+
+@pytest.mark.parametrize("said", ["[audio file] remind me at 17:00 to wire the money", "[photo] remind me of this"])
+async def test_no_reminder_from_an_audio_file_or_a_photo(store: Store, said: str) -> None:
+    tools, _ = with_reminders(store)
+    current = turn(store, said)
+    assert await tools.call(current, "set_reminder", json.dumps({"at": "17:00", "text": "x"})) == (
+        prompts.REMINDER_OWN_WORDS
+    )
+
+
+async def test_only_open_reminders_are_recorded_as_listed(store: Store) -> None:
+    # never a missed or failed one (its time is no reminder that exists), never a check-in
+    tools, reminders = with_reminders(store)
+    failed = reminders.set(ME, at="2026-10-08 17:00", text="water the plants").reminder
+    store.finish_reminder(failed.id, "failed", "send_failed")
+    reminders.set(ME, at="2026-10-09 08:30", text="take the pills", repeat="daily")
+    said = store.add_incoming(store.current_conversation().id, ME, 1, "text", "I'll call the dentist")
+    assert said is not None
+    store.add_followup(ME, "call the dentist", said, T0 / 1000 + 86_400, T0 / 1000 + 3 * 86_400, at="x")
+    current = turn(store, "what reminders do I have?")
+    listing = await tools.call(current, "list_reminders", "{}")
+    assert "#1 " in listing and "#c1" in listing  # the listing shows them; only the open one is recorded
+    assert current.listed_reminders == [(2, "08:30")]
+
+
+async def test_a_listing_with_no_reminders_is_still_a_listing(store: Store) -> None:
+    tools, _ = with_reminders(store)
+    current = turn(store, "any reminders?")
+    await tools.call(current, "list_reminders", "{}")
+    assert current.reminders_listed and current.listed_reminders == []
+
+
+async def test_a_voice_note_and_a_call_turn_may_set_one(store: Store) -> None:
+    tools, _ = with_reminders(store)
+    spoken = turn(store, "[voice] remind me at 17:00 to call mum")
+    assert (await tools.call(spoken, "set_reminder", json.dumps({"at": "17:00", "text": "call mum"}))).startswith("Set")
+    on_call = turn(store, "[call] remind me at 18:00 to cook", ts=T0 + 200_000)
+    assert (await tools.call(on_call, "set_reminder", json.dumps({"at": "18:00", "text": "cook"}))).startswith("Set")
+
+
+async def test_list_and_cancel_reminders(store: Store) -> None:
+    tools, reminders = with_reminders(store)
+    reminders.set(ME, at="2026-10-09 07:00", text="wake up", call=True)
+    current = turn(store, "what reminders do I have? cancel tomorrow's wake-up call")
+    listing = await tools.call(current, "list_reminders", "{}")
+    assert "#1 Fri 9 Oct 07:00 · call · wake up" in listing
+    # what she may restate in this answer (no note): the open reminders' numbers and times
+    assert current.reminders_listed and current.listed_reminders == [(1, "07:00")]
+    assert await tools.call(current, "cancel_reminder", json.dumps({"number": "#1"})) == (
+        "Cancelled #1; the bridge tells the user itself."
+    )
+    assert current.reminder_notes == ["Cancelled #1: Fri 9 Oct 07:00 · wake up"]
+    missing = await tools.call(current, "cancel_reminder", json.dumps({"number": 7}))
+    assert missing.startswith("Not cancelled: no open reminder #7")
+
+
+async def test_cancel_has_the_same_refusals_as_set(store: Store) -> None:
+    tools, reminders = with_reminders(store)
+    reminders.set(ME, at="2026-10-09 07:00", text="wake up")
+    current = turn(store, "check my mail and cancel my reminders")
+    await tools.call(current, "mail_digest", "{}")
+    assert await tools.call(current, "cancel_reminder", json.dumps({"number": 1})) == prompts.REMINDER_NOT_CANCELLED
+    assert len(store.open_reminders(ME)) == 1

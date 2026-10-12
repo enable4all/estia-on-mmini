@@ -2,12 +2,14 @@ import json
 import os
 import tempfile
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
-from local_assistant import doctor
+from local_assistant import doctor, prompts
 from local_assistant.config import Config, load_config
 from local_assistant.doctor import Finding, Probe, exit_code, render, run
 from local_assistant.language import LANGUAGE_KEY
@@ -692,3 +694,114 @@ def test_the_one_calendar_needs_its_address_in_calendar_env(home: Path, monkeypa
     calendar = by_part(run(write_config(home, MINIMAL + "[calendar]\n"), FakeProbe(home)))["Calendar"]
     assert calendar.status == "fail" and calendar.fix == "scripts/set-calendar-url.sh"
     assert "https://" not in calendar.text
+
+
+def local(text: str) -> float:
+    return datetime.fromisoformat(text).replace(tzinfo=ZoneInfo("Europe/Amsterdam")).timestamp()
+
+
+def test_doctor_shows_the_next_reminder_by_time_only(home: Path) -> None:
+    probe = FakeProbe(home)
+    short = tempfile.mkdtemp(prefix="c", dir="/tmp")  # with calls: a "call me" reminder places a call
+    path = write_config(home, MINIMAL + f'[voice]\nurl = "http://127.0.0.1:8150"\n[calls]\nsocket_dir = "{short}"\n')
+    assert by_part(run(path, probe))["Reminders"] == Finding("ok", "Reminders", "none yet")  # no database: none made
+    database = load_config(path).db_path
+    database.parent.mkdir(parents=True)
+    store = Store.open(database)
+    store.add_reminder(ACI, "call mum", "2026-10-09 07:00", "Europe/Amsterdam", local("2026-10-09 07:00"), call=True)
+    store.add_reminder(ACI, "take the pills", "2026-10-10 08:00", "Europe/Amsterdam", local("2026-10-10 08:00"))
+    found = by_part(run(path, probe))["Reminders"]
+    assert found == Finding("ok", "Reminders", "2 open · next Fri 9 Oct 07:00 (call) · 0 failed")
+    assert "call mum" not in render(run(path, probe)) and "pills" not in render(run(path, probe))
+    store.close()
+
+
+def test_doctor_warns_on_failed_and_stuck_reminders(home: Path) -> None:
+    probe = FakeProbe(home)
+    path = write_config(home, MINIMAL)
+    database = load_config(path).db_path
+    database.parent.mkdir(parents=True)
+    store = Store.open(database)
+    hour_ago = datetime.fromtimestamp(NOW - 3600, UTC).isoformat(timespec="seconds")
+    failed = store.add_reminder(ACI, "x", "2026-10-08 10:00", "Europe/Amsterdam", NOW - 6000, at=hour_ago)
+    store.finish_reminder(failed, "failed", "send_failed", at=hour_ago)
+    long_ago = datetime.fromtimestamp(NOW - 3 * 3600, UTC).isoformat(timespec="seconds")
+    stuck = store.add_reminder(ACI, "y", "2026-10-08 08:00", "Europe/Amsterdam", local("2026-10-08 08:00"), at=long_ago)
+    note = store.add_outgoing(store.current_conversation().id, ACI, "note", "Reminder: y", None)
+    store.fire_reminder(stuck, note, at=long_ago)
+    store.close()
+    found = by_part(run(path, probe))["Reminders"]
+    assert found.status == "warn" and found.text == "1 open · next Thu 8 Oct 08:00 · 1 failed · 1 stuck"
+    assert "/reminders" in found.fix
+
+
+def test_doctor_has_no_reminders_line_with_them_off(home: Path) -> None:
+    path = write_config(home, MINIMAL + "[reminders]\nenabled = false\n")
+    assert "Reminders" not in by_part(run(path, FakeProbe(home)))
+
+
+def test_without_calls_doctor_shows_no_call_marker(home: Path) -> None:
+    path = write_config(home, MINIMAL)  # no [calls]: "call me" reminders are wake-up texts
+    database = load_config(path).db_path
+    database.parent.mkdir(parents=True)
+    store = Store.open(database)
+    store.add_reminder(ACI, "wake up", "2026-10-09 07:00", "Europe/Amsterdam", local("2026-10-09 07:00"), call=True)
+    store.close()
+    assert by_part(run(path, FakeProbe(home)))["Reminders"].text == "1 open · next Fri 9 Oct 07:00 · 0 failed"
+
+
+def test_doctor_shows_her_own_messages_as_counts_and_reason_words(home: Path) -> None:
+    probe = FakeProbe(home)
+    path = write_config(home, MINIMAL + "[initiative]\nenabled = true\n")
+    found = by_part(run(path, probe))["Initiative"]  # no database yet
+    assert found == Finding(
+        "ok",
+        "Initiative",
+        "on: check-ins, look back, improvised note · quiet hours 22:00-08:00 · calendar notes off (no [calendar])",
+    )
+    database = load_config(path).db_path
+    database.parent.mkdir(parents=True)
+    store = Store.open(database)
+    day_ago = datetime.fromtimestamp(NOW - 86_400, UTC).isoformat(timespec="seconds")
+    out = store.add_outgoing(store.current_conversation().id, ACI, "text", "Did you get hold of the dentist?", None)
+    entry = store.log_initiative("followup", "2026-10-07", "sent", message_id=out, at=day_ago)
+    store.set_initiative_replied(entry, NOW - 80_000, at=day_ago)
+    store.log_initiative("lookback", "2026-10-04", "skipped", reason="busy", at=day_ago)
+    store.set_state("initiative:quiet", "1")
+    store.close()
+    found = by_part(run(path, probe))["Initiative"]
+    assert found.status == "ok" and found.text.endswith(
+        "· last 4 weeks: 1 sent, 1 answered within a day · paused (/quiet) · last skipped: look back busy"
+    )
+    assert "dentist" not in render(run(path, probe))
+
+
+def test_doctor_warns_when_one_of_her_messages_could_not_be_sent(home: Path) -> None:
+    path = write_config(home, MINIMAL + "[calendar]\n[initiative]\nenabled = true\n")
+    database = load_config(path).db_path
+    database.parent.mkdir(parents=True)
+    store = Store.open(database)
+    now_iso = datetime.fromtimestamp(NOW - 600, UTC).isoformat(timespec="seconds")
+    store.log_initiative("calendar", "2026-10-08", "failed", reason="send_failed", at=now_iso)
+    store.close()
+    found = by_part(run(path, FakeProbe(home)))["Initiative"]
+    assert found.status == "warn" and "calendar notes" in found.text and "calendar change send_failed" in found.text
+
+
+def test_doctor_says_her_own_messages_are_off_until_turned_on_and_who_turned_them_on_or_off(home: Path) -> None:
+    probe = FakeProbe(home)
+    path = write_config(home, MINIMAL)  # opt-in
+    assert by_part(run(path, probe))["Initiative"] == Finding("ok", "Initiative", prompts.DOCTOR_INITIATIVE_OFF)
+    database = load_config(path).db_path
+    database.parent.mkdir(parents=True)
+    store = Store.open(database)
+    store.set_state("initiative:enabled", "on")  # the user's /initiative on wins over the config
+    store.close()
+    found = by_part(run(path, probe))["Initiative"]
+    assert found.text.startswith("on (/initiative on): check-ins, look back, improvised note · quiet hours")
+    path = write_config(home, MINIMAL + "[initiative]\nenabled = true\n")
+    store = Store.open(database)
+    store.set_state("initiative:enabled", "off")
+    store.close()
+    found = by_part(run(path, probe))["Initiative"]
+    assert found == Finding("ok", "Initiative", prompts.DOCTOR_INITIATIVE_OFF_BY_USER)

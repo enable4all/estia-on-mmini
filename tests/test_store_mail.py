@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from local_assistant.store import MIGRATION_V5, MailFields, MailFolder, Store
+from local_assistant.store import MIGRATION_V5, SCHEMA_VERSION, MailFields, MailFolder, Store
 
 INBOX: MailFolder = "inbox"
 SENT: MailFolder = "sent"
@@ -42,7 +42,7 @@ def test_schema_v4_upsert_keeps_gemma_fields(store: Store) -> None:
         "reply",
         "Anna asks to move Friday's meeting.",
     )
-    assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 6
+    assert store._conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
 
 def test_answered_when_sent_items_has_a_later_message_in_the_conversation(store: Store) -> None:
@@ -149,7 +149,9 @@ def test_upgrade_to_v6_keeps_sorting_records_finds_correspondents_and_reads_sent
     store.set_mail_delta_link("family", SENT, "https://graph.example/sent-delta")
     store.set_mail_delta_link("family", INBOX, "https://graph.example/inbox-delta")
     store._conn.executescript(  # back to version 5 as it was first built
-        f"BEGIN; DROP TABLE mail_correspondents; DROP INDEX mail_triage_created; ALTER TABLE mail_triage RENAME TO t;"
+        "BEGIN; DROP TABLE reminders; DROP TABLE followups; DROP TABLE initiative_log;"  # nor any later version
+        " ALTER TABLE messages DROP COLUMN footer;"
+        f" DROP TABLE mail_correspondents; DROP INDEX mail_triage_created; ALTER TABLE mail_triage RENAME TO t;"
         f" {MIGRATION_V5}"
         " INSERT INTO mail_triage SELECT * FROM t; DROP TABLE t; PRAGMA user_version = 5; COMMIT;"
     )

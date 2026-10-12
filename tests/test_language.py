@@ -80,12 +80,12 @@ def test_another_language_is_one_code_written_line_in_the_rules() -> None:
     assert "Answer only in 日本語 (Japanese)" in prompts.rules(name=NAME, language="ja", calls=True)
 
 
-def test_every_language_has_its_six_spoken_call_lines() -> None:
+def test_every_language_has_its_eight_spoken_call_lines() -> None:
     assert set(prompts.CALL_SPOKEN) == set(CODES)
     for code in CODES:
         spoken = prompts.spoken(code, name=NAME)
         lines = astuple(spoken)
-        assert len(lines) == 6 and len(set(lines)) == 6, code
+        assert len(lines) == 8 and len(set(lines)) == 8, code
         assert all(line.strip() == line and 0 < len(line) < 90 and "\n" not in line for line in lines), code
         assert _plain(LANGUAGES[code].own)[:5] in _plain(spoken.now_speaking), code  # "from now on I speak Dutch"
     for code in ("es", "it", "pt", "nl", "pl", "de", "fr"):  # Latin letters: the voice can say her name
@@ -143,3 +143,20 @@ def test_every_language_acknowledges_with_its_own_got_it_never_a_hum(code: str) 
 def test_the_examples_variations_are_kept() -> None:
     assert "Alles klar." in prompts.call_lines("de", name=NAME).acknowledge
     assert "D'accord, compris." in prompts.call_lines("fr", name=NAME).acknowledge
+
+
+@pytest.mark.parametrize("code", CODES)
+def test_every_language_opens_a_wake_up_call_and_a_call_reminder_with_the_time(code: str) -> None:
+    """The opening lines of the calls she places (spoken in the call's language; translations need a native check)."""
+    lines = prompts.call_lines(code, name=NAME)
+    for line in (lines.wake, lines.call_reminder):
+        assert line.count("{time}") == 1 and line.strip() == line, code
+        said = line.format(time="7:00")
+        assert "7:00" in said and " ?" not in said and " !" not in said, code
+    assert lines.wake != lines.call_reminder
+
+
+def test_the_english_opening_lines() -> None:
+    english = prompts.call_lines("en", name=NAME)
+    assert english.wake.format(time="7:00") == "Good morning! It's 7:00."
+    assert english.call_reminder.format(time="17:00") == "It's 17:00. You asked me to call you."

@@ -130,6 +130,32 @@ docs = []                       # e.g. ["my-project", "local-assistant"]: also p
 #fillers = false              # "hmm, let me think" lines while she thinks (off: she answers when ready)
 #acknowledge = true           # a short "Got it." once a request of 5+ words is taken in (not before a device answer)
 #answer_after_seconds = 5     # let it ring (about twice) before she answers
+#wake_call = true             # "call me" reminders place a Signal call (the text always comes first); false: texts only
+#max_calls_per_day = 3        # call reminders a day (a second try two minutes later belongs to the same one)
+
+# Reminders you set ("remind me at 17:00 to ...", /remind): on without this section. They come at night too and are never
+# paused: you set them. For anything that matters, keep your phone's own alarm (she runs on one Mac).
+#[reminders]
+#enabled = true               # false: no reminder tools, rules or commands (exactly as before)
+#max_open = 50
+#max_per_day = 20             # new reminders a day
+
+# Messages she starts herself: opt-in, off until you turn them on here or by typing /initiative on in Signal (which wins
+# over this file; /initiative off turns them off again). At most one a day, never at night, never while you chat; each
+# ends with a line saying why it came. /quiet pauses them all (reminders still come). The code decides when; the model
+# only writes the check-in, the look back and the improvised note, and the code checks its words before they are sent.
+#[initiative]
+#enabled = false              # true: she may message you first (the kinds below); false: none of them, as before
+#followups = true             # 1: a check-in on something you said you would do
+#calendar = true              # 2: a calendar change, or an early start tomorrow (needs [calendar])
+#lookback = true              # 3: a Sunday evening look back with one question
+#improvise = true             # 4: a spontaneous note
+#max_per_day = 1              # all kinds together
+#followups_per_week = 2
+#improvise_per_week = 1       # raise it when they go well (/status counts replies and /quiet)
+#quiet_hours = "22:00-08:00"  # none of them then; "" for no quiet hours
+#lookback_time = "Sun 19:00"
+#early_check = "20:00"        # the early-start note, when tomorrow starts before digest_time
 
 # Web search: Ollama's free web search first, Brave's web search as the backup. Keys only in web.env (0600), written by
 # scripts/set-web-keys.sh from the login keychain. Off without [web].

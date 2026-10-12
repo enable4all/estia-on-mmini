@@ -255,3 +255,155 @@ def test_audio_files_are_never_learned_from(store: Store) -> None:
     store.add_incoming(conv.id, ME, T0 + 1, "text", "[audio file] I am the king of Spain")
     store.add_incoming(conv.id, ME, T0 + 2, "text", "thanks")
     assert [m.text for m in store.user_messages_after(0, 10)] == ["[voice] I play piano", "thanks"]
+
+
+# V7: reminders, follow-ups and the initiative log (one migration for the whole design), and messages.footer
+
+AT = "2026-10-12T12:00:00+00:00"  # the reminder queries take their time from the caller (an injected clock)
+
+
+def remind(store: Store, text: str = "call mum", due_at: float = 1_000.0, **fields: object) -> int:
+    options: dict[str, object] = {"repeat": "none", "call": False, "source": "chat", "source_message_id": None}
+    options.update(fields)
+    return store.add_reminder(
+        ME,
+        text,
+        str(options.pop("local_time", "2026-10-13 07:00")),
+        "Europe/Amsterdam",
+        due_at,
+        at=str(options.pop("at", AT)),
+        **options,  # type: ignore[arg-type]
+    )
+
+
+def test_upgrade_from_version_6_keeps_messages_and_adds_the_new_tables(tmp_path: Path) -> None:
+    path = tmp_path / "data" / "assistant.db"
+    old = Store.open(path)
+    old._conn.executescript("PRAGMA user_version = 6;")  # as an install before this design left it
+    conv = old.current_conversation()
+    kept = old.add_incoming(conv.id, ME, T0, "text", "hello")
+    old.close()
+    conn = sqlite3.connect(path)
+    for table in ("reminders", "followups", "initiative_log"):  # back to a real V6 database
+        conn.execute(f"DROP TABLE IF EXISTS {table}")
+    columns = [row[1] for row in conn.execute("PRAGMA table_info(messages)")]
+    if "footer" in columns:
+        conn.execute("ALTER TABLE messages DROP COLUMN footer")
+    conn.execute("PRAGMA user_version = 6")
+    conn.commit()
+    conn.close()
+    store = Store.open(path)
+    assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 7
+    assert kept is not None and store.message(kept).text == "hello"
+    assert store._conn.execute("SELECT footer FROM messages WHERE id = ?", (kept,)).fetchone()[0] is None
+    tables = {row[0] for row in store._conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert {"reminders", "followups", "initiative_log"} <= tables
+    store.close()
+
+
+def test_a_reminder_is_stored_and_found_when_due(store: Store) -> None:
+    first = remind(store, "call mum", due_at=2_000.0, call=True)
+    second = remind(store, "take the pills", due_at=1_000.0, repeat="weekdays", source="command")
+    reminder = store.reminder(first)
+    assert reminder is not None
+    assert (reminder.text, reminder.local_time, reminder.tz, reminder.due_at) == (
+        "call mum",
+        "2026-10-13 07:00",
+        "Europe/Amsterdam",
+        2_000.0,
+    )
+    assert (reminder.call, reminder.repeat, reminder.status, reminder.fired, reminder.created_at) == (
+        True,
+        "none",
+        "open",
+        0,
+        AT,
+    )
+    assert [r.id for r in store.open_reminders(ME)] == [second, first]  # by time
+    assert [r.id for r in store.due_reminders(1_500.0)] == [second]
+    assert store.next_reminder_due() == 1_000.0
+    assert store.reminder(999) is None
+
+
+def test_firing_fences_the_note_then_a_repeat_goes_on(store: Store) -> None:
+    rid = remind(store, due_at=1_000.0, repeat="daily")
+    conv = store.current_conversation()
+    note = store.add_outgoing(conv.id, ME, "note", "Reminder: call mum", None)
+    store.fire_reminder(rid, note, at=AT)
+    firing = store.reminder(rid)
+    assert firing is not None and (firing.status, firing.message_id) == ("firing", note)
+    assert store.due_reminders(5_000.0) == []  # a firing reminder is never picked up twice
+    assert [r.id for r in store.firing_reminders()] == [rid]
+    store.reschedule_reminder(rid, "2026-10-14 07:00", 87_400.0, outcome="sent", at=AT)
+    again = store.reminder(rid)
+    assert again is not None
+    assert (again.status, again.message_id, again.fired, again.local_time, again.due_at, again.outcome) == (
+        "open",
+        None,
+        1,
+        "2026-10-14 07:00",
+        87_400.0,
+        "sent",
+    )
+
+
+def test_finishing_and_cancelling(store: Store) -> None:
+    done = remind(store, due_at=1_000.0)
+    store.finish_reminder(done, "done", "sent", at=AT)
+    failed = remind(store, due_at=1_100.0)
+    store.finish_reminder(failed, "failed", "send_failed", at=AT)
+    open_one = remind(store, due_at=1_200.0)
+    other = store.add_reminder(
+        "11111111-2222-4333-8444-555555555555", "theirs", "2026-10-13 07:00", "UTC", 1_300.0, at=AT
+    )
+    finished = store.reminder(done)
+    assert finished is not None and (finished.status, finished.fired, finished.outcome) == ("done", 1, "sent")
+    assert [r.id for r in store.open_reminders(ME)] == [open_one]
+    assert [r.id for r in store.reminders_with_outcome(ME, ("send_failed",), since=AT)] == [failed]
+    assert store.reminders_with_outcome(ME, ("send_failed",), since="2026-10-13T00:00:00+00:00") == []
+    assert [r.id for r in store.cancel_reminders(ME, open_one, at=AT)] == [open_one]
+    assert store.cancel_reminders(ME, open_one, at=AT) == []  # already cancelled
+    assert store.cancel_reminders(ME, other, at=AT) == []  # someone else's reminder: never touched
+    assert [r.id for r in store.open_reminders("11111111-2222-4333-8444-555555555555")] == [other]
+    again = remind(store, due_at=1_400.0)
+    assert [r.id for r in store.cancel_reminders(ME, None, at=AT)] == [again]  # all of mine
+
+
+def test_counting_new_reminders_and_pruning_old_ones(store: Store) -> None:
+    remind(store, at="2026-10-11T23:00:00+00:00")
+    remind(store, at="2026-10-12T08:00:00+00:00")
+    remind(store, at="2026-10-12T09:00:00+00:00")
+    assert store.count_reminders_created(ME, since="2026-10-11T22:00:00+00:00") == 3
+    assert store.count_reminders_created(ME, since="2026-10-12T00:00:00+00:00") == 2
+    old = remind(store, at="2026-09-01T09:00:00+00:00")
+    store.finish_reminder(old, "done", "sent", at="2026-09-01T09:00:00+00:00")
+    cancelled = remind(store, at="2026-09-01T09:00:00+00:00")
+    store.cancel_reminders(ME, cancelled, at="2026-09-01T09:00:00+00:00")
+    assert store.prune_reminders(before="2026-09-12T00:00:00+00:00") == 2
+    assert store.reminder(old) is None and len(store.open_reminders(ME)) == 3
+
+
+def test_open_follow_ups_are_listed_and_cancelled_per_user(store: Store) -> None:
+    conv = store.current_conversation()
+    said = store.add_incoming(conv.id, ME, T0, "text", "I'll call the dentist on Thursday")
+    assert said is not None
+    first = store._conn.execute(
+        "INSERT INTO followups (peer_aci, what, source_message_id, due_at, expires_at, status, created_at,"
+        " updated_at) VALUES (?, 'call the dentist', ?, 2000, 9000, 'open', ?, ?)",
+        (ME, said, AT, AT),
+    ).lastrowid
+    assert first is not None
+    assert [(f.id, f.what, f.due_at) for f in store.open_followups(ME)] == [(first, "call the dentist", 2000.0)]
+    assert store.open_followups("11111111-2222-4333-8444-555555555555") == []
+    assert [f.id for f in store.cancel_followups(ME, first, at=AT)] == [first]
+    assert store.open_followups(ME) == []
+
+
+def test_whether_the_user_wrote_after_a_message(store: Store) -> None:
+    conv = store.current_conversation()
+    note = store.add_outgoing(conv.id, ME, "note", "Wake-up call: 07:00", None)
+    assert not store.wrote_after(ME, note)
+    store.add_incoming(conv.id, "11111111-2222-4333-8444-555555555555", T0, "text", "not you")
+    assert not store.wrote_after(ME, note)
+    store.add_incoming(conv.id, ME, T0 + 1, "text", "I'm up")
+    assert store.wrote_after(ME, note)

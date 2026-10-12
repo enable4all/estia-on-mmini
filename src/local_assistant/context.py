@@ -137,22 +137,26 @@ class ContextBuilder:
         self._soul_problem = soul.problem
         return soul
 
-    def system_prompt(self, conversation: Conversation) -> str:
-        """The rules, then the style (below the rules): the user's soul.md, or without a usable one her own built-in
-        style; then the profile and the summary."""
+    def style(self) -> str:
+        """Her style, placed below the rules: the user's soul.md, or without a usable one her own built-in style (also
+        below the rules of a message she starts herself)."""
         soul = self.soul()
         if soul.text:
-            style = f"{prompts.SOUL_HEADER.format(name=self.name)}\n{soul.text}"
-        else:
-            style = f"{prompts.DEFAULT_STYLE_HEADER.format(name=self.name)}\n{prompts.DEFAULT_STYLE}"
-        parts = [self._rules, style, self.snapshot()]
+            return f"{prompts.SOUL_HEADER.format(name=self.name)}\n{soul.text}"
+        return f"{prompts.DEFAULT_STYLE_HEADER.format(name=self.name)}\n{prompts.DEFAULT_STYLE}"
+
+    def system_prompt(self, conversation: Conversation) -> str:
+        """The rules, then the style (below the rules); then the profile and the summary."""
+        parts = [self._rules, self.style(), self.snapshot()]
         if conversation.summary:
             parts.append(f"EARLIER IN THIS CONVERSATION (summary)\n{conversation.summary}")
         return "\n\n".join(parts)
 
-    def to_chat(self, message: Message, images: Sequence[str] = ()) -> dict[str, Any]:
+    def to_chat(self, message: Message, images: Sequence[str] = (), *, newest: bool = False) -> dict[str, Any]:
+        """One message as Gemma's input. The user's carry their local time; the newest one also the year, so a
+        date she writes (set_reminder) has the right one, while the system prompt stays the same every day."""
         if message.direction == "in":
-            stamp = local_stamp(message.signal_ts, self._tz) if message.signal_ts else ""
+            stamp = local_stamp(message.signal_ts, self._tz, year=newest) if message.signal_ts else ""
             body = message.text
             if not images and body.startswith(PHOTO_PREFIX):  # said plainly, or Gemma guesses what it showed
                 body = GONE_PREFIX + body[len(PHOTO_PREFIX) :]
@@ -171,8 +175,10 @@ class ContextBuilder:
         Photos (data URIs per message id) are only given for the message being answered (Hermes: images are
         turn-scoped); in history a photo message is its "[photo] caption" text."""
         built: list[dict[str, Any]] = [{"role": "system", "content": self.system_prompt(conversation)}]
-        for message in self.window(conversation):
-            built.append(self.to_chat(message, (images or {}).get(message.id, ())))
+        window = self.window(conversation)
+        newest = max((message.id for message in window if message.direction == "in"), default=None)
+        for message in window:
+            built.append(self.to_chat(message, (images or {}).get(message.id, ()), newest=message.id == newest))
             if message.direction == "in":
                 built.extend(self._trace(message.id))
         return built

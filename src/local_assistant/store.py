@@ -22,8 +22,15 @@ MessageKind = Literal["text", "command", "unsupported", "note"]
 MessageStatus = Literal["received", "answered", "failed", "ignored", "pending", "sent"]
 SourceKind = Literal["chat", "remember", "link"]
 ChangeAction = Literal["add", "replace", "remove"]
+ReminderRepeat = Literal["none", "daily", "weekdays", "weekly"]
+ReminderStatus = Literal["open", "firing", "done", "cancelled", "failed"]
+ReminderSource = Literal["chat", "command"]
+FollowUpStatus = Literal["open", "sent", "done", "cancelled", "expired"]
+InitiativeKind = Literal["followup", "calendar", "early_start", "lookback", "improvise", "announce"]
+InitiativeOutcome = Literal["sending", "sent", "unknown", "skipped", "failed"]
+COUNTED: tuple[InitiativeOutcome, ...] = ("sending", "sent", "unknown")  # what counts toward the caps
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA_V1 = """
 CREATE TABLE conversations (
@@ -224,6 +231,64 @@ CREATE TABLE mail_correspondents (
 DELETE FROM mail_sync WHERE folder = 'sent';
 """
 
+# v7: reminders and wake-up calls the user set, the check-ins Estia may send (follow-ups) and the log of the messages
+# she sends first (metadata only), in one migration so the initiative part needs no schema change of its own.
+# messages.footer: a code line sent after a message she starts; never in Gemma's history or the history search.
+MIGRATION_V7 = """
+CREATE TABLE reminders (
+    id INTEGER PRIMARY KEY,
+    peer_aci TEXT NOT NULL,
+    text TEXT NOT NULL,
+    local_time TEXT NOT NULL,
+    tz TEXT NOT NULL,
+    due_at REAL NOT NULL,
+    repeat TEXT NOT NULL DEFAULT 'none' CHECK (repeat IN ('none', 'daily', 'weekdays', 'weekly')),
+    call INTEGER NOT NULL DEFAULT 0 CHECK (call IN (0, 1)),
+    source TEXT NOT NULL CHECK (source IN ('chat', 'command')),
+    source_message_id INTEGER REFERENCES messages (id),
+    status TEXT NOT NULL CHECK (status IN ('open', 'firing', 'done', 'cancelled', 'failed')),
+    message_id INTEGER REFERENCES messages (id),
+    fired INTEGER NOT NULL DEFAULT 0,
+    outcome TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX reminders_due ON reminders (status, due_at);
+CREATE INDEX reminders_source ON reminders (source_message_id);
+CREATE INDEX reminders_message ON reminders (message_id);
+
+CREATE TABLE followups (
+    id INTEGER PRIMARY KEY,
+    peer_aci TEXT NOT NULL,
+    what TEXT NOT NULL,
+    source_message_id INTEGER NOT NULL REFERENCES messages (id),
+    due_at REAL NOT NULL,
+    expires_at REAL NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('open', 'sent', 'done', 'cancelled', 'expired')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX followups_due ON followups (status, due_at);
+CREATE INDEX followups_source ON followups (source_message_id);
+
+CREATE TABLE initiative_log (
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('followup', 'calendar', 'early_start', 'lookback', 'improvise', 'announce')),
+    local_day TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('sending', 'sent', 'unknown', 'skipped', 'failed')),
+    reason TEXT,
+    message_id INTEGER REFERENCES messages (id),
+    replied_at REAL,
+    quieted_at REAL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX initiative_log_day ON initiative_log (local_day);
+CREATE INDEX initiative_log_message ON initiative_log (message_id);
+
+ALTER TABLE messages ADD COLUMN footer TEXT;
+"""
+
 MIGRATION_V4 = """
 CREATE TABLE mail_messages (
     id INTEGER PRIMARY KEY,
@@ -303,6 +368,7 @@ class Message:
     reply_to_id: int | None
     seq: int | None
     created_at: str
+    footer: str | None = None  # a code line sent after the text (a message she starts); never in Gemma's history
 
 
 @dataclass(frozen=True)
@@ -365,6 +431,103 @@ class Hit:
     conversation_id: int | None = None
     context: tuple[Message, ...] = ()
     document: Document | None = None
+
+
+@dataclass(frozen=True)
+class Reminder:
+    """A reminder the user set: the local time as meant and its zone, and the UTC instant of the next occurrence."""
+
+    id: int
+    peer_aci: str
+    text: str  # the user's words
+    local_time: str  # 'YYYY-MM-DD HH:MM' of the next occurrence, as meant
+    tz: str  # IANA zone when it was set
+    due_at: float  # UTC epoch seconds of the next occurrence
+    repeat: ReminderRepeat
+    call: bool
+    source: ReminderSource
+    source_message_id: int | None
+    status: ReminderStatus
+    message_id: int | None  # the note of the current firing (the delivery fence)
+    fired: int
+    outcome: str | None  # a fixed word (reminders.OUTCOMES)
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class FollowUp:
+    """A check-in she may send on something the user said they would do (written by the initiative part)."""
+
+    id: int
+    peer_aci: str
+    what: str
+    source_message_id: int
+    due_at: float
+    expires_at: float
+    status: FollowUpStatus
+
+
+@dataclass(frozen=True)
+class InitiativeEntry:
+    """One message she started, or one she skipped: metadata only, never text."""
+
+    id: int
+    kind: InitiativeKind
+    local_day: str  # 'YYYY-MM-DD' in the user's zone
+    outcome: InitiativeOutcome
+    reason: str | None  # a fixed word (initiative.REASONS)
+    message_id: int | None
+    replied_at: float | None  # the user's first message within 24 h
+    quieted_at: float | None  # a /quiet within 48 h
+    created_at: str
+
+
+def _entry(row: sqlite3.Row) -> InitiativeEntry:
+    return InitiativeEntry(
+        id=row["id"],
+        kind=row["kind"],
+        local_day=row["local_day"],
+        outcome=row["outcome"],
+        reason=row["reason"],
+        message_id=row["message_id"],
+        replied_at=row["replied_at"],
+        quieted_at=row["quieted_at"],
+        created_at=row["created_at"],
+    )
+
+
+def _reminder(row: sqlite3.Row) -> Reminder:
+    return Reminder(
+        id=row["id"],
+        peer_aci=row["peer_aci"],
+        text=row["text"],
+        local_time=row["local_time"],
+        tz=row["tz"],
+        due_at=float(row["due_at"]),
+        repeat=row["repeat"],
+        call=bool(row["call"]),
+        source=row["source"],
+        source_message_id=row["source_message_id"],
+        status=row["status"],
+        message_id=row["message_id"],
+        fired=row["fired"],
+        outcome=row["outcome"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _followup(row: sqlite3.Row) -> FollowUp:
+    return FollowUp(
+        id=row["id"],
+        peer_aci=row["peer_aci"],
+        what=row["what"],
+        source_message_id=row["source_message_id"],
+        due_at=float(row["due_at"]),
+        expires_at=float(row["expires_at"]),
+        status=row["status"],
+    )
 
 
 def _conversation(row: sqlite3.Row) -> Conversation:
@@ -456,6 +619,7 @@ def _message(row: sqlite3.Row) -> Message:
         reply_to_id=row["reply_to_id"],
         seq=row["seq"],
         created_at=row["created_at"],
+        footer=row["footer"],
     )
 
 
@@ -509,6 +673,15 @@ class Store:
         store._migrate()
         return store
 
+    @classmethod
+    def open_read_only(cls, path: Path) -> Store:
+        """The database, only read (the terminal draft, doctor): through the write-ahead log while the bridge runs,
+        as an unchanging file while it is stopped (no log), so nothing is created next to it. Never migrated."""
+        mode = "mode=ro" if path.with_name(path.name + "-wal").exists() else "mode=ro&immutable=1"
+        conn = sqlite3.connect(f"{path.as_uri()}?{mode}", uri=True, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        return cls(conn)
+
     def _migrate(self) -> None:
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
         if version < 1:
@@ -533,6 +706,8 @@ class Store:
             except BaseException:
                 self._conn.execute("ROLLBACK")
                 raise
+        if version < 7:
+            self._conn.executescript(f"BEGIN;\n{MIGRATION_V7}\nPRAGMA user_version = 7;\nCOMMIT;")
 
     def close(self) -> None:
         self._conn.close()
@@ -640,15 +815,24 @@ class Store:
             )
 
     def add_outgoing(
-        self, conversation_id: int, peer_aci: str, kind: MessageKind, text: str, reply_to_id: int | None
+        self,
+        conversation_id: int,
+        peer_aci: str,
+        kind: MessageKind,
+        text: str,
+        reply_to_id: int | None,
+        *,
+        footer: str | None = None,
     ) -> int:
+        """An outgoing message, pending until sent. `footer`: a code line sent after the text (a message she starts),
+        kept apart so it never reaches Gemma's history or the history search."""
         now = utc_now()
         with self.tx():
             cursor = self._conn.execute(
                 "INSERT INTO messages (conversation_id, direction, peer_aci, kind, text, status, reply_to_id, seq,"
-                " created_at, updated_at) VALUES (?, 'out', ?, ?, ?, 'pending', ?,"
-                " (SELECT COALESCE(MAX(seq), 0) + 1 FROM messages), ?, ?)",
-                (conversation_id, peer_aci, kind, text, reply_to_id, now, now),
+                " footer, created_at, updated_at) VALUES (?, 'out', ?, ?, ?, 'pending', ?,"
+                " (SELECT COALESCE(MAX(seq), 0) + 1 FROM messages), ?, ?, ?)",
+                (conversation_id, peer_aci, kind, text, reply_to_id, footer, now, now),
             )
         return _rowid(cursor)
 
@@ -738,8 +922,66 @@ class Store:
         ).fetchall()
         return [_message(row) for row in rows]
 
+    def newest_message_id(self) -> int:
+        return int(self._conn.execute("SELECT COALESCE(MAX(id), 0) FROM messages").fetchone()[0])
+
     def count_messages(self) -> int:
         return int(self._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0])
+
+    def last_incoming_ts(self) -> int | None:
+        """The Signal time (ms) of the newest message from any user (text, command, call turn)."""
+        row = self._conn.execute("SELECT MAX(signal_ts) FROM messages WHERE direction = 'in'").fetchone()
+        return None if row[0] is None else int(row[0])
+
+    def first_reply_after(self, peer_aci: str, message_id: int) -> Message | None:
+        """This user's first text (typed, spoken or on a call) stored after the message `message_id`."""
+        row = self._conn.execute(
+            "SELECT * FROM messages WHERE direction = 'in' AND kind = 'text' AND peer_aci = ? AND id > ?"
+            " ORDER BY id LIMIT 1",
+            (peer_aci, message_id),
+        ).fetchone()
+        return _message(row) if row else None
+
+    def user_messages_since(self, peer_aci: str, since_ms: int, limit: int = 500) -> list[Message]:
+        """This user's own texts (typed, voice notes, call turns; never audio files) sent at or after `since_ms`."""
+        rows = self._conn.execute(
+            "SELECT * FROM messages WHERE direction = 'in' AND kind = 'text' AND peer_aci = ? AND signal_ts >= ?"
+            " AND text NOT LIKE '[audio file]%' ORDER BY signal_ts, id LIMIT ?",
+            (peer_aci, since_ms, limit),
+        ).fetchall()
+        return [_message(row) for row in rows]
+
+    def count_user_texts(self, peer_aci: str) -> int:
+        return int(
+            self._conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE direction = 'in' AND kind = 'text' AND peer_aci = ?"
+                " AND text NOT LIKE '[audio file]%'",
+                (peer_aci,),
+            ).fetchone()[0]
+        )
+
+    def first_user_text_ts(self, peer_aci: str) -> int | None:
+        row = self._conn.execute(
+            "SELECT MIN(signal_ts) FROM messages WHERE direction = 'in' AND kind = 'text' AND peer_aci = ?",
+            (peer_aci,),
+        ).fetchone()
+        return None if row[0] is None else int(row[0])
+
+    def count_quiet_commands(self, *, since_ms: int) -> int:
+        """How often /quiet (not /quiet off) was sent since `since_ms` (the initiative's "goes well" counts)."""
+        rows = self._conn.execute(
+            "SELECT text FROM messages WHERE direction = 'in' AND kind = 'command' AND signal_ts >= ?"
+            " AND lower(text) LIKE '/quiet%'",
+            (since_ms,),
+        ).fetchall()
+        return sum(1 for row in rows if str(row["text"]).strip().lower() == "/quiet")
+
+    def wrote_after(self, peer_aci: str, message_id: int) -> bool:
+        """Whether this user sent anything (text, command, call turn) after the message `message_id` was stored."""
+        row = self._conn.execute(
+            "SELECT 1 FROM messages WHERE direction = 'in' AND peer_aci = ? AND id > ? LIMIT 1", (peer_aci, message_id)
+        ).fetchone()
+        return row is not None
 
     def _neighbours(self, message: Message, before: int, after: int) -> list[Message]:
         earlier = self._conn.execute(
@@ -1199,6 +1441,298 @@ class Store:
             self._conn.execute(
                 "UPDATE attachments SET deleted_at = ?, updated_at = ? WHERE id = ?", (now, now, attachment_id)
             )
+
+    # reminders (the times come from the caller's clock: `at` is a UTC ISO string)
+
+    def add_reminder(
+        self,
+        peer_aci: str,
+        text: str,
+        local_time: str,
+        tz: str,
+        due_at: float,
+        *,
+        repeat: ReminderRepeat = "none",
+        call: bool = False,
+        source: ReminderSource = "chat",
+        source_message_id: int | None = None,
+        at: str | None = None,
+    ) -> int:
+        now = at or utc_now()
+        with self.tx():
+            cursor = self._conn.execute(
+                "INSERT INTO reminders (peer_aci, text, local_time, tz, due_at, repeat, call, source, source_message_id,"
+                " status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)",
+                (peer_aci, text, local_time, tz, due_at, repeat, int(call), source, source_message_id, now, now),
+            )
+        return _rowid(cursor)
+
+    def reminder(self, reminder_id: int) -> Reminder | None:
+        row = self._conn.execute("SELECT * FROM reminders WHERE id = ?", (reminder_id,)).fetchone()
+        return _reminder(row) if row else None
+
+    def open_reminders(self, peer_aci: str | None = None) -> list[Reminder]:
+        """Open and firing reminders (of one user, or everyone's), soonest first."""
+        rows = self._conn.execute(
+            "SELECT * FROM reminders WHERE status IN ('open', 'firing') AND (? IS NULL OR peer_aci = ?)"
+            " ORDER BY due_at, id",
+            (peer_aci, peer_aci),
+        ).fetchall()
+        return [_reminder(row) for row in rows]
+
+    def due_reminders(self, now: float) -> list[Reminder]:
+        rows = self._conn.execute(
+            "SELECT * FROM reminders WHERE status = 'open' AND due_at <= ? ORDER BY due_at, id", (now,)
+        ).fetchall()
+        return [_reminder(row) for row in rows]
+
+    def firing_reminders(self) -> list[Reminder]:
+        rows = self._conn.execute("SELECT * FROM reminders WHERE status = 'firing' ORDER BY due_at, id").fetchall()
+        return [_reminder(row) for row in rows]
+
+    def next_reminder_due(self) -> float | None:
+        row = self._conn.execute("SELECT MIN(due_at) FROM reminders WHERE status = 'open'").fetchone()
+        return None if row[0] is None else float(row[0])
+
+    def count_reminders_created(self, peer_aci: str, *, since: str) -> int:
+        return int(
+            self._conn.execute(
+                "SELECT COUNT(*) FROM reminders WHERE peer_aci = ? AND created_at >= ?", (peer_aci, since)
+            ).fetchone()[0]
+        )
+
+    def reminders_with_outcome(self, peer_aci: str | None, outcomes: tuple[str, ...], *, since: str) -> list[Reminder]:
+        """Reminders whose last firing ended with one of these outcomes, at or after `since` (UTC ISO)."""
+        marks = ", ".join("?" for _ in outcomes)
+        rows = self._conn.execute(
+            f"SELECT * FROM reminders WHERE outcome IN ({marks}) AND updated_at >= ?"
+            " AND (? IS NULL OR peer_aci = ?) ORDER BY updated_at, id",
+            (*outcomes, since, peer_aci, peer_aci),
+        ).fetchall()
+        return [_reminder(row) for row in rows]
+
+    def start_firing(self, reminder_id: int, *, at: str | None = None) -> None:
+        """A call reminder is being taken up (its note comes once the call's checks are done): never picked up twice."""
+        with self.tx():
+            self._conn.execute(
+                "UPDATE reminders SET status = 'firing', message_id = NULL, updated_at = ? WHERE id = ?",
+                (at or utc_now(), reminder_id),
+            )
+
+    def reopen_reminder(self, reminder_id: int, *, at: str | None = None) -> None:
+        """Back to open: one that was taken up but sent nothing before the bridge stopped."""
+        with self.tx():
+            self._conn.execute(
+                "UPDATE reminders SET status = 'open', message_id = NULL, updated_at = ? WHERE id = ?",
+                (at or utc_now(), reminder_id),
+            )
+
+    def fire_reminder(self, reminder_id: int, message_id: int, *, at: str | None = None) -> None:
+        """The note of this firing is stored: the reminder is firing until it is known whether the note went out."""
+        with self.tx():
+            self._conn.execute(
+                "UPDATE reminders SET status = 'firing', message_id = ?, updated_at = ? WHERE id = ?",
+                (message_id, at or utc_now(), reminder_id),
+            )
+
+    def reschedule_reminder(
+        self, reminder_id: int, local_time: str, due_at: float, *, outcome: str, at: str | None = None
+    ) -> None:
+        """A repeating reminder fired: open again for its next occurrence."""
+        with self.tx():
+            self._conn.execute(
+                "UPDATE reminders SET status = 'open', message_id = NULL, fired = fired + 1, local_time = ?,"
+                " due_at = ?, outcome = ?, updated_at = ? WHERE id = ?",
+                (local_time, due_at, outcome, at or utc_now(), reminder_id),
+            )
+
+    def finish_reminder(
+        self, reminder_id: int, status: Literal["done", "failed"], outcome: str, *, at: str | None = None
+    ) -> None:
+        with self.tx():
+            self._conn.execute(
+                "UPDATE reminders SET status = ?, fired = fired + 1, outcome = ?, updated_at = ? WHERE id = ?",
+                (status, outcome, at or utc_now(), reminder_id),
+            )
+
+    def cancel_reminders(self, peer_aci: str, reminder_id: int | None, *, at: str | None = None) -> list[Reminder]:
+        """Cancel one of this user's open (or firing) reminders, or all of them (`reminder_id` None); the cancelled."""
+        with self.tx():
+            rows = self._conn.execute(
+                "SELECT * FROM reminders WHERE peer_aci = ? AND status IN ('open', 'firing') AND (? IS NULL OR id = ?)"
+                " ORDER BY due_at, id",
+                (peer_aci, reminder_id, reminder_id),
+            ).fetchall()
+            self._conn.executemany(
+                "UPDATE reminders SET status = 'cancelled', updated_at = ? WHERE id = ?",
+                [(at or utc_now(), row["id"]) for row in rows],
+            )
+        return [_reminder(row) for row in rows]
+
+    def prune_reminders(self, *, before: str) -> int:
+        """Done and cancelled reminders are deleted after a while (the caller's `before`, UTC ISO)."""
+        with self.tx():
+            cursor = self._conn.execute(
+                "DELETE FROM reminders WHERE status IN ('done', 'cancelled') AND updated_at < ?", (before,)
+            )
+        return cursor.rowcount
+
+    def reminder_sources(self, message_ids: list[int]) -> set[int]:
+        """Which of these messages set a reminder (also one cancelled since): they never become a follow-up."""
+        if not message_ids:
+            return set()
+        marks = ", ".join("?" for _ in message_ids)
+        rows = self._conn.execute(
+            f"SELECT DISTINCT source_message_id FROM reminders WHERE source_message_id IN ({marks})", message_ids
+        ).fetchall()
+        return {int(row[0]) for row in rows}
+
+    # follow-ups (written by the initiative part; listed and cancelled with /reminders)
+
+    def add_followup(
+        self, peer_aci: str, what: str, source_message_id: int, due_at: float, expires_at: float, *, at: str
+    ) -> int:
+        with self.tx():
+            cursor = self._conn.execute(
+                "INSERT INTO followups (peer_aci, what, source_message_id, due_at, expires_at, status, created_at,"
+                " updated_at) VALUES (?, ?, ?, ?, ?, 'open', ?, ?)",
+                (peer_aci, what, source_message_id, due_at, expires_at, at, at),
+            )
+        return _rowid(cursor)
+
+    def followup(self, followup_id: int) -> FollowUp | None:
+        row = self._conn.execute("SELECT * FROM followups WHERE id = ?", (followup_id,)).fetchone()
+        return _followup(row) if row else None
+
+    def due_followups(self, now: float) -> list[FollowUp]:
+        rows = self._conn.execute(
+            "SELECT * FROM followups WHERE status = 'open' AND due_at <= ? ORDER BY due_at, id", (now,)
+        ).fetchall()
+        return [_followup(row) for row in rows]
+
+    def all_open_followups(self) -> list[FollowUp]:
+        rows = self._conn.execute("SELECT * FROM followups WHERE status = 'open' ORDER BY due_at, id").fetchall()
+        return [_followup(row) for row in rows]
+
+    def followup_sources(self) -> set[int]:
+        """The messages that already gave a follow-up (open or not): one message, one check-in at most."""
+        rows = self._conn.execute("SELECT DISTINCT source_message_id FROM followups").fetchall()
+        return {int(row[0]) for row in rows}
+
+    def set_followup(
+        self, followup_id: int, *, status: FollowUpStatus | None = None, due_at: float | None = None, at: str
+    ) -> None:
+        with self.tx():
+            self._conn.execute(
+                "UPDATE followups SET status = COALESCE(?, status), due_at = COALESCE(?, due_at), updated_at = ?"
+                " WHERE id = ?",
+                (status, due_at, at, followup_id),
+            )
+
+    def prune_followups(self, *, before: str) -> int:
+        """Follow-ups no longer open are deleted after a while (the caller's `before`, UTC ISO)."""
+        with self.tx():
+            cursor = self._conn.execute("DELETE FROM followups WHERE status != 'open' AND updated_at < ?", (before,))
+        return cursor.rowcount
+
+    def open_followups(self, peer_aci: str) -> list[FollowUp]:
+        rows = self._conn.execute(
+            "SELECT * FROM followups WHERE peer_aci = ? AND status = 'open' ORDER BY due_at, id", (peer_aci,)
+        ).fetchall()
+        return [_followup(row) for row in rows]
+
+    def cancel_followups(self, peer_aci: str, followup_id: int | None, *, at: str | None = None) -> list[FollowUp]:
+        with self.tx():
+            rows = self._conn.execute(
+                "SELECT * FROM followups WHERE peer_aci = ? AND status = 'open' AND (? IS NULL OR id = ?)"
+                " ORDER BY due_at, id",
+                (peer_aci, followup_id, followup_id),
+            ).fetchall()
+            self._conn.executemany(
+                "UPDATE followups SET status = 'cancelled', updated_at = ? WHERE id = ?",
+                [(at or utc_now(), row["id"]) for row in rows],
+            )
+        return [_followup(row) for row in rows]
+
+    # the initiative log: the messages she starts, metadata only (never text)
+
+    def log_initiative(
+        self,
+        kind: InitiativeKind,
+        local_day: str,
+        outcome: InitiativeOutcome,
+        *,
+        reason: str | None = None,
+        message_id: int | None = None,
+        at: str,
+    ) -> int:
+        with self.tx():
+            cursor = self._conn.execute(
+                "INSERT INTO initiative_log (kind, local_day, outcome, reason, message_id, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (kind, local_day, outcome, reason, message_id, at, at),
+            )
+        return _rowid(cursor)
+
+    def set_initiative_outcome(
+        self, entry_id: int, outcome: InitiativeOutcome, *, reason: str | None = None, at: str
+    ) -> None:
+        with self.tx():
+            self._conn.execute(
+                "UPDATE initiative_log SET outcome = ?, reason = COALESCE(?, reason), updated_at = ? WHERE id = ?",
+                (outcome, reason, at, entry_id),
+            )
+
+    def initiative_entry(self, entry_id: int) -> InitiativeEntry | None:
+        row = self._conn.execute("SELECT * FROM initiative_log WHERE id = ?", (entry_id,)).fetchone()
+        return _entry(row) if row else None
+
+    def initiative_entries(
+        self,
+        *,
+        since: str = "",
+        kinds: tuple[InitiativeKind, ...] | None = None,
+        outcomes: tuple[InitiativeOutcome, ...] | None = None,
+    ) -> list[InitiativeEntry]:
+        """Log rows created at or after `since` (UTC ISO), oldest first."""
+        sql = "SELECT * FROM initiative_log WHERE created_at >= ?"
+        args: list[object] = [since]
+        for column, values in (("kind", kinds), ("outcome", outcomes)):
+            if values is not None:
+                sql += f" AND {column} IN ({', '.join('?' for _ in values)})"
+                args += values
+        rows = self._conn.execute(sql + " ORDER BY id", args).fetchall()
+        return [_entry(row) for row in rows]
+
+    def count_initiative(self, first_day: str, last_day: str, *, kind: InitiativeKind | None = None) -> int:
+        """Messages she started (sent, being sent or maybe sent) on the local days first_day..last_day."""
+        marks = ", ".join("?" for _ in COUNTED)
+        return int(
+            self._conn.execute(
+                f"SELECT COUNT(*) FROM initiative_log WHERE local_day BETWEEN ? AND ? AND outcome IN ({marks})"
+                " AND (? IS NULL OR kind = ?)",
+                (first_day, last_day, *COUNTED, kind, kind),
+            ).fetchone()[0]
+        )
+
+    def set_initiative_replied(self, entry_id: int, replied_at: float, *, at: str) -> None:
+        with self.tx():
+            self._conn.execute(
+                "UPDATE initiative_log SET replied_at = ?, updated_at = ? WHERE id = ?", (replied_at, at, entry_id)
+            )
+
+    def set_initiative_quieted(self, entry_ids: list[int], quieted_at: float, *, at: str) -> None:
+        with self.tx():
+            self._conn.executemany(
+                "UPDATE initiative_log SET quieted_at = ?, updated_at = ? WHERE id = ? AND quieted_at IS NULL",
+                [(quieted_at, at, entry_id) for entry_id in entry_ids],
+            )
+
+    def prune_initiative(self, *, before: str) -> int:
+        """The log is kept for a year (the caller's `before`, UTC ISO)."""
+        with self.tx():
+            cursor = self._conn.execute("DELETE FROM initiative_log WHERE created_at < ?", (before,))
+        return cursor.rowcount
 
     # state
 

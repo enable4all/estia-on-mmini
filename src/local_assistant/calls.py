@@ -5,6 +5,12 @@ CallManager reads signal-cli's call events and answers only allowed callers; str
 laid-back conversation: listen (long thinking pauses are fine), transcribe, one turn through the app (the same tools
 as text), speak sentence by sentence, and let the caller talk over her. Audio lives only in memory; logs hold
 metadata only. The app is the Host: it stores the turns, runs Gemma and sends notes.
+
+She places a call only for a reminder the user set (`place`, from the reminders' scheduler, which sends the text
+first): to an allowed account only, one call at a time, and the call starts for the app only when it is picked up
+(texts are not held while it rings). It rings for signal-cli's own minute; the bridge waits 75 s for the end and sorts
+it into answered, no_answer, declined, busy or call_failed. A picked-up call opens with a code-written line in the
+call's language ("Good morning! It's 7:00.") and the reminder's text, then goes on like any call.
 """
 
 from __future__ import annotations
@@ -39,6 +45,7 @@ RESUME_BACK_S = 0.5  # after a cough she carries on a little before where she st
 MAX_FALSE_BARGE = 3
 CONNECT_SECONDS = 10.0
 NOT_READY_NOTE_SECONDS = 600.0
+PLACED_OUTCOMES = ("answered", "no_answer", "declined", "busy", "call_failed")
 
 FILLERS = {"uh", "um", "umm", "hmm", "mm", "mhm", "ah", "oh", "huh", "eh", "er"} | {
     "äh", "ähm", "öhm", "euh", "ehm", "ehh", "eee", "yyy", "ээ", "эм", "мм", "음", "어", "えー", "えっと", "あの"
@@ -62,6 +69,8 @@ class CallSignal(Protocol):
 
     async def hangup_call(self, aci: str, call_id: int) -> None: ...
 
+    async def start_call(self, aci: str) -> dict[str, Any]: ...
+
 
 class Voice(Protocol):
     async def transcribe(self, audio: bytes, *, language: str | None = None) -> Transcript: ...
@@ -79,7 +88,8 @@ class Turn:
     reply_id: int | None = None  # the stored answer, cut where the user talked over it
     asks_yes: bool = False  # a device waits for the user's yes: the last sentence is spoken whole
     end_call: bool = False  # hang up once this was spoken (unless the user talked over it)
-    code_text: str = ""  # code's own words after Gemma's (a device question or result): always said in English
+    # code's own words after Gemma's (a device question or result, why no reminder was set): always said in English
+    code_text: str = ""
 
 
 class Host(Protocol):
@@ -114,6 +124,8 @@ class CallSettings:
     acknowledge: bool = True  # a short "Got it." as soon as a request of 5+ words is taken in (user: on)
     greetings: tuple[str, ...] = ()  # English: one of these, never the same twice in a row; () = hers by name
     answer_after_s: float = 5.0  # let it ring about twice before answering (user: more natural)
+    ring_wait_s: float = 75.0  # a call she places: signal-cli and RingRTC ring for 60 s; then it is a failed call
+    wake_silence_s: float = 60.0  # after a wake-up call's opening, this much silence ends the call with a goodbye
 
 
 # Whisper writes noise as words: sound labels (*sad music*, [Music]) and, on a short sound, its favourite fillers
@@ -221,7 +233,8 @@ def whole_sentences(text: str) -> str:
 
 
 def speakable(note: str) -> str:
-    """A device note said aloud: "Devices: heater off" becomes "Done: heater off."."""
+    """Code's own line said aloud: a device note "Devices: heater off" becomes "Done: heater off."; others (a reminder
+    line, written with its spoken reasons) stay as they are."""
     if note.startswith("Devices: "):
         return "Done: " + note.removeprefix("Devices: ").replace(" · ", ", ").rstrip(".") + "."
     return note
@@ -275,6 +288,22 @@ def _parts(text: str) -> list[str]:
     return sentences(spoken_text(text, min_chars=1, rest="")) or ([text.strip()] if text.strip() else [])
 
 
+def ended_outcome(reason: str) -> str:
+    """A call she placed that ended before it was picked up, by signal-cli's reason (its words to be confirmed live):
+    no_answer (ring timeout), declined (hung up on the phone), busy, answered (picked up on another of the user's
+    linked devices), else call_failed (the call helper, signal-cli or the network)."""
+    key = re.sub(r"[^a-z]", "", reason.lower())
+    if "busy" in key:
+        return "busy"
+    if "timeout" in key:
+        return "no_answer"
+    if "accepted" in key:
+        return "answered"
+    if "declined" in key or key == "remotehangup":
+        return "declined"
+    return "call_failed"
+
+
 def socket_path(accepted: dict[str, Any], connected: dict[str, Any], folder: Path, call_id: int) -> Path:
     """The call helper's audio socket: the "unix:<path>" it reported, else its documented name (the call id as an
     unsigned number). It must lie in our private folder (ValueError otherwise)."""
@@ -291,6 +320,26 @@ def socket_path(accepted: dict[str, Any], connected: dict[str, Any], folder: Pat
 
 class _Ended(Exception):
     """The call ended (hung up, timed out or signal-cli restarted)."""
+
+
+@dataclass
+class _Dial:
+    """A call she is placing: its events (the ringing one comes before signal-cli tells the call id) until it is
+    picked up or ends."""
+
+    aci: str
+    call_id: int | None = None
+    events: asyncio.Queue[dict[str, Any]] = field(default_factory=asyncio.Queue)
+
+
+@dataclass(frozen=True)
+class _Opening:
+    """A placed call that was picked up: startCall's result, the CONNECTED event and her first line."""
+
+    started: dict[str, Any]
+    connected: dict[str, Any]
+    line: str
+    wake: bool
 
 
 @dataclass
@@ -339,6 +388,7 @@ class CallManager:
         self._last_line = ""
         self._last_greeting = ""  # kept apart: one greeting per call, and the next call's must differ
         self._call: _Call | None = None
+        self._dial: _Dial | None = None  # a call she is placing, until it is picked up or ends
         self._task: asyncio.Task[None] | None = None
         self._audio: CallAudio | None = None
         self._clips: dict[tuple[str, str], bytes] = {}  # canned lines at 48 kHz by (language, text) (no user data)
@@ -355,12 +405,14 @@ class CallManager:
     def speaking(self) -> bool:
         return self._audio is not None and self._audio.speaking.is_set()
 
-    def status_line(self) -> str:
+    def status_line(self, next_call: str = "") -> str:
+        """/status: whether she is in a call, the last one and (from the reminders) the next call she will place."""
         if self._call is not None:
             return f"Calls: in a call since {self._hhmm(self._call.started_wall)}"
+        line = "Calls: ready"
         if self._last is not None:
-            return f"Calls: ready (last call {self._hhmm(self._last[0])}, {self._last[1]} min)"
-        return "Calls: ready"
+            line += f" (last call {self._hhmm(self._last[0])}, {self._last[1]} min)"
+        return f"{line} · next call {next_call}" if next_call else line
 
     def _hhmm(self, stamp: float) -> str:
         return datetime.fromtimestamp(stamp, self._tz).strftime("%H:%M")
@@ -378,11 +430,90 @@ class CallManager:
                 log.exception("calls: a call event failed")
 
     async def hangup(self) -> None:
-        """Hang up a running call (the bridge is stopping)."""
+        """Hang up a running call, or one she is placing that still rings (the bridge is stopping)."""
         call = self._call
         if call is not None and not call.ended.is_set():
             with contextlib.suppress(Exception):
                 await self._signal.hangup_call(call.aci, call.call_id)
+        dial = self._dial
+        if dial is not None and dial.call_id is not None:
+            with contextlib.suppress(Exception):
+                await self._signal.hangup_call(dial.aci, dial.call_id)
+
+    async def can_place(self, aci: str) -> str:
+        """ "" when she can place a call now, else why not: in_call (one call at a time) or not_ready (the voice)."""
+        if self._call is not None or self._dial is not None:
+            return "in_call"
+        if not await self._voice_ready():
+            return "not_ready"
+        return ""
+
+    async def place(self, aci: str, *, wake: bool, time: str, text: str) -> str:
+        """Call the user for a reminder they set and wait until it is picked up or ends (PLACED_OUTCOMES). Picked up,
+        the call goes on in its own task like an incoming one, opening with the wake-up or reminder line ({time}) and
+        the reminder's text instead of a greeting."""
+        aci = aci.lower()
+        if aci not in self._allowed:
+            log.error("calls: refused to call an account that is not allowed")
+            return "call_failed"
+        why = await self.can_place(aci)
+        if why:
+            log.info("calls: no call placed (%s)", why)
+            return "call_failed"
+        dial = _Dial(aci)
+        self._dial = dial
+        try:
+            try:
+                started = await self._signal.start_call(aci)
+            except Exception as exc:
+                log.warning("calls: placing a call failed (%s)", type(exc).__name__)
+                return "call_failed"
+            call_id = started.get("callId")
+            if not isinstance(call_id, int):
+                log.warning("calls: startCall gave no call id")
+                return "call_failed"
+            dial.call_id = call_id
+            log.info("calls: placing a call (%s)", "wake-up" if wake else "reminder")
+            outcome, event = await self._ring(dial)
+            if outcome != "answered" or event.get("state") != "CONNECTED":
+                return outcome  # not picked up (or picked up on another device): nothing more here
+            language = self.language
+            lines = prompts.call_lines(language, name=self.name)
+            line = f"{(lines.wake if wake else lines.call_reminder).format(time=time)} {text}".strip()
+            call = _Call(aci, call_id, self._clock(), self._wall(), language, lines)
+            while not dial.events.empty():  # whatever came after CONNECTED belongs to the call now
+                call.events.put_nowait(dial.events.get_nowait())
+            self._call = call
+            self._task = asyncio.create_task(self._run_call(call, _Opening(started, event, line, wake)), name="call")
+            return "answered"
+        finally:
+            self._dial = None
+
+    async def _ring(self, dial: _Dial) -> tuple[str, dict[str, Any]]:
+        """Wait (ring_wait_s) until the call she placed is picked up (CONNECTED) or ends; CONNECTING only means it
+        reached the phone. No end in time: hung up, a failed call."""
+        deadline = self._clock() + self.settings.ring_wait_s
+        while (left := deadline - self._clock()) > 0:
+            try:
+                event = await asyncio.wait_for(dial.events.get(), left)
+            except TimeoutError:
+                break
+            call_id = event.get("callId")
+            if isinstance(call_id, int) and call_id != dial.call_id:
+                continue
+            state = event.get("state")
+            if state == "CONNECTED":
+                return "answered", event
+            if state == "ENDED":
+                reason = str(event.get("reason") or "")
+                outcome = ended_outcome(reason)
+                log.info("calls: the call placed ended before it was picked up (%s: %s)", reason[:40], outcome)
+                return outcome, event
+        log.warning("calls: the call placed did not end in %.0f s; hanging up", self.settings.ring_wait_s)
+        if dial.call_id is not None:
+            with contextlib.suppress(Exception):
+                await self._signal.hangup_call(dial.aci, dial.call_id)
+        return "call_failed", {}
 
     async def _on_event(self, event: dict[str, Any]) -> None:
         state = event.get("state")
@@ -391,13 +522,21 @@ class CallManager:
         if call is not None and (call_id == call.call_id or (call_id is None and state == "ENDED")):
             call.events.put_nowait(event)
             return
+        dial = self._dial
+        if (
+            dial is not None
+            and state != "RINGING_INCOMING"
+            and (dial.call_id is None or call_id in (None, dial.call_id))
+        ):
+            dial.events.put_nowait(event)  # the ringing event comes before startCall's reply names the call id
+            return
         if state != "RINGING_INCOMING" or not isinstance(call_id, int):
             return
         aci = str(event.get("uuid") or "").lower()
         if aci not in self._allowed:
             log.info("calls: a call from an account that is not allowed was ignored")
             return
-        if call is not None:
+        if call is not None or dial is not None:
             log.info("calls: a second call was ignored")
             return
         if not await self._voice_ready():
@@ -434,24 +573,28 @@ class CallManager:
         log.info("calls: a call rang while the voice service was not ready")
         await self._host.call_note(aci, prompts.CALL_NOT_READY)
 
-    async def _run_call(self, call: _Call) -> None:
+    async def _run_call(self, call: _Call, opening: _Opening | None = None) -> None:
+        """An incoming call (rings, then answered), or one she placed that was picked up (`opening`)."""
         self._host.call_started(call.aci)
-        log.info("calls: answering")
+        log.info("calls: answering" if opening is None else "calls: the call placed was picked up")
         audio: CallAudio | None = None
         tasks: list[asyncio.Task[Any]] = []
         path: Path | None = None
         try:
-            if await self._rings_out(call):
-                return
-            accepted = await self._signal.accept_call(call.aci, call.call_id)
-            connected = await self._wait_connected(call)
+            if opening is None:
+                if await self._rings_out(call):
+                    return
+                accepted = await self._signal.accept_call(call.aci, call.call_id)
+                connected = await self._wait_connected(call)
+            else:
+                accepted, connected = opening.started, opening.connected
             path = socket_path(accepted, connected, self.settings.socket_dir, call.call_id)
             reader, writer = await self._connect(path)
             audio = CallAudio(reader, writer)
             self._audio = audio
             tasks = [asyncio.create_task(audio.pump()), asyncio.create_task(self._watch(call, audio))]
             await asyncio.wait_for(audio.started.wait(), CONNECT_SECONDS)
-            await self._converse(call, audio)
+            await self._converse(call, audio, opening)
         except (_Ended, ConnectionError) as exc:
             if not call.ended.is_set():
                 call.dropped = True
@@ -523,12 +666,16 @@ class CallManager:
                 audio.close()
                 return
 
-    async def _converse(self, call: _Call, audio: CallAudio) -> None:
+    async def _converse(self, call: _Call, audio: CallAudio, opening: _Opening | None = None) -> None:
         s = self.settings
         lines = call.spoken
-        greetings = (s.greetings or lines.greetings) if call.language == ENGLISH else lines.greetings
-        self._last_greeting = greeting = self._pick(greetings, last=self._last_greeting)
-        pending = await self._say_line(audio, greeting, call.language, barge=True)
+        if opening is None:
+            greetings = (s.greetings or lines.greetings) if call.language == ENGLISH else lines.greetings
+            self._last_greeting = greeting = self._pick(greetings, last=self._last_greeting)
+            pending = await self._say_line(audio, greeting, call.language, barge=True)
+        else:  # a call she placed: the reminder's line (its text is the user's: never kept with the canned clips)
+            pending = await self._say_line(audio, opening.line, call.language, barge=True, keep=False)
+        waking = opening is not None and opening.wake  # silence after "Good morning!" ends the call with a goodbye
         prompted = False
         question_waiting = False  # her last answer asked for a device's yes, and it was heard whole
         hearing_trouble = 0
@@ -540,7 +687,14 @@ class CallManager:
             cutting_in = pending is not None
             if pending is None:
                 wait = s.idle_prompt_s if not prompted else max(1.0, s.idle_hangup_s - s.idle_prompt_s)
+                if waking:
+                    wait = s.wake_silence_s
                 clip, info = await audio.listen(end_silence_s=s.end_of_turn_s, no_speech_s=min(wait, left))
+                if not clip and waking and wait <= left:
+                    log.info("calls: no answer to the wake-up line in %.0f s; goodbye", wait)
+                    await self._say_line(audio, self._pick(lines.bye), call.language)
+                    return
+                waking = False
                 if not clip:
                     next_step = "listening on" if wait > left else "goodbye" if prompted else "checking in"
                     # the line's levels (metadata): a caller too quiet to start an utterance shows up here
@@ -706,18 +860,22 @@ class CallManager:
             await task
         await self._host.call_drop_waiting(call.aci)
 
-    async def _clip(self, text: str, language: str) -> bytes:
+    async def _clip(self, text: str, language: str, *, keep: bool = True) -> bytes:
         clip = self._clips.get((language, text))
         if clip is None:
             clip = wav_to_pcm48(await self._voice.speak(text, language=language))
-            if len(self._clips) < 32:
+            if keep and len(self._clips) < 32:
                 self._clips[(language, text)] = clip
         return clip
 
-    async def _say_line(self, audio: CallAudio, text: str, language: str, *, barge: bool = False) -> str | None:
-        """A code-written line in `language`, spoken whole; with barge-in it returns what the caller said over it."""
+    async def _say_line(
+        self, audio: CallAudio, text: str, language: str, *, barge: bool = False, keep: bool = True
+    ) -> str | None:
+        """A code-written line in `language`, spoken whole; with barge-in it returns what the caller said over it.
+        `keep`: the clip may be kept for next time (canned lines only, never one with the user's words)."""
         self.saying = text
-        result = await self._say_checked(audio, faint_noise(LEAD_MS) + await self._clip(text, language), barge)
+        clip = await self._clip(text, language, keep=keep)
+        result = await self._say_checked(audio, faint_noise(LEAD_MS) + clip, barge)
         self._done(text)
         return result[0] if result else None
 
@@ -729,8 +887,9 @@ class CallManager:
         """Gemma's answer sentence by sentence (the next one is made while one plays), then code's own words: in
         English, so a device question is always clear (on an English call they simply follow). On a call in another
         language a turn that waits for a device's yes says only code's question: Gemma's words about the device are
-        left out (in Dutch it claimed a switch that was still waiting for the yes); they are stored as usual. Returns
-        what the caller said over it (or None) and what they heard of it."""
+        left out (in Dutch it claimed a switch that was still waiting for the yes), and app.call_turn keeps only that
+        question in the history too; a turn whose reminder was not set comes with no words of hers at all, only code's
+        line why. Returns what the caller said over it (or None) and what they heard of it."""
         if call.language == ENGLISH:
             spoken = [(_parts(f"{turn.text} {turn.code_text}"), ENGLISH)]
         elif turn.asks_yes and turn.code_text.strip():

@@ -14,10 +14,11 @@ def iso_to_epoch(iso_utc: str) -> float:
     return datetime.fromisoformat(iso_utc).timestamp()
 
 
-def local_stamp(epoch_ms: int, tz: ZoneInfo) -> str:
-    """'[Thu 8 Oct 09:41]' for a Signal timestamp in milliseconds."""
+def local_stamp(epoch_ms: int, tz: ZoneInfo, *, year: bool = False) -> str:
+    """'[Thu 8 Oct 09:41]' for a Signal timestamp in milliseconds; with `year`, '[Thu 8 Oct 2026 09:41]'."""
     moment = datetime.fromtimestamp(epoch_ms / 1000, tz)
-    return f"[{moment:%a} {moment.day} {moment:%b} {moment:%H:%M}]"
+    day = f"{moment:%a} {moment.day} {moment:%b}" + (f" {moment.year}" if year else "")
+    return f"[{day} {moment:%H:%M}]"
 
 
 def local_hhmm(epoch_s: float, tz: ZoneInfo) -> str:

@@ -28,6 +28,7 @@ from local_assistant.brain import Brain
 from local_assistant.calendar_feed import CalendarFeed
 from local_assistant.calendar_graph import OutlookCalendars
 from local_assistant.calendar_tools import CalendarTools
+from local_assistant.calendar_watch import CalendarWatch
 from local_assistant.calls import CallManager, CallSettings, Turn, speakable, whole_sentences
 from local_assistant.commands import (
     VOICE_ECHO_KEY,
@@ -49,10 +50,12 @@ from local_assistant.config import (
 from local_assistant.context import ContextBuilder
 from local_assistant.devices import Devices
 from local_assistant.fetcher import Fetcher, FetchError, Page
+from local_assistant.followups import FollowUps
 from local_assistant.gate import LONG_TEXT, AttachmentRef, Decision, Kind, classify, sender_aci
 from local_assistant.gemma import GemmaClient, GemmaError, OllamaGemma
 from local_assistant.graph import Graph
 from local_assistant.health import Health, HealthCheck
+from local_assistant.initiative import ANNOUNCED_KEY, Initiative, Settings, Writer
 from local_assistant.language import CODES, ENGLISH, LANGUAGE_KEY
 from local_assistant.mail_auth import AccessTokens, MailAuthError, TokenStore, device_login
 from local_assistant.mail_digest import MailDigest, MailNumbers
@@ -70,6 +73,7 @@ from local_assistant.photos import PhotoError, data_uri, prepare
 from local_assistant.profile import Profile
 from local_assistant.profiler import LAST_RUN_KEY, UNANNOUNCED_KEY, LearnError, Profiler
 from local_assistant.projects import Projects
+from local_assistant.reminders import Reminders, ReminderScheduler
 from local_assistant.signal_io import (
     NotAllowedError,
     SignalClient,
@@ -185,6 +189,7 @@ class App:
         # the calendars: Google iCal addresses (tools/ical) and Outlook calendars of the mailboxes (their own Graph,
         # Calendars.Read only); the digest's block and Gemma's calendar tools
         self.calendar: CalendarTools | None = None
+        self._calendar_feed: CalendarFeed | None = None
         if cfg.calendar_enabled:
             outlook = (
                 OutlookCalendars(cfg, status=self.part_status, clock=clock)
@@ -192,6 +197,7 @@ class App:
                 else None
             )
             feed = CalendarFeed(cfg, status=self.part_status, outlook=outlook.reader if outlook else None)
+            self._calendar_feed = feed
             self.calendar = CalendarTools(feed, cfg, notify=self._alert, clock=clock)
         # the morning digest (09:15): calendar on top, then mail; none without either
         digest_calendar = self.calendar if cfg.calendar_digest else None
@@ -286,6 +292,54 @@ class App:
                 language=self.language,
                 name=cfg.name,
             )
+        # reminders and wake-up calls the user sets (on unless [reminders] enabled = false); code fires them
+        self.reminders: Reminders | None = None
+        self.reminder_scheduler: ReminderScheduler | None = None
+        if cfg.reminders_enabled:
+            self.reminders = Reminders(
+                store,
+                cfg.timezone,
+                max_open=cfg.reminders_max_open,
+                max_per_day=cfg.reminders_max_per_day,
+                max_calls_per_day=cfg.calls_max_calls_per_day,
+                calls=cfg.wake_calls,
+                name=cfg.name,
+                clock=clock,
+            )
+            self.reminder_scheduler = ReminderScheduler(
+                store,
+                self.reminders,
+                self._send,
+                calls=self.calls if cfg.wake_calls else None,
+                in_call=lambda: not self._no_call.is_set(),  # texts wait during a call, like every text
+                clock=clock,
+            )
+        # messages she starts herself (opt-in: [initiative] enabled = true, or the user's typed /initiative on, which
+        # wins and needs no restart, so the gate is always there; off, it only keeps house): code finds every trigger
+        # and checks the gate, Gemma only writes; the check-ins are found in the idle pass, the calendar notes are code's
+        settings = Settings.of(cfg)
+        watch = None
+        if settings.calendar and self._calendar_feed is not None:
+            watch = CalendarWatch(self._calendar_feed, cfg.timezone, digest_minute=settings.digest_minute, clock=clock)
+        self.initiative: Initiative | None = Initiative(
+            store,
+            settings,
+            Writer(gemma, name=cfg.name, language=lambda: self.language, style=self.context.style),
+            self._send,
+            tz=cfg.timezone,
+            acis=cfg.allowed_acis,
+            busy=self._is_busy,
+            calendar=watch,
+            reminders=cfg.reminders_enabled,
+            wake_calls=cfg.reminders_enabled and cfg.wake_calls,
+            clock=clock,
+        )
+        self.followups: FollowUps | None = None
+        if settings.followups:
+            initiative = self.initiative
+            self.followups = FollowUps(
+                store, gemma, cfg.timezone, enabled=lambda: initiative.enabled and not initiative.quiet, clock=clock
+            )
         self.health = health or Health(
             store,
             cfg,
@@ -307,6 +361,7 @@ class App:
             calls=cfg.calls_enabled,
             web=self.web,
             maps=self.maps,
+            reminders=self.reminders,
             base_schemas=tool_schemas(
                 host_label=cfg.host_label,
                 checks=[check.label for check in cfg.health_extra_checks],
@@ -338,6 +393,7 @@ class App:
             window_tokens=cfg.window_tokens,
             summary_tokens=cfg.summary_tokens,
             busy=self._is_busy,
+            after_learning=self.followups,
         )
         self.tools.set_consolidate(self.profiler.consolidate_for)
         self.tools.set_learn_page(self.profiler.learn_page)
@@ -355,6 +411,8 @@ class App:
             language=self.language,
             set_language=self._set_language,
             voice_languages=voice_client.languages if voice_client else None,
+            reminders=self.reminders,
+            initiative=self.initiative,
         )
         chosen = store.get_state(VOICE_NAME_KEY)
         if chosen in VOICES:
@@ -368,8 +426,12 @@ class App:
         await self._name_profile()
         await self._profile_picture()
         self.context.refresh_snapshot()
+        await self._reminders_start_up()  # before recovery: a note that may have gone out is never sent again
+        self._initiative_start_up()  # the same for a message she started
         await self.recover()
         await self._welcome()
+        if self.followups is not None:
+            self.followups.start()  # plans said before the first start with follow-ups are never looked at
         self.sweep_files()
         self._mark_alive()
         async with asyncio.TaskGroup() as group:
@@ -387,6 +449,10 @@ class App:
                 group.create_task(self.morning_digest.run_forever(), name="morning-digest")
             if self.calls:
                 group.create_task(self._calls_forever(), name="calls")
+            if self.reminder_scheduler:
+                group.create_task(self.reminder_scheduler.run_forever(), name="reminders")
+            if self.initiative:
+                group.create_task(self.initiative.run_forever(), name="initiative")
             if self.music:
                 group.create_task(self._music_reminder(), name="music-reminder")
 
@@ -400,8 +466,32 @@ class App:
             music=cfg.spotify_enabled,
             web=cfg.web_enabled,
             maps=cfg.maps_enabled,
+            reminders=cfg.reminders_enabled,
             language=language,
         )
+
+    async def _reminders_start_up(self) -> None:
+        """Reminders missed while the bridge was down: one late note per user; one that was being sent is marked
+        "(may be a repeat)" and its old note is kept from recovery. A failure here never stops the bridge."""
+        if self.reminder_scheduler is None:
+            return
+        since = self._offline_since
+        try:
+            await self.reminder_scheduler.start_up(
+                offline_since=float(since) if since else None, started_at=self._started_at
+            )
+        except Exception:
+            log.exception("reminders: the start-up check failed")
+
+    def _initiative_start_up(self) -> None:
+        """A message she started that was being sent at the stop is never sent again (its row: unknown). A failure
+        here never stops the bridge."""
+        if self.initiative is None:
+            return
+        try:
+            self.initiative.start_up()
+        except Exception:
+            log.exception("initiative: the start-up check failed")
 
     def _set_language(self, code: str) -> None:
         """A language chosen with /language (typed, never during a call): Gemma's rules and the voice from the next
@@ -496,6 +586,9 @@ class App:
             web=cfg.web_enabled,
             maps=cfg.maps_enabled,
             music=cfg.spotify_enabled,
+            reminders=cfg.reminders_enabled,
+            wake_calls=cfg.reminders_enabled and cfg.wake_calls,
+            initiative=self.initiative.settings.line() if self.initiative and self.initiative.enabled else "",
         )
 
     async def _welcome(self) -> None:
@@ -511,6 +604,8 @@ class App:
                 return
             owed = ",".join(sorted(self.cfg.allowed_acis))
             self.store.set_state(WELCOME_OWED_KEY, owed)
+            if self.initiative is not None and self.initiative.enabled:  # the welcome tells: no announcement later
+                self.store.set_state(ANNOUNCED_KEY, f"{self._clock():.0f} welcome")
         left = [aci for aci in owed.split(",") if aci in self.cfg.allowed_acis]  # one no longer allowed is not owed
         text = self._welcome_text()
         conversation = self.store.current_conversation()
@@ -589,9 +684,11 @@ class App:
             await asyncio.sleep(5)
 
     def call_started(self, aci: str) -> None:
-        """Texts wait until the call ends; idle learning and mail sorting keep away from Gemma."""
+        """Texts wait until the call ends; idle learning, mail sorting and her own messages keep away from Gemma."""
         self._no_call.clear()
         self.profiler.note_activity()
+        if self.initiative is not None:
+            self.initiative.note_activity()
         if self.devices:
             self.devices.cancel()
 
@@ -600,6 +697,8 @@ class App:
             self.devices.cancel()  # a question asked on the call is not answered by a later text
         self._no_call.set()
         self.profiler.note_activity()
+        if self.reminder_scheduler is not None:
+            self.reminder_scheduler.notify()  # reminders that waited for the call go out now
 
     async def call_turn(self, aci: str, text: str, on_tools: Callable[[], None]) -> Turn:
         """One thing the user said on a call: stored like a message (answered at once), then a waiting device's
@@ -622,19 +721,24 @@ class App:
             log.error("call turn: Gemma failed: %s", exc)
             await self.call_drop_waiting(aci)  # the user never heard a question; a device that switched is reported
             return Turn(prompts.call_lines(self.language, name=self.cfg.name).lost)
-        said_text = whole_sentences(reply.text)  # cut off at the token limit: never stop mid-sentence
+        # cut off at the token limit: never stop mid-sentence. Code's line why no reminder was set (her words about it
+        # are left out of the reply) is said in English after hers and any question, and kept
+        said_text = whole_sentences(reply.hers)
+        code_line = speakable(reply.not_set_spoken) if reply.not_set else ""
         asks_yes = bool(self.devices and self.devices.pending)
         question = ""
         if asks_yes and self.devices is not None:  # the caller hears exactly what a yes will do (the note is a text)
             question = speakable(self.devices.question())
             if self.language != ENGLISH:  # Gemma may claim it is done already: only code's question is said and kept
                 said_text = ""
-        reply_id = self.store.add_call_reply(conversation_id, aci, f"{said_text} {question}".strip(), said_id)
+        kept = " ".join(part for part in (said_text, question, code_line) if part)
+        reply_id = self.store.add_call_reply(conversation_id, aci, kept, said_id)
         device_note = self.devices.take_note() if self.devices else ""
-        notes = [note for note in (reply.sources, device_note, reply.notice) if note]
+        notes = [note for note in (reply.sources, device_note, reply.notice, reply.reminder) if note]
         await self._call_notes(aci, conversation_id, said_id, notes)
         log.info("call turn %d answered: %d tool calls", said_id, reply.tool_calls)
-        return Turn(said_text, reply_id=reply_id, asks_yes=asks_yes, end_call=reply.end_call, code_text=question)
+        code_text = " ".join(line for line in (question, code_line, reply.reminder_spoken) if line)  # English
+        return Turn(said_text, reply_id=reply_id, asks_yes=asks_yes, end_call=reply.end_call, code_text=code_text)
 
     async def call_drop_waiting(self, aci: str) -> None:
         """Drop a device action waiting for a yes; what did switch in the meantime is still a note (as in text)."""
@@ -732,6 +836,8 @@ class App:
         with contextlib.suppress(SignalError, NotAllowedError):
             await self.signal.receipt(aci, timestamp)
         self.profiler.note_activity()
+        if self.initiative is not None:
+            self.initiative.note_activity()  # a text she is writing waits: Gemma's slot is the user's
         if kind == "command" and not self._no_call.is_set() and text.split()[0].lower() not in WAITING_COMMANDS:
             # during a call a command (no Gemma) is answered at once; /voice name even changes the call's voice
             self._background.add(task := asyncio.create_task(self._command_now(message_id)))
@@ -798,9 +904,10 @@ class App:
                 reply = await self.brain.answer(conversation, message, images, recent=self._recent_photos(message))
                 if images:
                     self._recent_photo = (message.conversation_id, message.id, images, self._clock())
-                text = reply.text
+                text = reply.text  # when no reminder was set: without her talk of it, code's line why after hers
                 if self.language != ENGLISH and self.devices is not None and self.devices.pending:
-                    text = self.devices.question()  # Gemma in another language may claim it is done: code's words only
+                    # Gemma in another language may claim it is done: code's words only
+                    text = "\n".join(part for part in (self.devices.question(), reply.not_set) if part)
                 # separate "note" messages: sent to the user, never part of Gemma's history (it would imitate them)
                 device_note = self.devices.take_note() if self.devices else ""
                 music_note = self.music.take_note() if self.music else ""
@@ -812,6 +919,7 @@ class App:
                         music_note,
                         *photo_notes,
                         reply.notice,
+                        reply.reminder,
                         self._take_digest(),
                     )
                     if note
@@ -1039,7 +1147,7 @@ class App:
         if self.devices:
             lines.append(await self.devices.reachability())
         if self.calls:
-            lines.append(self.calls.status_line())
+            lines.append(self.calls.status_line(next_call=self.reminders.next_call() if self.reminders else ""))
         if self.music:
             lines.append(self.music.status_line())
         if self.web:
@@ -1064,6 +1172,8 @@ class App:
             messages=self.store.count_messages(),
             restarts=self.signal.restarts,
             parts=tuple(line.line() for line in part_lines(self.cfg, self.part_status.snapshot(), self._clock())),
+            reminders=self.reminders.status_line() if self.reminders else "",
+            initiative=tuple(self.initiative.status_lines()) if self.initiative else (),
         )
 
     async def _learn_command(self, url: str, message: Message) -> str:
@@ -1145,8 +1255,10 @@ class App:
         await self._send(out_id)
 
     async def _send(self, out_id: int) -> None:
+        """Send a stored message (with its footer, a code line kept apart from the text) and mark it."""
         out = self.store.message(out_id)
-        timestamp = await self._deliver(out.peer_aci, out.text, f"message {out_id}")
+        text = f"{out.text}\n{out.footer}" if out.footer else out.text
+        timestamp = await self._deliver(out.peer_aci, text, f"message {out_id}")
         if timestamp is None:
             self.store.set_status(out_id, "failed")
             return

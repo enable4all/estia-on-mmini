@@ -191,13 +191,44 @@ class FakeHelper:
         return sum(1 for frame in self.heard if rms(frame) > 300)
 
 
+OUT = 77  # the id signal-cli gives a call she places
+
+
 class FakeSignal:
     def __init__(self, folder: Path) -> None:
         self.folder = folder
         self.events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self.accepted: list[tuple[str, int]] = []
         self.hung_up: list[tuple[str, int]] = []
+        self.started: list[str] = []
+        self.start_error: Exception | None = None
         self.helper: FakeHelper | None = None
+
+    async def start_call(self, aci: str) -> dict[str, Any]:
+        """As signal-cli 0.14.9 does: the ringing event comes before startCall's reply (the call id is not known yet
+        when it is read)."""
+        self.started.append(aci)
+        if self.start_error is not None:
+            raise self.start_error
+        self.events.put_nowait({"callId": OUT, "state": "RINGING_OUTGOING", "uuid": aci, "isOutgoing": True})
+        await asyncio.sleep(0.05)
+        return {"callId": OUT, "state": "RINGING_OUTGOING"}
+
+    async def pick_up(self, call_id: int = OUT) -> None:
+        """The user answers the call she placed."""
+        path = self.folder / f"signal-call-{call_id & 0xFFFFFFFFFFFFFFFF}.sock"
+        self.helper = FakeHelper(path)
+        await self.helper.start()
+        self.events.put_nowait({"callId": call_id, "state": "CONNECTING", "isOutgoing": True})
+        self.events.put_nowait(
+            {"callId": call_id, "state": "CONNECTED", "isOutgoing": True, "inputDeviceName": f"unix:{path}"}
+        )
+
+    def end_ringing(self, reason: str, call_id: int | None = OUT) -> None:
+        event: dict[str, Any] = {"state": "ENDED", "reason": reason}
+        if call_id is not None:
+            event |= {"callId": call_id, "isOutgoing": True}
+        self.events.put_nowait(event)
 
     async def call_events(self) -> AsyncIterator[dict[str, Any]]:
         while True:
@@ -1159,3 +1190,139 @@ def test_no_spoken_line_is_a_hum_the_voice_garbles() -> None:
         *prompts.call_greetings(NAME),
     ]
     assert [line for line in spoken if hum.search(line)] == []
+
+
+# calls she places (a wake-up call or a call reminder): the reminders' scheduler sends the text first
+
+
+async def placing(h: "Harness", *, wake: bool = True) -> "asyncio.Task[str]":
+    task = asyncio.create_task(h.manager.place(ME, wake=wake, time="7:00", text="wake up"))
+    await h.until(lambda: h.signal.started == [ME])
+    return task
+
+
+async def test_a_placed_call_starts_only_when_picked_up_and_opens_with_the_wake_line() -> None:
+    async with Harness(["thanks, I'm up"], [Turn("Great, have a good day!")]) as h:
+        task = await placing(h)
+        await asyncio.sleep(0.2)
+        assert not task.done() and h.host.started == []  # ringing: texts are not held yet
+        await h.signal.pick_up()
+        assert await task == "answered"
+        assert h.host.started == [ME]
+        opening = "Good morning! It's 7:00. wake up"
+        await h.quiet_after(opening)
+        assert GREETING not in h.voice.spoken  # the opening instead of the greeting
+        h.helper.caller_says(speech(1.0))
+        await h.quiet_after("Great, have a good day!")
+        assert h.host.turns == ["thanks, I'm up"]
+
+
+async def test_a_call_reminder_opens_with_why_she_calls() -> None:
+    async with Harness() as h:
+        task = asyncio.create_task(h.manager.place(ME, wake=False, time="17:00", text="call the dentist"))
+        await h.until(lambda: h.signal.started == [ME])
+        await h.signal.pick_up()
+        assert await task == "answered"
+        await h.quiet_after("It's 17:00. You asked me to call you. call the dentist")
+
+
+async def test_the_opening_is_said_in_the_calls_language() -> None:
+    async with Harness(language="nl") as h:
+        task = await placing(h)
+        await h.signal.pick_up()
+        await task
+        await h.quiet_after("Goedemorgen! Het is 7:00. wake up")
+
+
+@pytest.mark.parametrize(
+    ("reason", "outcome"),
+    [
+        ("ring_timeout", "no_answer"),
+        ("Timeout", "no_answer"),
+        ("remote_hangup", "declined"),
+        ("RemoteHangup", "declined"),
+        ("remote_busy", "busy"),
+        ("tunnel_exit", "call_failed"),
+        ("tunnel_spawn_error", "call_failed"),
+        ("shutdown", "call_failed"),
+    ],
+)
+async def test_a_call_that_is_not_picked_up_ends_with_its_outcome(reason: str, outcome: str) -> None:
+    async with Harness() as h:
+        task = await placing(h)
+        h.signal.end_ringing(reason)
+        assert await task == outcome
+        assert h.host.started == [] and h.host.ended == 0 and h.host.notes == []  # no call notes for no call
+        assert not h.manager.in_call
+
+
+async def test_a_signal_cli_restart_while_ringing_is_a_failed_call() -> None:
+    async with Harness() as h:
+        task = await placing(h)
+        h.signal.end_ringing("signal_cli_restarted", call_id=None)
+        assert await task == "call_failed"
+
+
+async def test_no_end_in_time_hangs_up_and_is_a_failed_call() -> None:
+    async with Harness(ring_wait_s=0.3) as h:
+        task = await placing(h)
+        assert await task == "call_failed"
+        assert h.signal.hung_up == [(ME, OUT)]
+
+
+async def test_a_startcall_error_is_a_failed_call() -> None:
+    async with Harness() as h:
+        h.signal.start_error = RuntimeError("signal-cli refused")
+        assert await h.manager.place(ME, wake=True, time="7:00", text="wake up") == "call_failed"
+
+
+async def test_she_never_dials_an_account_that_is_not_allowed() -> None:
+    async with Harness() as h:
+        assert await h.manager.place(STRANGER, wake=True, time="7:00", text="x") == "call_failed"
+        assert h.signal.started == []
+
+
+async def test_whether_a_call_can_be_placed() -> None:
+    async with Harness(ready=False) as h:
+        assert await h.manager.can_place(ME) == "not_ready"
+        assert await h.manager.place(ME, wake=True, time="7:00", text="x") == "call_failed"
+        assert h.signal.started == []
+    async with Harness() as h:
+        assert await h.manager.can_place(ME) == ""
+        await h.connected()  # the user called her
+        assert await h.manager.can_place(ME) == "in_call"
+
+
+async def test_an_incoming_call_while_she_dials_is_ignored() -> None:
+    async with Harness() as h:
+        task = await placing(h)
+        h.signal.ring()
+        await asyncio.sleep(0.2)
+        assert h.signal.accepted == []
+        h.signal.end_ringing("ring_timeout")
+        assert await task == "no_answer"
+
+
+async def test_stopping_the_bridge_hangs_up_a_ringing_call() -> None:
+    async with Harness() as h:
+        task = await placing(h)
+        await asyncio.sleep(0.1)  # the call id is known
+        await h.manager.hangup()
+        assert h.signal.hung_up == [(ME, OUT)]
+        h.signal.end_ringing("local_hangup")
+        assert await task == "call_failed"
+
+
+async def test_a_minute_of_silence_after_the_wake_line_ends_the_call_with_a_goodbye() -> None:
+    async with Harness(wake_silence_s=0.5) as h:
+        task = await placing(h)
+        await h.signal.pick_up()
+        await task
+        await h.until(lambda: h.signal.hung_up == [(ME, OUT)])
+        assert any(line in h.voice.spoken for line in prompts.CALL_BYE_LINES)
+        assert prompts.CALL_IDLE not in h.voice.spoken
+
+
+async def test_the_status_line_shows_the_next_call() -> None:
+    async with Harness() as h:
+        assert h.manager.status_line(next_call="Tue 13 Oct 07:00") == "Calls: ready · next call Tue 13 Oct 07:00"

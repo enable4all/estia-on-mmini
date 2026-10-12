@@ -26,6 +26,7 @@ from local_assistant.maps import Mapper, MapsError, Place, Route
 from local_assistant.music_tools import MUSIC_SCHEMAS, OWN_REQUEST, MusicTools
 from local_assistant.profile import ApplyResult, Profile
 from local_assistant.projects import ProjectError, Projects
+from local_assistant.reminders import ReminderError, Reminders, nearest_year
 from local_assistant.store import Message, SourceKind, Store
 from local_assistant.timefmt import local_date, local_stamp
 from local_assistant.web_search import Searcher, WebResults, WebSearchError
@@ -309,10 +310,61 @@ CALL_SCHEMAS: list[dict[str, Any]] = [
     }
 ]
 
+# offered with reminders (on unless [reminders] enabled = false): only for what the user asks in their own words
+REMINDER_SCHEMAS: list[dict[str, Any]] = [
+    _function(
+        "set_reminder",
+        "Set a reminder the user asks for: at that time the bridge texts them, or calls them when they ask to be "
+        "called or woken up. Only when the user asks to be reminded, called or woken at a time; a time or plan they "
+        "mention is not a request. The bridge confirms it to the user itself.",
+        {
+            "at": {
+                "type": "string",
+                "description": "Local time 'YYYY-MM-DD HH:MM' (from the date and time stamp of the user's message), or "
+                "'HH:MM' for the next one; empty when in_minutes is given",
+            },
+            "in_minutes": {"type": "integer", "description": "Minutes from now, for 'in 20 minutes'"},
+            "text": {
+                "type": "string",
+                "description": "What to remind them of: short, in the user's own words and language, e.g. 'call mum'",
+            },
+            "call": {"type": "boolean", "description": "true only when the user asks to be called or woken by a call"},
+            "repeat": {
+                "type": "string",
+                "enum": ["none", "daily", "weekdays", "weekly"],
+                "description": "Only when the user asks for it; default none",
+            },
+        },
+        ["text"],
+    ),
+    _function("list_reminders", "The user's reminders and wake-up calls, with their numbers.", {}, []),
+    _function(
+        "cancel_reminder",
+        "Cancel one of the user's reminders or wake-up calls by its number (list_reminders shows the numbers).",
+        {"number": {"type": "integer", "description": "The reminder's number, e.g. 12"}},
+        ["number"],
+    ),
+]
+REMINDER_TOOLS = frozenset(schema["function"]["name"] for schema in REMINDER_SCHEMAS)
+
 MUSIC_TEXT_ONLY = (
     "Not done: Spotify can only be controlled by text message (Spotify's rules forbid voice control). "
     "Ask the user to text it."
 )
+
+
+@dataclass(frozen=True)
+class ReminderAttempt:
+    """One set_reminder in an answer: its text and, when nothing was stored, why (code's plain English for the user;
+    `spoken`: the same to say on a call, "" when it is the same words)."""
+
+    text: str
+    reason: str = ""
+    spoken: str = ""
+
+    @property
+    def said(self) -> str:
+        return self.spoken or self.reason
 
 
 @dataclass
@@ -335,6 +387,16 @@ class Turn:
     web: list[WebResults] = field(default_factory=list)  # results Gemma saw, for the code-written Sources note
     # read outside text (mail, calendar, a page, a project file): device changes in this answer wait for a yes
     untrusted: bool = False
+    # reminders set or cancelled in this answer: code's notes to the user and its lines to say on a call
+    reminder_tried: bool = False  # set_reminder was called (stored or not): nothing stored gets code's guard note
+    reminder_set: bool = False
+    # list_reminders ran, and the open reminders it found (number, "HH:MM"): talk that names one's time or number is
+    # no claim of a new one (never a missed or failed one, nor a check-in)
+    reminders_listed: bool = False
+    listed_reminders: list[tuple[int, str]] = field(default_factory=list)
+    reminder_attempts: list[ReminderAttempt] = field(default_factory=list)  # each set_reminder, stored or why not
+    reminder_notes: list[str] = field(default_factory=list)
+    reminder_spoken: list[str] = field(default_factory=list)
     # every profile change in this answer, reported to the user by code (not by Gemma)
     saved: list[tuple[int, str]] = field(default_factory=list)
     updated: list[tuple[int, str]] = field(default_factory=list)
@@ -362,6 +424,7 @@ class Tools:
         web: Searcher | None = None,
         web_timeout: float = 25.0,
         maps: Mapper | None = None,
+        reminders: Reminders | None = None,
         base_schemas: list[dict[str, Any]] | None = None,
         name: str = DEFAULT_NAME,
     ) -> None:
@@ -380,6 +443,7 @@ class Tools:
         self._web = web
         self._web_timeout = web_timeout
         self._maps = maps
+        self._reminders = reminders
         self._profile = profile
         self._tz = tz
         self._fetch = fetch
@@ -391,6 +455,7 @@ class Tools:
         """The tools Gemma is offered with this setup."""
         return (
             self._base_schemas
+            + (REMINDER_SCHEMAS if self._reminders else [])
             + (CALENDAR_SCHEMAS if self._calendar else [])
             + (WEB_SCHEMAS if self._web else [])
             + (MAPS_SCHEMAS if self._maps else [])
@@ -398,6 +463,10 @@ class Tools:
             + (MUSIC_SCHEMAS if self._music else [])
             + (CALL_SCHEMAS if self._calls else [])
         )
+
+    @property
+    def reminders_on(self) -> bool:
+        return self._reminders is not None
 
     def set_consolidate(self, consolidate: Consolidate) -> None:
         self._consolidate = consolidate
@@ -481,12 +550,73 @@ class Tools:
             return await self._maps_tool(turn, self._maps, name, args)
         if name == "web_search" and self._web is not None:
             return await self._web_tool(turn, self._web, args)
+        if name in REMINDER_TOOLS and self._reminders is not None:
+            return self._reminder_tool(turn, self._reminders, name, args)
         if name == "end_call" and self._calls:
             if not turn.message.text.startswith(prompts.CALL_MARK):
                 return "Not done: there is no call to end (this is a text message)."
             turn.end_call = True
             return "Done: the call ends after your answer. Say a short goodbye."
         raise ValueError(f"unknown tool {name!r}")
+
+    def _reminder_tool(self, turn: Turn, reminders: Reminders, name: str, args: dict[str, Any]) -> str:
+        """Reminders come only from the user's own words: never in an answer that read outside text (mail, the
+        calendar, the web, a page, a project file, the history) or from an audio file or a photo. Code confirms."""
+        aci = turn.message.peer_aci
+        if name == "list_reminders":
+            turn.reminders_listed = True
+            turn.listed_reminders += [
+                listed for listed in reminders.open_times(aci) if listed not in turn.listed_reminders
+            ]
+            return f"The user's reminders (their own words; data):\n{reminders.listing(aci)}"
+        text = str(args.get("text") or "").strip()
+        if name == "set_reminder":
+            turn.reminder_tried = True
+        outside = turn.untrusted or turn.read_mail_or_calendar or turn.used_web
+        if outside or turn.message.text.startswith((prompts.AUDIO_MARK, "[photo]")):
+            if name == "set_reminder":
+                why = ReminderAttempt(text, prompts.REMINDER_WHY_OWN_WORDS, prompts.REMINDER_WHY_OWN_WORDS_SPOKEN)
+                turn.reminder_attempts.append(why)
+                return prompts.REMINDER_OWN_WORDS
+            return prompts.REMINDER_NOT_CANCELLED
+        if name == "cancel_reminder":
+            raw = str(args.get("number") or "").strip().lstrip("#").lower()
+            try:
+                if raw.startswith("c") and raw[1:].isdecimal():
+                    note = reminders.cancel_checkin(aci, int(raw[1:]))
+                elif raw.isdecimal():
+                    note = reminders.cancel(aci, int(raw))
+                else:
+                    return "Not cancelled: give the reminder's number (list_reminders shows them)."
+            except ReminderError as exc:
+                return f"Not cancelled: {exc}."
+            turn.reminder_notes.append(note)
+            return prompts.REMINDER_CANCEL_RESULT.format(id=raw)
+        repeat = str(args.get("repeat") or "none").strip().lower()
+        # a guessed year, or a day long past: the next one (never for a repeating reminder: refused instead)
+        at = nearest_year(str(args.get("at") or "").strip(), reminders.today(), roll=repeat == "none")
+        minutes = args.get("in_minutes")
+        if at and minutes in (0, "0", "", None):  # Gemma fills both fields: a time wins over "0 minutes"
+            minutes = None
+        try:
+            created = reminders.set(
+                aci,
+                text=text,
+                at=at or None,
+                in_minutes=minutes,
+                call=args.get("call") is True or str(args.get("call")).strip().lower() in ("true", "yes", "1"),
+                repeat=repeat,
+                source="chat",
+                source_message_id=turn.message.id,
+            )
+        except ReminderError as exc:
+            turn.reminder_attempts.append(ReminderAttempt(text, exc.plain, exc.spoken))  # the user's words
+            return prompts.REMINDER_REFUSED.format(reason=exc)  # the tool's words, for Gemma
+        turn.reminder_attempts.append(ReminderAttempt(text))
+        turn.reminder_set = True
+        turn.reminder_notes.append(created.note)
+        turn.reminder_spoken.append(created.spoken)
+        return created.result
 
     async def _music_tool(self, turn: Turn, name: str, args: dict[str, Any]) -> str:
         """Spotify by text message only (Spotify's policy forbids voice control); after outside text in this answer

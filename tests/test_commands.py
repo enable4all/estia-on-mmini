@@ -1,12 +1,17 @@
 from pathlib import Path
 
+import pytest
+
 from local_assistant import prompts
 from local_assistant.commands import Commands, StatusInfo, VoiceLanguages
 from local_assistant.context import ContextBuilder
+from local_assistant.initiative import Initiative, Settings, Writer
 from local_assistant.language import LANGUAGE_KEY
 from local_assistant.profile import Profile
+from local_assistant.reminders import Reminders
 from local_assistant.store import Message, Store
-from tests.conftest import ME, T0, TZ
+from tests.conftest import ME, STRANGER, T0, TZ
+from tests.fakes.fake_gemma import FakeGemma
 
 
 async def status() -> StatusInfo:
@@ -326,6 +331,7 @@ async def test_an_unknown_language_gets_the_list(store: Store) -> None:
     assert reply.startswith('Unknown language "klingon".\n\nLanguages') and "• Español, Spanish (es)" in reply
     assert switched == [] and store.get_state(LANGUAGE_KEY) is None
     assert "/language" in prompts.HELP
+    assert 'only my "Reminder set" note means one is set' in prompts.HELP  # the reminders' contract
 
 
 async def test_a_switch_says_when_the_voice_service_cannot_do_the_language(store: Store) -> None:
@@ -351,3 +357,151 @@ async def test_a_switch_says_when_the_voice_service_cannot_do_the_language(store
     assert len(asked) == 3
     assert await commands.handle(command(store, "/language en", T0 + 3)) == prompts.LANGUAGE_SET_ENGLISH
     assert len(asked) == 3  # English works with any voice service
+
+
+# /remind and /reminders: code only, no Gemma (a dependable path when Gemma is slow or down)
+
+
+def with_reminders(store: Store, *, calls: bool = True) -> tuple[Commands, Reminders]:
+    profile = Profile(store)
+    context = ContextBuilder(store, profile, TZ)
+    reminders = Reminders(store, TZ, calls=calls, clock=lambda: T0 / 1000)  # Thu 8 Oct 09:32
+    return Commands(store, profile, context, TZ, status, lambda: None, reminders=reminders), reminders
+
+
+@pytest.mark.parametrize(
+    ("typed", "local_time", "call", "repeat", "text"),
+    [
+        ("/remind 17:00 call the dentist", "2026-10-08 17:00", False, "none", "call the dentist"),
+        ("/remind call 07:00 wake up", "2026-10-09 07:00", True, "none", "wake up"),
+        ("/remind call weekdays 06:30 wake up", "2026-10-09 06:30", True, "weekdays", "wake up"),
+        ("/remind daily 2026-10-10 08:00 take the pills", "2026-10-10 08:00", False, "daily", "take the pills"),
+        ("/remind 20m pizza", "2026-10-08 09:52", False, "none", "pizza"),
+        ("/remind 2h Tee kochen", "2026-10-08 11:32", False, "none", "Tee kochen"),
+    ],
+)
+async def test_remind_sets_one_from_the_command(
+    store: Store, typed: str, local_time: str, call: bool, repeat: str, text: str
+) -> None:
+    commands, _ = with_reminders(store)
+    message = command(store, typed)
+    reply = await commands.handle(message)
+    assert reply.startswith("Reminder set (#1):") and f'"{text}"' in reply
+    [saved] = store.open_reminders(ME)
+    assert (saved.local_time, saved.call, saved.repeat, saved.text) == (local_time, call, repeat, text)
+    assert (saved.source, saved.source_message_id) == ("command", message.id)
+
+
+@pytest.mark.parametrize(
+    ("typed", "expected"),
+    [
+        ("/remind", prompts.REMINDER_USAGE),
+        ("/remind 17:00", prompts.REMINDER_USAGE),
+        ("/remind call", prompts.REMINDER_USAGE),
+        ("/remind soon call mum", 'Not set: I can\'t read "soon"'),
+        ("/remind 2026-10-01 07:00 too late", "Not set: that time has passed."),
+    ],
+)
+async def test_remind_says_how_when_it_cannot(store: Store, typed: str, expected: str) -> None:
+    commands, _ = with_reminders(store)
+    assert (await commands.handle(command(store, typed))).startswith(expected)
+    assert store.open_reminders(ME) == []
+
+
+async def test_reminders_lists_and_cancels(store: Store) -> None:
+    commands, reminders = with_reminders(store)
+    reminders.set(ME, at="2026-10-09 07:00", text="wake up", call=True)
+    reminders.set(ME, at="18:00", text="cook")
+    listing = await commands.handle(command(store, "/reminders"))
+    assert listing.splitlines()[:3] == [
+        "Reminders:",
+        "#2 Thu 8 Oct 18:00 · cook",
+        "#1 Fri 9 Oct 07:00 · call · wake up",
+    ]
+    assert await commands.handle(command(store, "/reminders cancel 1", T0 + 1)) == (
+        "Cancelled #1: Fri 9 Oct 07:00 · wake up"
+    )
+    assert (await commands.handle(command(store, "/reminders cancel #9", T0 + 2))).startswith("No open reminder #9")
+    assert await commands.handle(command(store, "/reminders cancel all", T0 + 3)) == "Cancelled 1 reminder."
+    assert await commands.handle(command(store, "/reminders cancel", T0 + 4)) == prompts.REMINDERS_USAGE
+    assert await commands.handle(command(store, "/reminders", T0 + 5)) == prompts.REMINDERS_NONE
+
+
+async def test_each_user_sees_and_cancels_only_their_own(store: Store) -> None:
+    commands, reminders = with_reminders(store)
+    reminders.set(STRANGER, at="18:00", text="theirs")
+    assert await commands.handle(command(store, "/reminders")) == prompts.REMINDERS_NONE
+    assert (await commands.handle(command(store, "/reminders cancel 1", T0 + 1))).startswith("No open reminder #1")
+    assert len(store.open_reminders(STRANGER)) == 1
+
+
+async def test_reminder_commands_without_reminders(store: Store) -> None:
+    _, _, commands, _ = make(store)
+    assert await commands.handle(command(store, "/remind 17:00 x")) == prompts.REMINDERS_OFF
+    assert await commands.handle(command(store, "/reminders", T0 + 1)) == prompts.REMINDERS_OFF
+
+
+def test_help_lists_the_reminder_commands() -> None:
+    assert "/remind [call] [daily|weekdays] <when> <text>" in prompts.HELP
+    assert "/reminders - " in prompts.HELP
+
+
+async def test_quiet_pauses_her_own_messages_and_quiet_off_resumes_them(store: Store) -> None:
+    async def send(out_id: int) -> None:
+        return None
+
+    initiative = Initiative(store, Settings(enabled=True), Writer(FakeGemma()), send, tz=TZ, acis=frozenset({ME}))
+    profile = Profile(store)
+    commands = Commands(
+        store, profile, ContextBuilder(store, profile, TZ), TZ, status, lambda: None, initiative=initiative
+    )
+    assert await commands.handle(command(store, "/quiet")) == prompts.QUIET_ON and initiative.quiet
+    resumed = await commands.handle(command(store, "/quiet off", T0 + 1))
+    assert resumed == (
+        "I may message you first again: at most once a day, never at night, a spontaneous note about once a week."
+    )
+    assert not initiative.quiet
+    assert await commands.handle(command(store, "/quiet please", T0 + 2)) == prompts.QUIET_USAGE
+
+
+async def test_quiet_with_her_own_messages_off(store: Store) -> None:
+    _, _, commands, _ = make(store)
+    assert await commands.handle(command(store, "/quiet")) == prompts.QUIET_DISABLED
+
+    async def send(out_id: int) -> None:
+        return None
+
+    initiative = Initiative(store, Settings(), Writer(FakeGemma()), send, tz=TZ, acis=frozenset({ME}))  # opt-in
+    profile = Profile(store)
+    commands = Commands(
+        store, profile, ContextBuilder(store, profile, TZ), TZ, status, lambda: None, initiative=initiative
+    )
+    assert await commands.handle(command(store, "/quiet", T0 + 1)) == prompts.QUIET_DISABLED
+    assert not initiative.quiet
+
+
+async def test_initiative_on_and_off_typed_by_the_user(store: Store) -> None:
+    async def send(out_id: int) -> None:
+        return None
+
+    initiative = Initiative(store, Settings(), Writer(FakeGemma()), send, tz=TZ, acis=frozenset({ME}))
+    profile = Profile(store)
+    commands = Commands(
+        store, profile, ContextBuilder(store, profile, TZ), TZ, status, lambda: None, initiative=initiative
+    )
+    line = initiative.settings.line()
+    off = prompts.INITIATIVE_STATE_OFF.format(limits=initiative.settings.limits())
+    assert await commands.handle(command(store, "/initiative")) == off
+    assert await commands.handle(command(store, "/initiative ON", T0 + 1)) == prompts.INITIATIVE_ON.format(line=line)
+    assert initiative.enabled
+    assert await commands.handle(command(store, "/initiative", T0 + 2)) == prompts.INITIATIVE_STATE_ON.format(line=line)
+    assert await commands.handle(command(store, "/initiative off", T0 + 3)) == prompts.INITIATIVE_OFF_REPLY
+    assert not initiative.enabled
+    assert await commands.handle(command(store, "/initiative maybe", T0 + 4)) == prompts.INITIATIVE_USAGE
+    _, _, plain, _ = make(store)  # no initiative at all
+    assert await plain.handle(command(store, "/initiative on", T0 + 5)) == prompts.QUIET_DISABLED
+
+
+def test_help_lists_quiet_and_initiative() -> None:
+    assert "/quiet - pause the messages I start myself" in prompts.HELP
+    assert "/initiative on - " in prompts.HELP

@@ -922,3 +922,118 @@ def test_the_model_server_must_be_on_this_mac(url: str) -> None:
     assert parse_config(BASE | {"ollama_base_url": "http://localhost:11500/v1"}).ollama_base_url.startswith(
         "http://localhost"
     )
+
+
+def test_reminders_are_on_without_the_section_with_their_limits() -> None:
+    cfg = parse_config(BASE)
+    assert cfg.reminders_enabled and Config("+306900000000", frozenset({ACI})).reminders_enabled
+    assert (cfg.reminders_max_open, cfg.reminders_max_per_day) == (50, 20)
+    chosen = parse_config(BASE | {"reminders": {"enabled": False, "max_open": 10, "max_per_day": 5}})
+    assert (chosen.reminders_enabled, chosen.reminders_max_open, chosen.reminders_max_per_day) == (False, 10, 5)
+
+
+@pytest.mark.parametrize(
+    ("reminders", "message"),
+    [
+        ("on", r"\[reminders\] must be a table"),
+        ({"enabled": "yes"}, "reminders.enabled"),
+        ({"max_open": 0}, "reminders.max_open"),
+        ({"max_open": 501}, "reminders.max_open"),
+        ({"max_per_day": True}, "reminders.max_per_day"),
+        ({"max_per_day": 1.5}, "reminders.max_per_day"),
+    ],
+)
+def test_bad_reminder_settings(reminders: object, message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        parse_config(BASE | {"reminders": reminders})
+
+
+def test_wake_up_calls_are_on_with_calls_and_capped_a_day() -> None:
+    with_calls = parse_config(BASE | {"voice": {}, "calls": {}})
+    assert with_calls.wake_calls and (with_calls.calls_wake_call, with_calls.calls_max_calls_per_day) == (True, 3)
+    without = parse_config(BASE)
+    assert not without.wake_calls  # "call me" reminders are texts without [calls]
+    off = parse_config(BASE | {"voice": {}, "calls": {"wake_call": False, "max_calls_per_day": 1}})
+    assert not off.wake_calls and off.calls_max_calls_per_day == 1
+
+
+@pytest.mark.parametrize(
+    ("calls", "message"),
+    [
+        ({"wake_call": "on"}, "calls.wake_call"),
+        ({"max_calls_per_day": 0}, "calls.max_calls_per_day"),
+        ({"max_calls_per_day": 11}, "calls.max_calls_per_day"),
+    ],
+)
+def test_bad_wake_call_settings(calls: object, message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        parse_config(BASE | {"voice": {}, "calls": calls})
+
+
+def test_her_own_messages_are_opt_in_and_each_kind_is_on_once_they_are() -> None:
+    cfg = parse_config(BASE)
+    assert not cfg.initiative_enabled and not Config("+306900000000", frozenset({ACI})).initiative_enabled
+    assert not parse_config(BASE | {"initiative": {"improvise": False}}).initiative_enabled
+    assert parse_config(BASE | {"initiative": {"enabled": True}}).initiative_enabled
+    assert (cfg.initiative_followups, cfg.initiative_calendar, cfg.initiative_lookback, cfg.initiative_improvise) == (
+        True,
+        True,
+        True,
+        True,
+    )
+    assert (cfg.initiative_max_per_day, cfg.initiative_followups_per_week, cfg.initiative_improvise_per_week) == (
+        1,
+        2,
+        1,
+    )
+    assert (cfg.initiative_quiet_hours, cfg.initiative_lookback_time, cfg.initiative_early_check) == (
+        "22:00-08:00",
+        "Sun 19:00",
+        "20:00",
+    )
+    chosen = parse_config(
+        BASE
+        | {
+            "initiative": {
+                "enabled": False,
+                "improvise": False,
+                "max_per_day": 2,
+                "improvise_per_week": 3,
+                "quiet_hours": "",
+                "lookback_time": "saturday 10:30",
+                "early_check": "19:45",
+            }
+        }
+    )
+    assert not chosen.initiative_enabled and not chosen.initiative_improvise
+    assert (chosen.initiative_max_per_day, chosen.initiative_improvise_per_week) == (2, 3)
+    assert (chosen.initiative_quiet_hours, chosen.initiative_lookback_time) == ("", "saturday 10:30")
+
+
+@pytest.mark.parametrize(
+    ("initiative", "message"),
+    [
+        ("on", r"\[initiative\] must be a table"),
+        ({"enabled": "yes"}, "initiative.enabled"),
+        ({"calendar": 1}, "initiative.calendar"),
+        ({"max_per_day": 0}, "initiative.max_per_day"),
+        ({"max_per_day": 6}, "initiative.max_per_day"),
+        ({"improvise_per_week": True}, "initiative.improvise_per_week"),
+        ({"followups_per_week": 8}, "initiative.followups_per_week"),
+        ({"quiet_hours": "22-8"}, "initiative.quiet_hours"),
+        ({"quiet_hours": "22:00"}, "initiative.quiet_hours"),
+        ({"quiet_hours": 22}, "initiative.quiet_hours"),
+        ({"lookback_time": "Sunday"}, "initiative.lookback_time"),
+        ({"lookback_time": "Funday 19:00"}, "initiative.lookback_time"),
+        ({"early_check": "8pm"}, "initiative.early_check"),
+    ],
+)
+def test_bad_initiative_settings(initiative: object, message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        parse_config(BASE | {"initiative": initiative})
+
+
+def test_the_style_file_is_read_next_to_the_config_that_was_loaded(tmp_path: Path) -> None:
+    """soul.md sits next to the config file actually loaded, never in the real home when another config is given."""
+    cfg = load_config(write(tmp_path, GOOD))
+    assert cfg.soul_path == tmp_path / "soul.md"

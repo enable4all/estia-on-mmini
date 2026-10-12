@@ -46,6 +46,13 @@ The full threat model is in [setup_assistant.md, section 8](setup_assistant.md#8
 - Lights and plugs are reached on the home network only. A device change requested after outside text (a web page, mail,
   a calendar entry, a project file or a photo) waits for the user's yes.
 - Text from outside sources is treated as data, never as instructions.
+- Reminders and wake-up calls come only from the user's own words: setting or cancelling one is refused in code in an
+  answer that read outside text, and for a shared audio file or a photo. She places a call only to an allowed account and
+  only for a reminder the user set; the confirmation is written by code.
+- Messages she starts herself are opt-in (off until the user types `/initiative on` or the config turns them on) and
+  decided by code (triggers, quiet hours, caps) before the model is asked; the model then sees only the user's own
+  words, profile facts and the moment (never mail, calendar, web or pages), and code checks its text before anything is
+  sent. Each is sent at most once, only to allowed accounts; `/quiet` pauses them and `/initiative off` turns them off.
 - Keys live in mode 0600 files or the login keychain. Logs hold metadata, never message text, and so does
   `status.json` (each part's last use for doctor and `/status`: times and fixed reasons only).
 - A privacy check (`scripts/privacy_scan.py`) keeps private files, keys and personal values out of the repo. It runs in
@@ -69,3 +76,9 @@ The full threat model is in [setup_assistant.md, section 8](setup_assistant.md#8
 - A link quoted inside a mail or a page can reach you in an answer (links are removed only from web and map answers):
   check a link's address before you open it, as with any message.
 - Log rotation (`/etc/newsyslog.d/local-assistant.conf`) runs as root over a folder your user owns.
+- A reminder is delivered at least once: after a crash in the middle of sending, its note is listed again marked "(may be
+  a repeat)". A reminder or a wake-up call is not a dependable alarm (one Mac, signal-cli's experimental `startCall`).
+- A reminder's text (the user's words) is kept in the database like any message, until it is done or cancelled and 30
+  days have passed.
+- The checks of a message she starts are English word lists: in another language they rely on her rules and the Gemma
+  test set. A check-in keeps the words of the plan (at most 120 characters) until 30 days after it closes.
