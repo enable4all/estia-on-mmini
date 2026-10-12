@@ -18,7 +18,7 @@ import pytest
 
 from local_assistant import prompts
 from local_assistant.call_audio import FRAME_BYTES, RATE, rms
-from local_assistant.calls import CallManager, CallSettings, Turn, is_wrap_up, wants_hang_up
+from local_assistant.calls import CallManager, CallSettings, Turn, ends_with_goodbye, is_wrap_up, wants_hang_up
 from local_assistant.config import DEFAULT_NAME
 from local_assistant.voice import Transcript, VoiceUnavailableError
 from tests.conftest import ME, STRANGER
@@ -720,6 +720,15 @@ async def test_she_can_end_the_call_after_her_goodbye() -> None:
         assert "Bye!" in h.manager.said  # she said it before hanging up
 
 
+async def test_her_end_call_alone_ends_the_call_after_her_answer() -> None:
+    async with Harness(["I think I'll go to sleep now"], [Turn("Sleep well!", end_call=True)]) as h:
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(0.8))
+        await h.until(lambda: h.signal.hung_up == [(ME, CALL)])
+        assert "Sleep well!" in h.manager.said and prompts.CALL_IDLE not in h.manager.said
+
+
 async def test_a_goodbye_that_is_talked_over_does_not_end_the_call() -> None:
     long_bye = "It was really nice to talk about all of this with you today. " * 3 + "Bye!"
     async with Harness(
@@ -742,6 +751,7 @@ async def test_a_wrap_up_ends_the_call_after_his_answer() -> None:
         h.helper.caller_says(speech(0.8))
         await h.until(lambda: h.signal.hung_up == [(ME, CALL)])
         assert "Alright, enjoy your afternoon!" in h.manager.said
+        assert prompts.CALL_IDLE not in h.manager.said  # hung up for the wrap-up, not after silence
 
 
 async def test_a_wrap_up_answered_with_a_question_keeps_the_call() -> None:
@@ -782,6 +792,89 @@ async def test_a_wrap_up_answered_with_a_device_question_keeps_the_call() -> Non
 )
 def test_what_counts_as_wrapping_up(said: str, wraps_up: bool) -> None:
     assert is_wrap_up(said) is wraps_up
+
+
+@pytest.mark.parametrize(
+    ("said", "ends"),
+    [
+        # live 2026-10-12: both got a goodbye from Gemma but no end_call, and the call stayed open
+        ("Yeah, it's all good. Thank you. Talk to you later.", True),
+        ("No, that's good. Okay, thank you. Bye-bye.", True),
+        ("Great talk. See you soon, Tiffany.", True),
+        # the same with commas (Whisper punctuates fast speech so), and the usual short closings
+        ("Yeah, it's all good, thank you, talk to you later.", True),
+        ("No, that's good, okay, thank you, bye-bye.", True),
+        ("Yeah, bye.", True),
+        ("Great, thanks. Take care.", True),
+        ("Okay, I am off to bed. Good night.", True),
+        ("Perfect, thanks, catch you later.", True),
+        ("Okay, thanks. Speak to you soon.", True),
+        ("Bye-bye. Wait, what's the weather tomorrow?", False),  # the goodbye is not the last thing said
+        ("I'll see you.", False),
+        ("I said bye to him. Then we left.", False),
+        ("I said bye, then we left.", False),
+        ("Take care of the plants, please.", False),
+        ("okay bye bye", False),  # a plain goodbye alone: code says bye without Gemma (is_goodbye)
+    ],
+)
+def test_a_turn_that_ends_with_a_goodbye(said: str, ends: bool) -> None:
+    assert ends_with_goodbye(said, name="Tiffany") is ends
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        "No, bye.",
+        "Nope, bye-bye.",
+        "No thanks, bye.",
+        "Okay, thanks Tiffany, bye.",
+        "Thank you very much, bye.",
+        "Thanks a lot, bye bye.",
+        "All right, bye.",
+        "Take care.",
+        "Good night, Tiffany.",
+        "Okay, goodnight.",
+        "See you tomorrow.",
+        "Catch you later.",
+    ],
+)
+def test_a_plain_goodbye_also_after_no_thanks_or_her_name(said: str) -> None:
+    from local_assistant.calls import is_goodbye
+
+    assert is_goodbye(said, name="Tiffany")
+
+
+@pytest.mark.parametrize("said", ["Yes, bye.", "Yeah bye", "Have a good night's sleep.", "Take care of it."])
+def test_a_yes_before_a_goodbye_still_goes_to_gemma(said: str) -> None:
+    # a "yes" may answer a waiting device question: Gemma's turn handles it (then the call can end)
+    from local_assistant.calls import is_goodbye
+
+    assert not is_goodbye(said, name="Tiffany")
+
+
+async def test_a_goodbye_after_other_words_ends_the_call_after_her_answer() -> None:
+    said = "No, that's good. Okay, thank you. Bye-bye."
+    async with Harness([said], [Turn("You're welcome. Have a good night! Bye for now.")]) as h:
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(0.8))
+        await h.until(lambda: h.signal.hung_up == [(ME, CALL)])
+        assert h.host.turns  # Gemma answered the rest
+        assert "Bye for now." in h.manager.said  # and said it whole before hanging up
+        assert prompts.CALL_IDLE not in h.manager.said  # hung up for the goodbye, not after silence
+
+
+async def test_a_goodbye_after_other_words_answered_with_a_question_keeps_the_call() -> None:
+    said = "Thanks, that helps. Talk to you later."
+    async with Harness([said, "no, bye"], [Turn("Before you go, shall I text you the list?"), Turn("Okay.")]) as h:
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(0.8))
+        await h.quiet_after("Before you go, shall I text you the list?")
+        assert h.signal.hung_up == []
+        h.helper.caller_says(speech(0.6))  # "no, bye": a plain goodbye, so code says bye and hangs up
+        await h.until(lambda: h.signal.hung_up == [(ME, CALL)])
+        assert prompts.CALL_IDLE not in h.manager.said
 
 
 async def test_it_rings_twice_before_he_answers() -> None:
@@ -835,6 +928,7 @@ async def test_a_request_to_hang_up_ends_the_call_even_after_a_question() -> Non
         await h.quiet_after(GREETING)
         h.helper.caller_says(speech(0.8))
         await h.until(lambda: h.signal.hung_up == [(ME, CALL)])
+        assert prompts.CALL_IDLE not in h.manager.said  # hung up for the request, not after silence
 
 
 @pytest.mark.parametrize("said", ["stop Tiffany", "Tiffany", "okay bye Tiffany", "goodbye tiffany"])

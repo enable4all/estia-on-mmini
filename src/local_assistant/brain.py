@@ -59,6 +59,18 @@ def without_links(text: str) -> str:
     return re.sub(r"[ \t]{2,}", " ", _LINK.sub(keep_punctuation, text)).strip()
 
 
+# the end_call tool's name written into her answer ("Bye!  end_call", "(end_call)", "`end_call()`")
+_WRITTEN_END_CALL = re.compile(r"[ \t]*[(\[`*]*\bend_call\b(?:\(\))?[)\]`*]*", re.IGNORECASE)
+
+
+def without_written_end_call(text: str) -> tuple[str, bool]:
+    """Gemma sometimes writes end_call after her goodbye instead of calling it (live 2026-10-10): the name is left
+    out wherever it is (never said or sent), and whether it ended her answer is returned (on a call that counts as
+    ending it; a mention in the middle is talk)."""
+    ended = bool(re.search(_WRITTEN_END_CALL.pattern + r"\s*$", text, re.IGNORECASE))
+    return _WRITTEN_END_CALL.sub("", text).strip(), ended
+
+
 def _links(turn: Turn) -> list[tuple[str, str]]:
     """The web results' links, then the map links, without repeats, at most 5."""
     links = sources(turn.web)
@@ -209,7 +221,9 @@ class Brain:
                         turn.reminder_attempts.append(ReminderAttempt(_reminder_text(call.arguments), why))
                     messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
                 continue
-            text = without_fake_notices(completion.content).strip()
+            text, wrote_end_call = without_written_end_call(without_fake_notices(completion.content))
+            if wrote_end_call and self._tools.calls_on and message.text.startswith(prompts.CALL_MARK):
+                turn.end_call = True
             if not corrected and _claims_a_save(text) and not turn.saved and allow_tools:
                 # "Noted" without a remember call means nothing was saved: send it back once
                 corrected = True

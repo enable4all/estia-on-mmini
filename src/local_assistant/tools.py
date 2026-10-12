@@ -468,6 +468,10 @@ class Tools:
     def reminders_on(self) -> bool:
         return self._reminders is not None
 
+    @property
+    def calls_on(self) -> bool:
+        return self._calls
+
     def set_consolidate(self, consolidate: Consolidate) -> None:
         self._consolidate = consolidate
 

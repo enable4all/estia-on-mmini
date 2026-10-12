@@ -242,11 +242,15 @@ def speakable(note: str) -> str:
 
 @functools.cache
 def _goodbye(name: str) -> re.Pattern[str]:
-    """A plain goodbye, maybe with her name after it."""
+    """A plain goodbye, maybe after "okay", "no thanks" or her name, maybe with her name after it. Never after a
+    "yes" or "yeah": that may answer a waiting device question, so Gemma's turn handles it."""
+    her = re.escape(" ".join(real_words(name)))
     return re.compile(
-        r"^(?:(?:ok|okay|alright|right|well|thanks|thank you|great|cool|so)\s+)*"
-        r"(?:bye(?: bye)*|goodbye|bye for now|talk (?:to you )?(?:later|soon)|see you(?: later| soon)?|hang up)"
-        rf"(?:\s+(?:{re.escape(' '.join(real_words(name)))}|then|now|for now))*$"
+        r"^(?:(?:ok|okay|alright|all right|right|well|thanks|thank you|very much|so much|a lot|great|cool|so|perfect"
+        rf"|no|nope|{her})\s+)*"
+        r"(?:bye(?: bye)*|goodbye|bye for now|(?:talk|speak) (?:to you )?(?:later|soon)|catch you later"
+        r"|see you(?: later| soon| tomorrow)?|take care|good ?night|hang up)"
+        rf"(?:\s+(?:{her}|then|now|for now))*$"
     )
 
 
@@ -281,6 +285,16 @@ def is_goodbye(text: str, *, name: str) -> bool:
     """A plain goodbye ("okay bye bye", "talk to you later", "goodbye Estia"): she says bye and hangs up without
     asking Gemma. Anything subtler ("that's all for today, thanks") goes to Gemma, which can end the call too."""
     return bool(_goodbye(name).match(" ".join(real_words(text))))
+
+
+def ends_with_goodbye(text: str, *, name: str) -> bool:
+    """A turn whose last sentence is a plain goodbye after other words ("No, that's good. Okay, thank you.
+    Bye-bye."): Gemma answers the rest, then the call ends once her answer is spoken, unless it asks something (as
+    after a wrap-up). Gemma rarely calls end_call on a real call, so code decides. A goodbye followed by more ("Bye.
+    Wait, what's the weather?") is not one. Commas count as breaks too ("Yeah, bye."): Whisper often writes fast
+    speech with commas only."""
+    said = [part for part in re.split(r"[.!?,;:]+(?:\s+|$)", text.strip()) if real_words(part)]
+    return any(is_goodbye(" ".join(said[start:]), name=name) for start in range(1, len(said)))  # "…, see you, Estia."
 
 
 def _parts(text: str) -> list[str]:
@@ -777,9 +791,12 @@ class CallManager:
             elif (
                 turn.end_call
                 or wants_hang_up(text)
-                or (is_wrap_up(text) and not f"{turn.text} {turn.code_text}".rstrip().endswith("?"))
+                or (
+                    (is_wrap_up(text) or ends_with_goodbye(text, name=self.name))
+                    and not f"{turn.text} {turn.code_text}".rstrip().endswith("?")
+                )
             ):
-                return  # she said goodbye (or answered the user's wrap-up) whole: hung up in _run_call
+                return  # she said goodbye (or answered the user's wrap-up or goodbye) whole: hung up in _run_call
 
     async def _turn(self, call: _Call, audio: CallAudio, text: str, *, acknowledge: bool) -> Turn:
         """The app's answer. A short "Got it." first when `acknowledge` (the request was taken in). A varied

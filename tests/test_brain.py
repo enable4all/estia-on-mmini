@@ -232,6 +232,53 @@ async def test_a_call_answer_can_end_the_call(store: Store) -> None:
     assert reply.text == "Bye, talk soon!" and reply.end_call
 
 
+@pytest.mark.parametrize(
+    ("written", "spoken"),
+    [
+        ("Sure thing. Have a great trip!  end_call", "Sure thing. Have a great trip!"),
+        ("Bye for now! (end_call)", "Bye for now!"),
+        ("Bye! `end_call()`", "Bye!"),
+        ("Bye! [end_call]", "Bye!"),
+    ],
+)
+async def test_end_call_written_as_text_ends_the_call_and_is_not_said(store: Store, written: str, spoken: str) -> None:
+    # live 2026-10-10: Gemma wrote "end_call" into her goodbye instead of calling the tool
+    profile = Profile(store)
+    brain = Brain(
+        FakeGemma(text(written)), ContextBuilder(store, profile, TZ), Tools(store, profile, TZ, no_fetch, calls=True)
+    )
+    conversation = store.current_conversation()
+    said = store.add_call_turn(conversation.id, ME, "[call] okay, can you hang up?")
+    reply = await brain.answer(conversation, store.message(said))
+    assert reply.text == spoken and reply.end_call
+
+
+async def test_end_call_named_inside_her_answer_is_left_out_but_ends_nothing(store: Store) -> None:
+    # only an end_call written at the end of her answer stands for the tool; a mention in the middle is talk
+    profile = Profile(store)
+    tools = Tools(store, profile, TZ, no_fetch, calls=True)
+    brain = Brain(
+        FakeGemma(text("I use end_call when you say goodbye. Anything else?")),
+        ContextBuilder(store, profile, TZ),
+        tools,
+    )
+    conversation = store.current_conversation()
+    said = store.add_call_turn(conversation.id, ME, "[call] how do you hang up?")
+    reply = await brain.answer(conversation, store.message(said))
+    assert "end_call" not in reply.text and not reply.end_call
+
+
+async def test_end_call_written_in_a_text_message_is_left_out_and_ends_nothing(store: Store) -> None:
+    profile = Profile(store)
+    brain = Brain(
+        FakeGemma(text("Bye! end_call")),
+        ContextBuilder(store, profile, TZ),
+        Tools(store, profile, TZ, no_fetch, calls=True),
+    )
+    reply = await brain.answer(store.current_conversation(), incoming(store, "bye"))
+    assert reply.text == "Bye!" and not reply.end_call
+
+
 async def test_web_sources_are_a_code_written_note(store: Store) -> None:
     from local_assistant.web_search import WebResult
     from tests.fakes.fake_web import FakeWeb
