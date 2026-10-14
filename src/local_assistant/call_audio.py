@@ -13,11 +13,16 @@ import array
 import asyncio
 import collections
 import io
+import logging
 import math
 import random
+import time
 import wave
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 RATE = 48_000
 FRAME_BYTES = 960  # 10 ms of 48 kHz mono 16-bit
@@ -32,7 +37,30 @@ BARGE_WINDOW = 25
 BARGE_NEEDED = 12
 BARGE_MIN_RMS = 400.0
 BARGE_FLOOR_FACTOR = 3.5
-PREROLL_FRAMES = 80  # the caller's last 800 ms before the stop: the first words of the interruption
+
+# Barge-in by speech ([calls] barge = "speech"; spike of 2026-10-13, rule D5): the voice service's speech detector
+# (Silero VAD through FluidAudio) rates each 256 ms chunk of the caller's audio (4096 samples at 16 kHz, 25.6
+# frames); one chunk with p >= 0.99 that is also louder than max(3x the floor, 150) stops her. In 100 minutes of
+# recorded car noise it stopped her 0 times (loudness 42.5 per 10 minutes) and still caught 99% of interruptions, about
+# 0.1 s later than loudness. A chunk's level is the power mean of the 10 ms frames inside it. The detector is asked
+# without holding up the frames; an answer for audio older than 600 ms is dropped, and 3 failed or late answers in a
+# row hand over to loudness for the rest of the call. Whichever rule is not in charge runs beside it as a shadow, never
+# acted on (Barge counts it), so every call shows what the other one would have done.
+VAD_CHUNK = 4096
+SPEECH_P = 0.99
+SPEECH_MIN_RMS = 150.0
+SPEECH_FLOOR_FACTOR = 3.0
+VAD_MAX_AGE_FRAMES = 60
+VAD_FAILURES = 3
+VAD_CHUNK_FRAMES = math.ceil(VAD_CHUNK / 160)  # 26 (160 samples at 16 kHz a frame): how far back a chunk begins
+# The caller's last frames before the stop, the first words of the interruption: enough to reach back to the first
+# frame of a chunk whose answer came VAD_MAX_AGE_FRAMES late (870 ms; loudness needs about 800)
+PREROLL_FRAMES = VAD_MAX_AGE_FRAMES + VAD_CHUNK_FRAMES + 1
+# Her own voice (a loud speaker next to the caller's microphone): after a stop on it, a stop needs this much more than
+# the level that stopped her, for the rest of the call (calls.py tells; spike: own-voice stops at -10 dB from 100% to
+# 23-27%)
+OWN_VOICE_FACTOR = 1.5
+RULES = ("loudness", "speech")
 
 # Listening: the first 200 ms measure the floor (those frames are kept and judged once it is known: a caller who
 # answers the moment she stops is heard from the start); 10 loud frames in a row start an utterance, and the 200 ms
@@ -81,13 +109,16 @@ class _Voice:
 
 @dataclass(frozen=True)
 class Said:
-    """How a spoken clip went: its length, how much of it went out, and whether the caller cut in."""
+    """How a spoken clip went: its length, how much of it went out, and whether the caller cut in (then the line's
+    floor, the level of the sound that stopped her and the shadow rules that fired too)."""
 
     total_s: float
     played_s: float
     barged: bool
     preroll: tuple[bytes, ...] = field(default=(), repr=False)
     floor: float = 0.0
+    level: float = 0.0
+    shadows: tuple[str, ...] = ()  # the other rules that fired in the clip before she was stopped (Barge.false_stop)
 
 
 def rms(pcm: bytes) -> float:
@@ -138,11 +169,16 @@ def wav_to_pcm48(data: bytes) -> bytes:
     return result.tobytes()
 
 
-def pcm48_to_wav16k(pcm: bytes) -> bytes:
-    """The caller's audio as a 16 kHz WAV for transcription (Whisper's rate; a third of the upload)."""
+def to16k(pcm: bytes) -> array.array[int]:
+    """48 kHz samples as 16 kHz ones: the average of every three."""
     samples = array.array("h", pcm)
     usable = len(samples) - len(samples) % 3
-    low = array.array("h", ((samples[i] + samples[i + 1] + samples[i + 2]) // 3 for i in range(0, usable, 3)))
+    return array.array("h", ((samples[i] + samples[i + 1] + samples[i + 2]) // 3 for i in range(0, usable, 3)))
+
+
+def pcm48_to_wav16k(pcm: bytes) -> bytes:
+    """The caller's audio as a 16 kHz WAV for transcription (Whisper's rate; a third of the upload)."""
+    low = to16k(pcm)
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
         w.setnchannels(1)
@@ -152,11 +188,190 @@ def pcm48_to_wav16k(pcm: bytes) -> bytes:
     return buf.getvalue()
 
 
+def power_mean(levels: list[float]) -> float:
+    return math.sqrt(sum(x * x for x in levels) / len(levels)) if levels else 0.0
+
+
+class Chunks:
+    """The caller's frames as the speech detector's chunks: 16 kHz (the same average transcription uses), VAD_CHUNK
+    samples each; a chunk's level is the power mean of the 48 kHz frame levels fully inside it (a frame split between
+    two chunks counts for neither)."""
+
+    def __init__(self) -> None:
+        self._samples: array.array[int] = array.array("h")
+        self._levels: list[float] = []
+
+    def add(self, frame: bytes, level: float) -> tuple[bytes, float] | None:
+        """Add one frame; a chunk and its level once one is full."""
+        low = to16k(frame)
+        room = VAD_CHUNK - len(self._samples)
+        self._samples.extend(low[:room])
+        if len(low) <= room:
+            self._levels.append(level)
+        if len(self._samples) < VAD_CHUNK:
+            return None
+        chunk = (self._samples.tobytes(), power_mean(self._levels))
+        self._samples, self._levels = low[room:], []
+        return chunk
+
+
+# one chunk -> its speech probability, or why there is none: "timeout" (no answer in time) or "http" (no service, a
+# refusal, an answer that is not a probability)
+Detect = Callable[[bytes], Awaitable[float | str]]
+
+
+def _taken(task: asyncio.Task[float | str]) -> None:
+    """An answer's error, if any, is taken even when nobody waits for it any more (asyncio would log it)."""
+    if not task.cancelled():
+        task.exception()
+
+
+def _log_gated(gated: list[tuple[float, float]], floor: float) -> None:
+    """One line a clip, to tune the level gate: the loudest chunk it turned away that the detector heard as speech
+    (numbers only, never audio or words)."""
+    if gated:
+        p, level = gated[0]
+        log.info("calls: speech gated (p %.2f, level %.0f, floor %.0f)", p, level, floor)
+
+
+def _times(count: int) -> str:
+    return f"{count} time{'' if count == 1 else 's'}"
+
+
+@dataclass
+class _Asked:
+    """A chunk sent to the speech detector: its answer, the frame it ended on (its age) and its level."""
+
+    answer: asyncio.Task[float | str]
+    frame: int
+    level: float
+
+
+class Barge:
+    """One call's rules for the caller cutting in (see the constants): "loudness" (today's rule) or "speech" (the
+    speech detector and a level gate). The rule in charge stops her (`stopped`); the other one is a shadow, never
+    acted on: `would` counts the clips where it fired and the rule in charge did not stop her, and the ones where it
+    fired with a stop that calls.py found to be no words or her own voice (`false_stop`); each rule at most once a
+    clip. Without a detector, or after VAD_FAILURES failed or late answers in a row, loudness is in charge and nothing
+    is measured by speech for the rest of the call."""
+
+    def __init__(
+        self, rule: str = "loudness", detect: Detect | None = None, *, clock: Callable[[], float] = time.monotonic
+    ) -> None:
+        self.rule = rule
+        self._detect = detect
+        self._clock = clock
+        self.measured = detect is not None  # the call had a detector (it may have failed since)
+        self.gave_up = False  # the detector failed VAD_FAILURES times in a row during the call
+        self.failures = 0  # failed or late answers in a row (a good answer starts again at 0)
+        self.failed: collections.Counter[str] = (
+            collections.Counter()
+        )  # every failed answer by kind: timeout, http, late
+        self.chunks = 0  # chunks the detector was asked about
+        self.slowest = 0.0  # seconds from a chunk's end to its answer, the longest in the call
+        self.least = 0.0  # her own voice was heard: a stop needs more than this (both rules)
+        self.stopped = dict.fromkeys(RULES, 0)  # stops by each rule while it was in charge
+        self.would = dict.fromkeys(RULES, 0)  # stops each rule would have made as the shadow
+        self.own_voice = 0
+        self._last: asyncio.Task[float | str] | None = None
+        self._asking: set[asyncio.Task[float | str]] = set()
+
+    @property
+    def detecting(self) -> bool:
+        return self._detect is not None
+
+    @property
+    def active(self) -> str:
+        return "speech" if self.rule == "speech" and self.detecting else "loudness"
+
+    def ask(self, chunk: bytes) -> asyncio.Task[float | str]:
+        """The detector's answer for `chunk`, without waiting for it; chunks go out one after the other, in order
+        (the service keeps the call's detector state)."""
+        detect, before, asked = self._detect, self._last, self._clock()
+        assert detect is not None
+
+        async def answer() -> float | str:
+            if before is not None and not before.done():
+                await asyncio.wait({before})
+            try:
+                result = await detect(chunk)
+            except Exception:  # a detector never raises into the call
+                result = "error"
+            self.slowest = max(self.slowest, self._clock() - asked)
+            return result
+
+        self.chunks += 1
+        task = asyncio.create_task(answer())
+        self._last = task
+        self._asking.add(task)
+        task.add_done_callback(self._asking.discard)
+        task.add_done_callback(_taken)
+        return task
+
+    def answered(self) -> None:
+        """A good answer: the failures in a row start again."""
+        self.failures = 0
+
+    def fail(self, kind: str) -> None:
+        """A failed answer ("timeout", "http") or a late one ("late"); VAD_FAILURES in a row end the detector."""
+        self.failures += 1
+        self.failed[kind] += 1
+        if self.failures >= VAD_FAILURES and self._detect is not None:
+            self._detect = None
+            self.gave_up = True
+            then = "loudness for the rest of the call" if self.rule == "speech" else "no speech shadow from now on"
+            log.info("calls: the speech detector failed %d times in a row; %s", self.failures, then)
+
+    def false_stop(self, said: Said) -> None:
+        """The stop `said` was no words or her own voice (calls.py): the shadows that fired in that clip would have
+        made it too."""
+        for rule in said.shadows:
+            self.would[rule] += 1
+
+    def her_own_voice(self, level: float) -> None:
+        """Her own voice stopped her at `level` (calls.py heard her sentence in the transcript): the first time in a
+        call, a stop needs OWN_VOICE_FACTOR times that from now on; later times are only counted (raised once, never
+        compounding, so a caller can always still stop her)."""
+        if not self.own_voice:
+            self.least = max(self.least, OWN_VOICE_FACTOR * level)
+        self.own_voice += 1
+
+    def summary(self) -> str:
+        """The call's end line (metadata): the configured rule and, when loudness took over, why; for each rule
+        measured, how often it stopped her in charge and would have as the shadow; her own voice; the detector's
+        chunks, slowest answer and failures by kind."""
+        head = f"calls: barge-in {self.rule}"
+        if not self.measured:
+            head += " (no speech detector)" if self.rule == "loudness" else " (loudness: no speech detector)"
+        elif self.gave_up:
+            then = "loudness" if self.rule == "speech" else "no speech shadow"
+            head += f" ({then} after {VAD_FAILURES} failed answers in a row)"
+        rules = [self.rule, *(rule for rule in RULES if rule != self.rule)]
+        counts = "; ".join(
+            f"{rule} stopped her {_times(self.stopped[rule])}, would have {self.would[rule]}"
+            for rule in rules
+            if rule == "loudness" or self.measured
+        )
+        line = f"{head}: {counts}; her own voice {self.own_voice}"
+        if not self.measured:
+            return line
+        failed = sum(self.failed.values())
+        line += f"; detector {self.chunks} chunks, slowest {round(self.slowest * 1000)} ms, {failed} failed"
+        if failed:
+            line += " (" + ", ".join(f"{kind} {count}" for kind, count in sorted(self.failed.items())) + ")"
+        return line
+
+    def close(self) -> None:
+        for task in list(self._asking):
+            task.cancel()
+
+
 class CallAudio:
     """One connection to the call helper's socket: speak (with or without barge-in) and listen."""
 
-    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, barge: Barge | None = None) -> None:
         self._reader, self._writer = reader, writer
+        self.barge = barge or Barge()
         self._outgoing = bytearray()
         self._sent = 0  # bytes of the current clip already sent
         self.speaking = asyncio.Event()
@@ -203,8 +418,8 @@ class CallAudio:
         self.speaking.clear()
 
     async def say(self, pcm: bytes, *, barge: bool = False, fresh: bool = True) -> Said:
-        """Speak `pcm` and return when it went out. With barge=True the caller can cut in (see the constants).
-        fresh: a new answer starts, so what came in meanwhile (while she was thinking) is dropped; the next
+        """Speak `pcm` and return when it went out. With barge=True the caller can cut in (see the constants and
+        `Barge`). fresh: a new answer starts, so what came in meanwhile (while she was thinking) is dropped; the next
         sentence of the same answer keeps it (the caller may have started to talk between two sentences)."""
         if fresh:
             self.drain_incoming()
@@ -212,9 +427,16 @@ class CallAudio:
         self._outgoing = bytearray(pcm)
         self._sent = 0
         self.speaking.set()
+        rules = self.barge
         recent: collections.deque[bytes] = collections.deque(maxlen=PREROLL_FRAMES)
-        loud: collections.deque[bool] = collections.deque(maxlen=BARGE_WINDOW)
+        loud: collections.deque[tuple[bool, float]] = collections.deque(maxlen=BARGE_WINDOW)
         floor_levels: list[float] = []
+        chunks = Chunks()
+        asked: list[_Asked] = []
+        fired: set[str] = set()  # the rules that fired in this clip (each counts once a clip)
+        gated: list[tuple[float, float]] = []  # the loudest speech chunk the level gate turned away: (p, level)
+        floor = 0.0
+        frames = 0
         while self.speaking.is_set() and not self.closed.is_set():
             try:
                 frame = await asyncio.wait_for(self.incoming.get(), 0.5)
@@ -222,19 +444,71 @@ class CallAudio:
                 continue
             if not barge:
                 continue
+            frames += 1
             level = rms(frame)
             recent.append(frame)
+            if rules.detecting and (chunk := chunks.add(frame, level)) is not None:
+                asked.append(_Asked(rules.ask(chunk[0]), frames, chunk[1]))
             if len(floor_levels) < BARGE_FLOOR_FRAMES:
                 floor_levels.append(level)
                 continue
             floor = floor_of(floor_levels)
-            loud.append(level > max(BARGE_FLOOR_FACTOR * floor, BARGE_MIN_RMS))
-            if sum(loud) >= BARGE_NEEDED:
+            loud.append((level > max(BARGE_FLOOR_FACTOR * floor, BARGE_MIN_RMS, rules.least), level))
+            stops: dict[str, tuple[float, str]] = {}  # rule -> the level that stopped her, how (the log)
+            loud_levels = [lvl for is_loud, lvl in loud if is_loud]
+            if len(loud_levels) >= BARGE_NEEDED:
+                stops["loudness"] = (power_mean(loud_levels), f"{len(loud_levels)} loud frames")
+            heard = self._speech(asked, frames, floor, gated)
+            if heard is not None:
+                stops["speech"] = (heard[1], f"p {heard[0]:.2f}")
+            fired |= stops.keys()
+            active = rules.active
+            if active in stops:
                 played = self._sent / (2 * RATE)
                 self.stop_speaking()
-                return Said(round(total, 2), round(played, 2), True, tuple(recent), floor)
+                rules.stopped[active] += 1
+                stopper, how = stops[active]
+                log.info("calls: stopped by %s (%s, level %.0f, floor %.0f)", active, how, stopper, floor)
+                _log_gated(gated, floor)
+                shadows = tuple(sorted(fired - {active}))  # counted only if the stop was no words (false_stop)
+                return Said(round(total, 2), round(played, 2), True, tuple(recent), floor, stopper, shadows)
+        for rule in fired:  # she was not stopped: each rule that fired was the shadow
+            rules.would[rule] += 1
+        _log_gated(gated, floor)
         await self._skip(ECHO_TAIL_FRAMES)
         return Said(round(total, 2), round(self._sent / (2 * RATE), 2), False)
+
+    def _speech(
+        self, asked: list[_Asked], frames: int, floor: float, gated: list[tuple[float, float]]
+    ) -> tuple[float, float] | None:
+        """The detector's answers that came in, in order: (p, level) of a chunk that is speech and loud enough, else
+        None; the loudest speech chunk that was not loud enough goes in `gated`. A failed answer, or one still missing
+        for audio over VAD_MAX_AGE_FRAMES old ("late"), is a failure."""
+        rules = self.barge
+        heard: tuple[float, float] | None = None
+        for item in list(asked):
+            if not rules.detecting:
+                asked.clear()
+                break
+            if frames - item.frame > VAD_MAX_AGE_FRAMES:
+                asked.remove(item)
+                rules.fail("late")
+                continue
+            if not item.answer.done():
+                continue
+            asked.remove(item)
+            p = "error" if item.answer.cancelled() or item.answer.exception() else item.answer.result()
+            if isinstance(p, str):
+                rules.fail(p)
+                continue
+            rules.answered()
+            if p < SPEECH_P:
+                continue
+            if item.level > max(SPEECH_FLOOR_FACTOR * floor, SPEECH_MIN_RMS, rules.least):
+                heard = (p, item.level)
+            elif not gated or item.level > gated[0][1]:
+                gated[:] = [(p, item.level)]
+        return heard
 
     async def _skip(self, frames: int) -> None:
         """Drop exactly the next `frames` frames (her echo tail); later frames are the caller's and stay."""

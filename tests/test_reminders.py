@@ -15,6 +15,7 @@ from local_assistant.reminders import (
     ReminderScheduler,
     nearest_year,
     next_occurrence,
+    own_words,
     parse_when,
     resolve_local,
 )
@@ -399,6 +400,7 @@ def scheduler(
     *,
     calls: Calls | None = None,
     in_call: Callable[[], bool] = lambda: False,
+    locked: Callable[[], bool] = lambda: False,
     sleep: Callable[[float], Awaitable[None]] | None = None,
     **options: object,
 ) -> tuple[Reminders, ReminderScheduler, Sent]:
@@ -406,7 +408,14 @@ def scheduler(
     reminders = service(store, clock, calls=calls_on, **options)
     sent = Sent(store)
     run = ReminderScheduler(
-        store, reminders, sent, calls=calls, in_call=in_call, clock=clock, sleep=sleep or Naps(clock)
+        store,
+        reminders,
+        sent,
+        calls=calls,
+        in_call=in_call,
+        locked=locked,
+        clock=clock,
+        sleep=sleep or Naps(clock),
     )
     return reminders, run, sent
 
@@ -864,3 +873,72 @@ async def test_a_missed_wake_up_text_without_calls_is_a_plain_late_line(store: S
     _, run, sent = scheduler(store, clock, calls=None, calls_on=False)
     await run.start_up(offline_since=at("2026-10-13 06:00"), started_at=clock.now)
     assert sent.texts == [(ME, "Late, I was offline 06:00-09:00:\n07:00 wake up")]
+
+
+# the lock (/lock): reminders wait, a call reminder becomes a text without a call
+
+
+async def test_reminders_wait_while_she_is_locked_and_come_after_the_unlock(store: Store) -> None:
+    clock = Clock()
+    locked = [True]
+    reminders, run, sent = scheduler(store, clock, locked=lambda: locked[0])
+    created = reminders.set(ME, at="17:00", text="call mum")
+    clock.now = at("2026-10-12 17:00")
+    await run.tick()
+    clock.now += 3_600
+    await run.tick()
+    assert sent.texts == []  # nothing goes out while locked, and nothing is given up on
+    reminder = store.reminder(created.reminder.id)
+    assert reminder is not None and reminder.status == "open"
+    locked[0] = False
+    await run.tick()
+    assert sent.texts == [(ME, "Reminder: call mum")]
+
+
+async def test_a_call_reminder_due_while_locked_never_calls(store: Store) -> None:
+    clock = Clock()
+    locked = [True]
+    calls = Calls([])
+    reminders, run, sent = scheduler(store, clock, calls=calls, locked=lambda: locked[0])
+    reminders.set(ME, at="17:00", text="call the dentist", call=True)
+    clock.now = at("2026-10-12 17:00")
+    await run.tick()
+    locked[0] = False
+    clock.now += 60  # unlocked within the 5 minutes a call may be late: still no call
+    await run.tick()
+    await run.drain()
+    assert calls.placed == []
+    assert sent.texts == [(ME, "Reminder: call the dentist. No call: I was locked (/lock).")]
+
+
+# after outside text in the conversation: a reminder's words must come from the user's message (the overlap rule)
+
+
+@pytest.mark.parametrize(
+    ("text", "message", "own"),
+    [
+        ("call mum", "remind me at 5 to call mum", True),
+        ("calling mum", "remind me to call mum", True),  # half its words are the user's
+        ("dentist appointment", "remind me about the dentist", True),
+        ("water the plants", "[voice] remind me to water the plants", True),
+        ("Pay the invoice", "remind me to pay the invoice at 17:00", True),
+        ("pay invoice 4711 at the portal", "remind me about that at 17:00", False),  # her words, not the user's
+        (
+            "transfer 500 euro",
+            "remind me to transfer the money, the euro amount",
+            False,
+        ),  # a number the user never said
+        ("visit https://evil.example/login", "remind me to visit the login page", False),  # a link the user never sent
+        ("visit https://example.com/me", "remind me to visit https://example.com/me tonight", True),
+        ("薬を飲む", "[voice] 9時に薬を飲むことを思い出させて", True),  # Japanese by characters
+        ("請求書を払う", "それを思い出させて", False),
+        ("", "remind me", True),  # nothing to compare: the usual check says it is empty
+    ],
+)
+def test_a_reminders_words_must_overlap_the_users_message(text: str, message: str, own: bool) -> None:
+    assert own_words(text, message) is own
+
+
+def test_the_overlap_refusal_points_to_remind() -> None:
+    error = ReminderError("not_your_words")
+    assert "/remind" in error.plain and "/" not in error.spoken and "outside" in error.plain

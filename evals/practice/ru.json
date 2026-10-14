@@ -1,0 +1,486 @@
+{
+ "language": "ru",
+ "items": [
+  {
+   "id": "ru-01",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Я живу в Москва уже три года.",
+   "error_type": "case (prepositional after в)",
+   "gold_said": "в Москва",
+   "gold_better": "в Москве",
+   "gold_full": "Я живу в Москве уже три года.",
+   "why_en": "After 'в' meaning 'in' a place, the noun takes the prepositional case: в Москве."
+  },
+  {
+   "id": "ru-02",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "У меня новый машина, она красная.",
+   "error_type": "gender agreement (adjective)",
+   "gold_said": "новый машина",
+   "gold_better": "новая машина",
+   "gold_full": "У меня новая машина, она красная.",
+   "why_en": "'Машина' is feminine, so the adjective must be feminine too: новая."
+  },
+  {
+   "id": "ru-03",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Сегодня у меня нет время на спорт.",
+   "error_type": "case (genitive after нет)",
+   "gold_said": "нет время",
+   "gold_better": "нет времени",
+   "gold_full": "Сегодня у меня нет времени на спорт.",
+   "why_en": "After 'нет' the noun goes into the genitive: времени."
+  },
+  {
+   "id": "ru-04",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "У меня два сестры и один брат.",
+   "error_type": "numeral gender (два/две)",
+   "gold_said": "два сестры",
+   "gold_better": "две сестры",
+   "gold_full": "У меня две сестры и один брат.",
+   "why_en": "'Сестра' is feminine, so 'two' is 'две', not 'два'."
+  },
+  {
+   "id": "ru-05",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Вся моя фамилия живёт в Испании.",
+   "error_type": "false friend",
+   "gold_said": "фамилия",
+   "gold_better": "семья",
+   "gold_full": "Вся моя семья живёт в Испании.",
+   "why_en": "'Фамилия' means surname; 'family' is 'семья'."
+  },
+  {
+   "id": "ru-06",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Мои друзья хочут поехать на море.",
+   "error_type": "verb conjugation (irregular)",
+   "gold_said": "хочут",
+   "gold_better": "хотят",
+   "gold_full": "Мои друзья хотят поехать на море.",
+   "why_en": "'Хотеть' is irregular: они хотят."
+  },
+  {
+   "id": "ru-07",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Вчера Анна пришёл домой поздно.",
+   "error_type": "past tense gender agreement",
+   "gold_said": "пришёл",
+   "gold_better": "пришла",
+   "gold_full": "Вчера Анна пришла домой поздно.",
+   "why_en": "Past-tense verbs agree in gender with the subject; Анна is feminine: пришла."
+  },
+  {
+   "id": "ru-08",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Моя папа работает в банке.",
+   "error_type": "gender agreement (possessive)",
+   "gold_said": "Моя папа",
+   "gold_better": "Мой папа",
+   "gold_full": "Мой папа работает в банке.",
+   "why_en": "'Папа' is masculine even though it ends in -а, so it takes 'мой'."
+  },
+  {
+   "id": "ru-09",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Сейчас я иду в магазине за хлебом.",
+   "error_type": "case (direction: accusative after в)",
+   "gold_said": "в магазине",
+   "gold_better": "в магазин",
+   "gold_full": "Сейчас я иду в магазин за хлебом.",
+   "why_en": "For direction ('to the shop') use 'в' + accusative: в магазин."
+  },
+  {
+   "id": "ru-10",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Я всегда пью кофе с молоко.",
+   "error_type": "case (instrumental after с)",
+   "gold_said": "с молоко",
+   "gold_better": "с молоком",
+   "gold_full": "Я всегда пью кофе с молоком.",
+   "why_en": "'С' meaning 'with' takes the instrumental case: с молоком."
+  },
+  {
+   "id": "ru-11",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Урок начинает в девять часов.",
+   "error_type": "reflexive verb (-ся)",
+   "gold_said": "начинает",
+   "gold_better": "начинается",
+   "gold_full": "Урок начинается в девять часов.",
+   "why_en": "'Начинать' needs an object; with no object use the reflexive 'начинаться'."
+  },
+  {
+   "id": "ru-12",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Я учу в университете на втором курсе.",
+   "error_type": "verb choice (учить/учиться)",
+   "gold_said": "учу",
+   "gold_better": "учусь",
+   "gold_full": "Я учусь в университете на втором курсе.",
+   "why_en": "Studying at a university is 'учиться'; 'учить' needs something to learn or someone to teach."
+  },
+  {
+   "id": "ru-13",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Мне очень нравится эти фильмы.",
+   "error_type": "verb agreement (нравиться)",
+   "gold_said": "нравится",
+   "gold_better": "нравятся",
+   "gold_full": "Мне очень нравятся эти фильмы.",
+   "why_en": "The verb agrees with the plural subject 'эти фильмы': нравятся."
+  },
+  {
+   "id": "ru-14",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Мой брат часто летит в Берлин по работе.",
+   "error_type": "verbs of motion (habitual)",
+   "gold_said": "летит",
+   "gold_better": "летает",
+   "gold_full": "Мой брат часто летает в Берлин по работе.",
+   "why_en": "Repeated trips there and back take the multidirectional verb: летает."
+  },
+  {
+   "id": "ru-15",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Вчера я прочитал эту книгу весь вечер.",
+   "error_type": "aspect (duration)",
+   "gold_said": "прочитал",
+   "gold_better": "читал",
+   "gold_full": "Вчера я читал эту книгу весь вечер.",
+   "why_en": "With a duration like 'весь вечер' use the imperfective aspect: читал."
+  },
+  {
+   "id": "ru-16",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Завтра я буду позвонить тебе после работы.",
+   "error_type": "aspect (future)",
+   "gold_said": "буду позвонить",
+   "gold_better": "позвоню",
+   "gold_full": "Завтра я позвоню тебе после работы.",
+   "why_en": "'Буду' combines only with imperfective verbs; a single completed act uses the perfective future: позвоню."
+  },
+  {
+   "id": "ru-17",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Я часто помогаю мою бабушку.",
+   "error_type": "case (verb government: dative)",
+   "gold_said": "мою бабушку",
+   "gold_better": "моей бабушке",
+   "gold_full": "Я часто помогаю моей бабушке.",
+   "why_en": "'Помогать' takes the dative case: моей бабушке."
+  },
+  {
+   "id": "ru-18",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "В субботу мы были в концерте.",
+   "error_type": "preposition (в/на)",
+   "gold_said": "в концерте",
+   "gold_better": "на концерте",
+   "gold_full": "В субботу мы были на концерте.",
+   "why_en": "Events such as concerts take 'на', not 'в': на концерте."
+  },
+  {
+   "id": "ru-19",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "В прошлой неделе я ездил в Казань.",
+   "error_type": "preposition (time expression)",
+   "gold_said": "В прошлой неделе",
+   "gold_better": "На прошлой неделе",
+   "gold_full": "На прошлой неделе я ездил в Казань.",
+   "why_en": "With 'неделя' in time expressions use 'на': на прошлой неделе."
+  },
+  {
+   "id": "ru-20",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Мой сын хорошо играет в гитару.",
+   "error_type": "preposition (играть на/в)",
+   "gold_said": "в гитару",
+   "gold_better": "на гитаре",
+   "gold_full": "Мой сын хорошо играет на гитаре.",
+   "why_en": "Musical instruments take 'играть на' + prepositional; 'играть в' is for games."
+  },
+  {
+   "id": "ru-21",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Моя сестра хочет стать учительница.",
+   "error_type": "case (instrumental after стать)",
+   "gold_said": "учительница",
+   "gold_better": "учительницей",
+   "gold_full": "Моя сестра хочет стать учительницей.",
+   "why_en": "'Стать' takes the instrumental case: учительницей."
+  },
+  {
+   "id": "ru-22",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Я никогда был в Японии.",
+   "error_type": "negation (double negative)",
+   "gold_said": "никогда был",
+   "gold_better": "никогда не был",
+   "gold_full": "Я никогда не был в Японии.",
+   "why_en": "Russian needs 'не' together with 'никогда': никогда не был."
+  },
+  {
+   "id": "ru-31",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Вчера мы ходили в кино.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "multidirectional 'ходили' for a round trip is right"
+  },
+  {
+   "id": "ru-32",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Эту книгу я уже читал.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "object-first word order is valid"
+  },
+  {
+   "id": "ru-33",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Мне двадцать один год.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'год' (singular) after 21 is right, not 'лет'"
+  },
+  {
+   "id": "ru-34",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Я живу здесь уже двадцать два года.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'года' after 22 is right"
+  },
+  {
+   "id": "ru-35",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Позвоню тебе вечером.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "dropped subject is natural"
+  },
+  {
+   "id": "ru-36",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "В прошлом году мы были в Сочи.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'Сочи' does not decline"
+  },
+  {
+   "id": "ru-37",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Я сегодня в пальто, потому что на улице холодно.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'пальто' does not decline"
+  },
+  {
+   "id": "ru-38",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Он работает врачом в больнице.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "instrumental after 'работать' is right"
+  },
+  {
+   "id": "ru-40",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Мы с сестрой поедем на дачу в субботу.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'мы с сестрой' means 'my sister and I'"
+  },
+  {
+   "id": "ru-41",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Чай будешь?",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "informal elliptical question is correct"
+  },
+  {
+   "id": "ru-43",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Мой кофе совсем остыл.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'кофе' is masculine"
+  },
+  {
+   "id": "ru-44",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Ну, не знаю, может, завтра.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "informal fragment, correct"
+  },
+  {
+   "id": "ru-45",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Сейчас я иду в магазин, а завтра поеду к родителям.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'иду' (now, one direction) and 'поеду' are right"
+  }
+ ],
+ "conversations": [
+  {
+   "id": "ru-conv-1",
+   "level": "B1",
+   "topic": "weekend",
+   "user_turns": [
+    "Привет! В выходные я ездил на дачу к друзьям.",
+    "Мы целый день сидели в саде и жарили шашлыки.",
+    "Погода была хорошая, но вечером стало холодно.",
+    "В воскресенье я хотел пойти в кино, но у меня не было время.",
+    "Поэтому я весь вечер посмотрел сериал дома.",
+    "А ты? Как ты провела выходные?"
+   ],
+   "planted": [
+    {
+     "said": "в саде",
+     "better": "в саду"
+    },
+    {
+     "said": "не было время",
+     "better": "не было времени"
+    },
+    {
+     "said": "посмотрел",
+     "better": "смотрел"
+    }
+   ]
+  },
+  {
+   "id": "ru-conv-2",
+   "level": "B1",
+   "topic": "work",
+   "user_turns": [
+    "Я работаю программистом в небольшой компании.",
+    "Каждый день я езжу на работу на метро.",
+    "Мой начальник строгий, но справедливый.",
+    "Вчера у нас была встреча, и мы долго обсуждали о новом проекте.",
+    "Мне очень нравится мои коллеги, они весёлые и умные.",
+    "В следующем месяце я буду поехать в командировку в Новосибирск."
+   ],
+   "planted": [
+    {
+     "said": "обсуждали о новом проекте",
+     "better": "обсуждали новый проект"
+    },
+    {
+     "said": "нравится",
+     "better": "нравятся"
+    },
+    {
+     "said": "буду поехать",
+     "better": "поеду"
+    }
+   ]
+  },
+  {
+   "id": "ru-conv-3",
+   "level": "A2",
+   "topic": "food",
+   "user_turns": [
+    "Я очень люблю готовить.",
+    "Вчера я готовил борщ для всей семьи.",
+    "Я купил на рынке свёкла, картошку и капусту.",
+    "Мои дети не любят борщ, но они очень любит пельмени.",
+    "Я всегда ем борщ с сметаной и чёрным хлебом.",
+    "А какое у тебя любимое блюдо?"
+   ],
+   "planted": [
+    {
+     "said": "свёкла",
+     "better": "свёклу"
+    },
+    {
+     "said": "очень любит",
+     "better": "очень любят"
+    },
+    {
+     "said": "с сметаной",
+     "better": "со сметаной"
+    }
+   ]
+  }
+ ]
+}

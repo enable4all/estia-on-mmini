@@ -12,6 +12,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -28,9 +29,10 @@ ReminderSource = Literal["chat", "command"]
 FollowUpStatus = Literal["open", "sent", "done", "cancelled", "expired"]
 InitiativeKind = Literal["followup", "calendar", "early_start", "lookback", "improvise", "announce"]
 InitiativeOutcome = Literal["sending", "sent", "unknown", "skipped", "failed"]
+ConversationKind = Literal["chat", "practice"]
 COUNTED: tuple[InitiativeOutcome, ...] = ("sending", "sent", "unknown")  # what counts toward the caps
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 9
 
 SCHEMA_V1 = """
 CREATE TABLE conversations (
@@ -289,6 +291,32 @@ CREATE INDEX initiative_log_message ON initiative_log (message_id);
 ALTER TABLE messages ADD COLUMN footer TEXT;
 """
 
+# v8: language practice (/babble) runs in a conversation of its own kind: never the current chat, never summarised,
+# skipped by learning, check-ins, the look back and the history search. Nothing else is stored for it.
+MIGRATION_V8 = """
+ALTER TABLE conversations ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat' CHECK (kind IN ('chat', 'practice'));
+"""
+# the practice conversations' ids, for the queries that leave practice turns out
+_NOT_PRACTICE = "conversation_id NOT IN (SELECT id FROM conversations WHERE kind = 'practice')"
+
+# v9: the user's devices (an ACI and a Signal device id: 1 is their phone, 2 and up are linked devices): known from the
+# start (the phone), allowed with /devices ok N, or held (seen, not allowed: no answer); last_seen: its last message
+# (an allowed device silent too long is held again). An incoming message keeps the device that sent it. The lock
+# (/lock) lives in the state table (lock:on, lock:device, lock:since).
+MIGRATION_V9 = """
+CREATE TABLE known_devices (
+    aci TEXT NOT NULL,
+    device INTEGER NOT NULL CHECK (device >= 1),
+    first_seen TEXT NOT NULL,
+    last_seen TEXT,
+    source TEXT NOT NULL CHECK (source IN ('primary', 'allowed', 'held')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (aci, device)
+);
+ALTER TABLE messages ADD COLUMN source_device INTEGER;
+"""
+
 MIGRATION_V4 = """
 CREATE TABLE mail_messages (
     id INTEGER PRIMARY KEY,
@@ -353,6 +381,7 @@ class Conversation:
     started_at: str
     summary: str
     summary_upto_seq: int
+    kind: ConversationKind = "chat"  # "practice": a /babble session's own conversation
 
 
 @dataclass(frozen=True)
@@ -369,6 +398,34 @@ class Message:
     seq: int | None
     created_at: str
     footer: str | None = None  # a code line sent after the text (a message she starts); never in Gemma's history
+    source_device: int | None = None  # incoming: the sender's device that sent it (1: their phone); None: not named
+
+
+DeviceSource = Literal["primary", "allowed", "held"]
+
+
+@dataclass(frozen=True)
+class KnownDevice:
+    """One of a user's Signal devices: known from the start (the phone), allowed with /devices ok N, or held."""
+
+    device: int
+    source: DeviceSource
+    first_seen: str
+    last_seen: str | None = None  # its last message (or when it was allowed)
+
+
+@dataclass(frozen=True)
+class Pruned:
+    """What one retention pass deleted (counts only)."""
+
+    messages: int
+    documents: int
+    tool_calls: int
+
+
+# tool calls whose results are outside text (mail, calendar, web, maps, pages, project files, the history)
+OUTSIDE_TOOLS = ("read_link", "learn_link", "search_history", "web_search", "places_search", "route")
+OUTSIDE_TOOL_PREFIXES = ("mail_", "calendar_", "project_")
 
 
 @dataclass(frozen=True)
@@ -536,6 +593,7 @@ def _conversation(row: sqlite3.Row) -> Conversation:
         started_at=row["started_at"],
         summary=row["summary"],
         summary_upto_seq=row["summary_upto_seq"],
+        kind=row["kind"],
     )
 
 
@@ -620,6 +678,7 @@ def _message(row: sqlite3.Row) -> Message:
         seq=row["seq"],
         created_at=row["created_at"],
         footer=row["footer"],
+        source_device=row["source_device"],
     )
 
 
@@ -669,6 +728,7 @@ class Store:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute("PRAGMA secure_delete = ON")  # a deleted row's bytes are overwritten, not just unlinked
         store = cls(conn)
         store._migrate()
         return store
@@ -708,6 +768,10 @@ class Store:
                 raise
         if version < 7:
             self._conn.executescript(f"BEGIN;\n{MIGRATION_V7}\nPRAGMA user_version = 7;\nCOMMIT;")
+        if version < 8:
+            self._conn.executescript(f"BEGIN;\n{MIGRATION_V8}\nPRAGMA user_version = 8;\nCOMMIT;")
+        if version < 9:
+            self._conn.executescript(f"BEGIN;\n{MIGRATION_V9}\nPRAGMA user_version = 9;\nCOMMIT;")
 
     def close(self) -> None:
         self._conn.close()
@@ -736,21 +800,60 @@ class Store:
     # conversations
 
     def current_conversation(self) -> Conversation:
+        """The open chat conversation (a practice conversation is never the current one)."""
         row = self._conn.execute(
-            "SELECT * FROM conversations WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1"
+            "SELECT * FROM conversations WHERE ended_at IS NULL AND kind = 'chat' ORDER BY id DESC LIMIT 1"
         ).fetchone()
         return _conversation(row) if row else self.start_new_conversation()
 
     def start_new_conversation(self) -> Conversation:
+        """A fresh chat conversation (/new): the open chat ends; a running practice conversation stays open."""
         now = utc_now()
         with self.tx():
             self._conn.execute(
-                "UPDATE conversations SET ended_at = ?, updated_at = ? WHERE ended_at IS NULL", (now, now)
+                "UPDATE conversations SET ended_at = ?, updated_at = ? WHERE ended_at IS NULL AND kind = 'chat'",
+                (now, now),
             )
             cursor = self._conn.execute(
                 "INSERT INTO conversations (started_at, created_at, updated_at) VALUES (?, ?, ?)", (now, now, now)
             )
         return Conversation(id=_rowid(cursor), started_at=now, summary="", summary_upto_seq=0)
+
+    def start_practice_conversation(self) -> Conversation:
+        """A practice session's own conversation (/babble); the chat conversation stays open and current."""
+        now = utc_now()
+        with self.tx():
+            cursor = self._conn.execute(
+                "INSERT INTO conversations (started_at, kind, created_at, updated_at) VALUES (?, 'practice', ?, ?)",
+                (now, now, now),
+            )
+        return Conversation(id=_rowid(cursor), started_at=now, summary="", summary_upto_seq=0, kind="practice")
+
+    def end_conversation(self, conversation_id: int) -> None:
+        now = utc_now()
+        with self.tx():
+            self._conn.execute(
+                "UPDATE conversations SET ended_at = ?, updated_at = ? WHERE id = ? AND ended_at IS NULL",
+                (now, now, conversation_id),
+            )
+
+    def user_texts(self, conversation_id: int) -> list[Message]:
+        """Every text the user sent in this conversation (typed, spoken, on a call; not ignored ones), in conversation
+        order, with no window cut: a practice session's recap reads them all."""
+        rows = self._conn.execute(
+            "SELECT * FROM messages WHERE conversation_id = ? AND direction = 'in' AND kind = 'text'"
+            " AND status != 'ignored' AND seq IS NOT NULL ORDER BY seq",
+            (conversation_id,),
+        ).fetchall()
+        return [_message(row) for row in rows]
+
+    def last_user_ts(self, conversation_id: int) -> int | None:
+        """The Signal time (ms) of the user's newest text in this conversation (a practice session's idle clock)."""
+        row = self._conn.execute(
+            "SELECT MAX(signal_ts) FROM messages WHERE conversation_id = ? AND direction = 'in' AND kind = 'text'",
+            (conversation_id,),
+        ).fetchone()
+        return None if row[0] is None else int(row[0])
 
     def conversation(self, conversation_id: int) -> Conversation:
         row = self._conn.execute("SELECT * FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
@@ -784,20 +887,22 @@ class Store:
         text: str,
         *,
         defer_seq: bool = False,
+        device: int | None = None,
     ) -> int | None:
         """Store an incoming message; None if this delivery was already stored (same sender and timestamp).
 
         defer_seq: the message joins the conversation (gets its seq) only when assign_seq is called, i.e.
         when the bridge starts answering it. Messages that arrive during an answer then come after it.
+        device: the sender's device that sent it (a command such as /unlock is checked against it).
         """
         now = utc_now()
         with self.tx():
             cursor = self._conn.execute(
                 "INSERT INTO messages (conversation_id, direction, peer_aci, signal_ts, kind, text, status, seq,"
-                " created_at, updated_at) VALUES (?, 'in', ?, ?, ?, ?, 'received',"
-                " CASE WHEN ? THEN NULL ELSE (SELECT COALESCE(MAX(seq), 0) + 1 FROM messages) END, ?, ?)"
+                " source_device, created_at, updated_at) VALUES (?, 'in', ?, ?, ?, ?, 'received',"
+                " CASE WHEN ? THEN NULL ELSE (SELECT COALESCE(MAX(seq), 0) + 1 FROM messages) END, ?, ?, ?)"
                 " ON CONFLICT (peer_aci, signal_ts) WHERE direction = 'in' DO NOTHING",
-                (conversation_id, peer_aci, signal_ts, kind, text, defer_seq, now, now),
+                (conversation_id, peer_aci, signal_ts, kind, text, defer_seq, device, now, now),
             )
         return _rowid(cursor) if cursor.rowcount == 1 else None
 
@@ -915,9 +1020,11 @@ class Store:
         return [_message(row) for row in rows]
 
     def user_messages_after(self, after_id: int, limit: int) -> list[Message]:
+        """The user's texts after `after_id` for idle learning and the check-ins: never an audio file (someone else's
+        voice) or a practice turn (a roleplay in another language, never a fact or a plan)."""
         rows = self._conn.execute(
             "SELECT * FROM messages WHERE direction = 'in' AND kind = 'text' AND id > ?"
-            " AND text NOT LIKE '[audio file]%' ORDER BY id LIMIT ?",  # someone else's voice: never learned
+            f" AND text NOT LIKE '[audio file]%' AND {_NOT_PRACTICE} ORDER BY id LIMIT ?",
             (after_id, limit),
         ).fetchall()
         return [_message(row) for row in rows]
@@ -943,10 +1050,11 @@ class Store:
         return _message(row) if row else None
 
     def user_messages_since(self, peer_aci: str, since_ms: int, limit: int = 500) -> list[Message]:
-        """This user's own texts (typed, voice notes, call turns; never audio files) sent at or after `since_ms`."""
+        """This user's own texts (typed, voice notes, call turns; never audio files or practice turns) sent at or after
+        `since_ms`."""
         rows = self._conn.execute(
             "SELECT * FROM messages WHERE direction = 'in' AND kind = 'text' AND peer_aci = ? AND signal_ts >= ?"
-            " AND text NOT LIKE '[audio file]%' ORDER BY signal_ts, id LIMIT ?",
+            f" AND text NOT LIKE '[audio file]%' AND {_NOT_PRACTICE} ORDER BY signal_ts, id LIMIT ?",
             (peer_aci, since_ms, limit),
         ).fetchall()
         return [_message(row) for row in rows]
@@ -985,17 +1093,20 @@ class Store:
 
     def _neighbours(self, message: Message, before: int, after: int) -> list[Message]:
         earlier = self._conn.execute(
-            "SELECT * FROM messages WHERE conversation_id = ? AND id < ? AND kind = 'text' ORDER BY id DESC LIMIT ?",
+            "SELECT * FROM messages WHERE conversation_id = ? AND id < ? AND kind = 'text'"
+            f" AND {_NOT_PRACTICE} ORDER BY id DESC LIMIT ?",
             (message.conversation_id, message.id, before),
         ).fetchall()
         later = self._conn.execute(
-            "SELECT * FROM messages WHERE conversation_id = ? AND id > ? AND kind = 'text' ORDER BY id LIMIT ?",
+            f"SELECT * FROM messages WHERE conversation_id = ? AND id > ? AND kind = 'text' AND {_NOT_PRACTICE}"
+            " ORDER BY id LIMIT ?",
             (message.conversation_id, message.id, after),
         ).fetchall()
         return [*(_message(row) for row in reversed(earlier)), message, *(_message(row) for row in later)]
 
     def search(self, query: str, limit: int = 5, exclude_message_id: int | None = None) -> list[Hit]:
-        """Keyword search (any word, best matches first) over messages and learned pages."""
+        """Keyword search (any word, best matches first) over messages and learned pages; never a practice turn (the
+        roleplay of a /babble session never reaches her normal history)."""
         terms = [term for term in re.findall(r"\w+", query.casefold()) if len(term) > 1]
         if not terms:
             return []
@@ -1003,6 +1114,7 @@ class Store:
         rows = self._conn.execute(
             "SELECT m.* FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid"
             " WHERE messages_fts MATCH ? AND m.kind = 'text' AND m.id != ?"
+            " AND m.conversation_id NOT IN (SELECT id FROM conversations WHERE kind = 'practice')"
             " ORDER BY bm25(messages_fts) LIMIT ?",
             (match, exclude_message_id or 0, limit * 3),
         ).fetchall()
@@ -1734,6 +1846,124 @@ class Store:
             cursor = self._conn.execute("DELETE FROM initiative_log WHERE created_at < ?", (before,))
         return cursor.rowcount
 
+    def outside_seqs(self, conversation_id: int) -> list[tuple[int, int]]:
+        """The incoming messages of a conversation (id, seq) whose answer read outside text (a tool in OUTSIDE_TOOLS or
+        with an OUTSIDE_TOOL_PREFIXES name) or that are outside text themselves (an audio file, a photo)."""
+        prefixes = " OR ".join("t.name LIKE ? ESCAPE '\\'" for _ in OUTSIDE_TOOL_PREFIXES)
+        names = ", ".join("?" for _ in OUTSIDE_TOOLS)
+        rows = self._conn.execute(
+            "SELECT m.id, m.seq FROM messages m WHERE m.conversation_id = ? AND m.direction = 'in'"
+            " AND m.seq IS NOT NULL AND (m.text LIKE '[audio file]%' OR m.text LIKE '[photo]%'"
+            f" OR EXISTS (SELECT 1 FROM tool_calls t WHERE t.message_id = m.id AND (t.name IN ({names}) OR {prefixes})))"
+            " ORDER BY m.seq",
+            (conversation_id, *OUTSIDE_TOOLS, *(prefix.replace("_", "\\_") + "%" for prefix in OUTSIDE_TOOL_PREFIXES)),
+        ).fetchall()
+        return [(int(row["id"]), int(row["seq"])) for row in rows]
+
+    # the user's devices
+
+    def devices(self, aci: str) -> list[KnownDevice]:
+        rows = self._conn.execute(
+            "SELECT device, source, first_seen, last_seen FROM known_devices WHERE aci = ? ORDER BY device", (aci,)
+        ).fetchall()
+        return [
+            KnownDevice(int(row["device"]), row["source"], str(row["first_seen"]), row["last_seen"]) for row in rows
+        ]
+
+    def device(self, aci: str, device: int) -> KnownDevice | None:
+        return next((item for item in self.devices(aci) if item.device == device), None)
+
+    def device_source(self, aci: str, device: int) -> DeviceSource | None:
+        row = self._conn.execute(
+            "SELECT source FROM known_devices WHERE aci = ? AND device = ?", (aci, device)
+        ).fetchone()
+        return None if row is None else row["source"]
+
+    def set_device(self, aci: str, device: int, source: DeviceSource, *, at: str | None = None) -> None:
+        """Add a device, or change how it is known; when it was first seen stays."""
+        now = at or utc_now()
+        with self.tx():
+            self._conn.execute(
+                "INSERT INTO known_devices (aci, device, first_seen, source, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (aci, device) DO UPDATE SET source = excluded.source,"
+                " updated_at = excluded.updated_at",
+                (aci, device, now, source, now, now),
+            )
+
+    def touch_device(self, aci: str, device: int, at: str) -> None:
+        """When the device last sent a message (or was allowed)."""
+        with self.tx():
+            self._conn.execute(
+                "UPDATE known_devices SET last_seen = ?, updated_at = ? WHERE aci = ? AND device = ?",
+                (at, utc_now(), aci, device),
+            )
+
+    def forget_device(self, aci: str, device: int) -> bool:
+        """Remove a device (/devices forget N): a message from that number is held again. Whether it was there."""
+        with self.tx():
+            gone = self._conn.execute("DELETE FROM known_devices WHERE aci = ? AND device = ?", (aci, device))
+        return gone.rowcount > 0
+
+    # retention ([privacy] keep_days)
+
+    def prune(self, keep_days: int, *, now: float | None = None) -> Pruned:
+        """Delete messages, pages and tool calls older than `keep_days`, with their search rows (the FTS triggers),
+        then merge the search indexes so no deleted word stays in them. Kept: a message an open reminder, an open
+        check-in or the initiative log points to (those rows are never touched); the profile stays, its link to a
+        deleted message or page is cleared, and so is a finished reminder's. An ended conversation with no message
+        left goes, with its summary. Compaction (`compact`) is separate: it blocks the database for a moment."""
+        before = datetime.fromtimestamp((time.time() if now is None else now) - keep_days * 86_400, UTC).isoformat(
+            timespec="seconds"
+        )
+        with self.tx():
+            self._conn.execute("CREATE TEMP TABLE IF NOT EXISTS pruned_messages (id INTEGER PRIMARY KEY)")
+            self._conn.execute("DELETE FROM pruned_messages")
+            self._conn.execute(
+                "INSERT INTO pruned_messages SELECT id FROM messages WHERE created_at < ?"
+                " AND id NOT IN (SELECT source_message_id FROM reminders WHERE status IN ('open', 'firing')"
+                "   AND source_message_id IS NOT NULL)"
+                " AND id NOT IN (SELECT message_id FROM reminders WHERE status IN ('open', 'firing')"
+                "   AND message_id IS NOT NULL)"
+                " AND id NOT IN (SELECT source_message_id FROM followups WHERE status = 'open')"
+                " AND id NOT IN (SELECT message_id FROM initiative_log WHERE message_id IS NOT NULL)",
+                (before,),
+            )
+            gone = "IN (SELECT id FROM pruned_messages)"
+            run = self._conn.execute
+            run(f"UPDATE reminders SET source_message_id = NULL WHERE source_message_id {gone}")
+            run(f"UPDATE reminders SET message_id = NULL WHERE message_id {gone}")
+            run(f"DELETE FROM followups WHERE source_message_id {gone}")
+            run(f"UPDATE profile_facts SET source_message_id = NULL WHERE source_message_id {gone}")
+            run(f"UPDATE profile_changes SET source_message_id = NULL WHERE source_message_id {gone}")
+            run(f"UPDATE messages SET reply_to_id = NULL WHERE reply_to_id {gone} AND id NOT {gone}")
+            run(f"DELETE FROM attachments WHERE message_id {gone}")
+            tool_calls = run(f"DELETE FROM tool_calls WHERE message_id {gone} OR created_at < ?", (before,)).rowcount
+            run(f"UPDATE documents SET source_message_id = NULL WHERE source_message_id {gone}")
+            old_documents = "SELECT id FROM documents WHERE created_at < ?"
+            run(
+                f"UPDATE profile_facts SET source_document_id = NULL WHERE source_document_id IN ({old_documents})",
+                (before,),
+            )
+            documents = run("DELETE FROM documents WHERE created_at < ?", (before,)).rowcount
+            messages = run(f"DELETE FROM messages WHERE id {gone}").rowcount
+            run(
+                "DELETE FROM conversations WHERE ended_at IS NOT NULL"
+                " AND id NOT IN (SELECT DISTINCT conversation_id FROM messages)"
+            )
+            run("DELETE FROM pruned_messages")
+            if messages:
+                run("INSERT INTO messages_fts (messages_fts) VALUES ('optimize')")
+            if documents:
+                run("INSERT INTO documents_fts (documents_fts) VALUES ('optimize')")
+        return Pruned(messages, documents, tool_calls)
+
+    def compact(self) -> None:
+        """After a prune, in a quiet moment: empty the write-ahead log (old pages in it go), rebuild the file without
+        its free pages (VACUUM; it blocks the database for a moment), and empty the log again."""
+        self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        self._conn.execute("VACUUM")
+        self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
     # state
 
     def get_state(self, key: str) -> str | None:
@@ -1748,6 +1978,38 @@ class Store:
                 " ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
                 (key, value, now, now),
             )
+
+    def delete_state(self, key: str) -> None:
+        with self.tx():
+            self._conn.execute("DELETE FROM state WHERE key = ?", (key,))
+
+    def states_with_prefix(self, prefix: str) -> list[tuple[str, str]]:
+        """(key, value) of every state row whose key starts with `prefix` (taken literally)."""
+        escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        rows = self._conn.execute(
+            "SELECT key, value FROM state WHERE key LIKE ? ESCAPE '\\' ORDER BY key", (escaped + "%",)
+        )
+        return [(str(row["key"]), str(row["value"])) for row in rows]
+
+    def rewrite_notes(self, olds: list[str], new: str) -> int:
+        """Replace each of `olds` in code-written notes with `new` (an UPDATE, so the search index's trigger takes the
+        old words out), then merge the index so no deleted words stay in it. How many notes changed."""
+        changed = 0
+        with self.tx():
+            for old in olds:
+                changed += self._conn.execute(
+                    "UPDATE messages SET text = replace(text, ?, ?), updated_at = ?"
+                    " WHERE kind = 'note' AND instr(text, ?) > 0",
+                    (old, new, utc_now(), old),
+                ).rowcount
+            if changed:
+                self._conn.execute("INSERT INTO messages_fts (messages_fts) VALUES ('optimize')")
+        return changed
+
+    def checkpoint(self) -> None:
+        """Write the log back into the database file and empty it: a row just overwritten (secure_delete) leaves no
+        older copy in the log."""
+        self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
     def db_size_bytes(self) -> int:
         pages = self._conn.execute("PRAGMA page_count").fetchone()[0]

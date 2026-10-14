@@ -1,0 +1,496 @@
+{
+ "language": "ja",
+ "items": [
+  {
+   "id": "ja-01",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "毎朝八時に学校を行きます。",
+   "error_type": "particle (に for destination)",
+   "gold_said": "学校を",
+   "gold_better": "学校に",
+   "gold_full": "毎朝八時に学校に行きます。",
+   "why_en": "The destination of 行く is marked with に (or へ), not を."
+  },
+  {
+   "id": "ja-02",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "駅の近くでコンビニがあります。",
+   "error_type": "particle (に for existence)",
+   "gold_said": "近くで",
+   "gold_better": "近くに",
+   "gold_full": "駅の近くにコンビニがあります。",
+   "why_en": "Where something exists (ある/いる) is marked with に, not で."
+  },
+  {
+   "id": "ja-03",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "昨日、公園に昼ご飯を食べました。",
+   "error_type": "particle (で for action location)",
+   "gold_said": "公園に",
+   "gold_better": "公園で",
+   "gold_full": "昨日、公園で昼ご飯を食べました。",
+   "why_en": "The place where an action happens is marked with で, not に."
+  },
+  {
+   "id": "ja-04",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "昨日はとても寒いでした。",
+   "error_type": "adjective conjugation (い-adj past)",
+   "gold_said": "寒いでした",
+   "gold_better": "寒かったです",
+   "gold_full": "昨日はとても寒かったです。",
+   "why_en": "The past of an い-adjective is 寒かったです, not 寒いでした."
+  },
+  {
+   "id": "ja-05",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "公園できれい花を見ました。",
+   "error_type": "adjective (な-adj before noun)",
+   "gold_said": "きれい花",
+   "gold_better": "きれいな花",
+   "gold_full": "公園できれいな花を見ました。",
+   "why_en": "な-adjectives need な before a noun: きれいな花."
+  },
+  {
+   "id": "ja-06",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "駅前においしいなパン屋があります。",
+   "error_type": "adjective (い-adj with extra な)",
+   "gold_said": "おいしいな",
+   "gold_better": "おいしい",
+   "gold_full": "駅前においしいパン屋があります。",
+   "why_en": "い-adjectives go directly before a noun, without な."
+  },
+  {
+   "id": "ja-07",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "この映画はおもしろいじゃないです。",
+   "error_type": "adjective conjugation (い-adj negative)",
+   "gold_said": "おもしろいじゃないです",
+   "gold_better": "おもしろくないです",
+   "gold_full": "この映画はおもしろくないです。",
+   "why_en": "The negative of an い-adjective is 〜くない: おもしろくないです."
+  },
+  {
+   "id": "ja-08",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "スーパーに行きて、牛乳を買いました。",
+   "error_type": "verb form (て-form)",
+   "gold_said": "行きて",
+   "gold_better": "行って",
+   "gold_full": "スーパーに行って、牛乳を買いました。",
+   "why_en": "The て-form of 行く is irregular: 行って."
+  },
+  {
+   "id": "ja-09",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "うちには犬が二ついます。",
+   "error_type": "counter",
+   "gold_said": "二つ",
+   "gold_better": "二匹",
+   "gold_full": "うちには犬が二匹います。",
+   "why_en": "Animals such as dogs are counted with 匹, not つ."
+  },
+  {
+   "id": "ja-10",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "私は毎朝コーヒーを飲むです。",
+   "error_type": "verb form (dictionary form + です)",
+   "gold_said": "飲むです",
+   "gold_better": "飲みます",
+   "gold_full": "私は毎朝コーヒーを飲みます。",
+   "why_en": "The polite present of a verb is the ます form, not dictionary form + です."
+  },
+  {
+   "id": "ja-11",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "駅で友達を会いました。",
+   "error_type": "particle (に with 会う)",
+   "gold_said": "友達を",
+   "gold_better": "友達に",
+   "gold_full": "駅で友達に会いました。",
+   "why_en": "With 会う the person you meet is marked with に, not を."
+  },
+  {
+   "id": "ja-12",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "大きいの家に住みたいです。",
+   "error_type": "adjective (い-adj with の)",
+   "gold_said": "大きいの家",
+   "gold_better": "大きい家",
+   "gold_full": "大きい家に住みたいです。",
+   "why_en": "い-adjectives modify a noun directly, without の."
+  },
+  {
+   "id": "ja-13",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "風でドアが開けました。",
+   "error_type": "transitive/intransitive pair",
+   "gold_said": "開けました",
+   "gold_better": "開きました",
+   "gold_full": "風でドアが開きました。",
+   "why_en": "With ドアが as the subject use the intransitive verb 開く: 開きました."
+  },
+  {
+   "id": "ja-14",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "友達が私に誕生日プレゼントをあげました。",
+   "error_type": "giving verbs (あげる/くれる)",
+   "gold_said": "あげました",
+   "gold_better": "くれました",
+   "gold_full": "友達が私に誕生日プレゼントをくれました。",
+   "why_en": "When someone gives something to me, the verb is くれる, not あげる."
+  },
+  {
+   "id": "ja-15",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "姉は今、大阪に住みます。",
+   "error_type": "aspect (ている for a state)",
+   "gold_said": "住みます",
+   "gold_better": "住んでいます",
+   "gold_full": "姉は今、大阪に住んでいます。",
+   "why_en": "Living somewhere now is a continuing state: 住んでいます."
+  },
+  {
+   "id": "ja-16",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "日本に来た前に、少し日本語を勉強しました。",
+   "error_type": "tense before 前に",
+   "gold_said": "来た前に",
+   "gold_better": "来る前に",
+   "gold_full": "日本に来る前に、少し日本語を勉強しました。",
+   "why_en": "前に always follows the dictionary (non-past) form: 来る前に."
+  },
+  {
+   "id": "ja-17",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "ご飯を食べる後で、散歩します。",
+   "error_type": "tense before 後で",
+   "gold_said": "食べる後で",
+   "gold_better": "食べた後で",
+   "gold_full": "ご飯を食べた後で、散歩します。",
+   "why_en": "後で always follows the past (た) form: 食べた後で."
+  },
+  {
+   "id": "ja-18",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "漢字はまだあまり読みれません。",
+   "error_type": "potential form",
+   "gold_said": "読みれません",
+   "gold_better": "読めません",
+   "gold_full": "漢字はまだあまり読めません。",
+   "why_en": "The potential form of 読む is 読める, so the negative is 読めません."
+  },
+  {
+   "id": "ja-19",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "今日は時間をありません。",
+   "error_type": "particle (が with ある)",
+   "gold_said": "時間を",
+   "gold_better": "時間が",
+   "gold_full": "今日は時間がありません。",
+   "why_en": "ある / ない mark what exists with が, not を."
+  },
+  {
+   "id": "ja-20",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "私の趣味は写真を撮るです。",
+   "error_type": "nominalization (こと)",
+   "gold_said": "撮るです",
+   "gold_better": "撮ることです",
+   "gold_full": "私の趣味は写真を撮ることです。",
+   "why_en": "A verb used as a noun after は needs こと: 撮ることです."
+  },
+  {
+   "id": "ja-21",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "田中さんの電話番号を知りますか。",
+   "error_type": "aspect (知っている)",
+   "gold_said": "知りますか",
+   "gold_better": "知っていますか",
+   "gold_full": "田中さんの電話番号を知っていますか。",
+   "why_en": "'Do you know' uses the ている form: 知っていますか."
+  },
+  {
+   "id": "ja-22",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "宿題はまだしませんでした。",
+   "error_type": "aspect (まだ〜ていない)",
+   "gold_said": "しませんでした",
+   "gold_better": "していません",
+   "gold_full": "宿題はまだしていません。",
+   "why_en": "'Not done yet' is まだ〜ていません, not the past negative."
+  },
+  {
+   "id": "ja-23",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "週末、映画を見るに行きます。",
+   "error_type": "purpose (stem + に行く)",
+   "gold_said": "見るに",
+   "gold_better": "見に",
+   "gold_full": "週末、映画を見に行きます。",
+   "why_en": "Going somewhere to do something uses the verb stem + に: 見に行きます."
+  },
+  {
+   "id": "ja-24",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "今日は黒いズボンを着ています。",
+   "error_type": "vocabulary (wearing verbs)",
+   "gold_said": "着ています",
+   "gold_better": "はいています",
+   "gold_full": "今日は黒いズボンをはいています。",
+   "why_en": "Trousers, skirts, socks and shoes take はく; 着る is for shirts, jackets and dresses."
+  },
+  {
+   "id": "ja-31",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "昨日、映画を見に行きました。",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "stem + に行く is right"
+  },
+  {
+   "id": "ja-32",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "明日、行く？",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "casual form with dropped subject is correct"
+  },
+  {
+   "id": "ja-33",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "おいしかったよ、あのラーメン。",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "afterthought word order (subject at the end) is natural"
+  },
+  {
+   "id": "ja-34",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "コーヒーは飲みません。",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "contrastive は replacing を is correct"
+  },
+  {
+   "id": "ja-35",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "駅まで歩いて十分ぐらいです。",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "correct"
+  },
+  {
+   "id": "ja-36",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "日本語を話すことができます。",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "ことができる is as correct as 話せます"
+  },
+  {
+   "id": "ja-37",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "これ、食べてもいい？",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "dropped を in casual speech is natural"
+  },
+  {
+   "id": "ja-38",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "先週、京都へ行きました。",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "へ for a destination is right"
+  },
+  {
+   "id": "ja-39",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "雨が降っているので、今日は家にいます。",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "correct"
+  },
+  {
+   "id": "ja-40",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "日本に三回行ったことがあります。",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "correct experience form"
+  },
+  {
+   "id": "ja-41",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "もう晩ご飯は食べました。",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "topicalized object with は is correct"
+  },
+  {
+   "id": "ja-43",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "このケーキ、すごくおいしそう！",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'looks delicious' with そう is right"
+  }
+ ],
+ "conversations": [
+  {
+   "id": "ja-conv-1",
+   "level": "A2",
+   "topic": "weekend",
+   "user_turns": [
+    "週末は友達と鎌倉に行きました。",
+    "天気がとてもいいでした。",
+    "お寺を見て、海の近くでしらす丼を食べました。",
+    "帰りの電車はとても混んでいました。",
+    "日曜日は家で休みて、本を読みました。",
+    "来週はまた友達を会う予定です。"
+   ],
+   "planted": [
+    {
+     "said": "いいでした",
+     "better": "よかったです"
+    },
+    {
+     "said": "休みて",
+     "better": "休んで"
+    },
+    {
+     "said": "友達を会う",
+     "better": "友達に会う"
+    }
+   ]
+  },
+  {
+   "id": "ja-conv-2",
+   "level": "B1",
+   "topic": "work",
+   "user_turns": [
+    "私は東京のIT会社で働いています。",
+    "毎朝七時半に家を出ます。",
+    "仕事はおもしろいですが、残業が多いです。",
+    "昨日の会議で、私は作った資料を説明しました。",
+    "先週、上司が私に新しいパソコンをあげました。",
+    "仕事が終わる後で、同僚と飲みに行くこともあります。"
+   ],
+   "planted": [
+    {
+     "said": "私は作った",
+     "better": "私が作った"
+    },
+    {
+     "said": "あげました",
+     "better": "くれました"
+    },
+    {
+     "said": "終わる後で",
+     "better": "終わった後で"
+    }
+   ]
+  },
+  {
+   "id": "ja-conv-3",
+   "level": "A2",
+   "topic": "food",
+   "user_turns": [
+    "私は料理が好きです。",
+    "昨日、友達のためにカレーを作りました。",
+    "スーパーで玉ねぎとじゃがいもを買いました。卵も六本買いました。",
+    "カレーはちょっと辛いでしたが、友達はおいしいと言いました。",
+    "デザートに、おいしいなアイスクリームを食べました。",
+    "日本ではどんな料理が人気ですか。"
+   ],
+   "planted": [
+    {
+     "said": "六本",
+     "better": "六個"
+    },
+    {
+     "said": "辛いでした",
+     "better": "辛かったです"
+    },
+    {
+     "said": "おいしいな",
+     "better": "おいしい"
+    }
+   ]
+  }
+ ]
+}

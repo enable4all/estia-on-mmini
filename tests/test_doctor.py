@@ -12,6 +12,7 @@ import pytest
 from local_assistant import doctor, prompts
 from local_assistant.config import Config, load_config
 from local_assistant.doctor import Finding, Probe, exit_code, render, run
+from local_assistant.hostsec import Check
 from local_assistant.language import LANGUAGE_KEY
 from local_assistant.mail_auth import TokenStore
 from local_assistant.part_status import PartStatus, Reason
@@ -40,6 +41,30 @@ class FakeProbe(Probe):
         self.asked: list[str] = []
         self.java: Path | None = None
         self.clock = NOW
+        self.security: list[Check] = []  # the Mac's checks (hostsec), canned: no system tool runs in tests
+        self.install: list[Check] = []  # her own user's checks (ownuser)
+        self.homes: list[Path] = []
+        self.numbers: list[str] = []
+        self.own = False  # she runs as her own user here
+        self.her = False  # this doctor runs as her (_estia)
+        self.programs: list[Check] = []
+
+    def moved(self) -> bool:
+        return self.own
+
+    def her_user(self) -> bool:
+        return self.her
+
+    def program_checks(self, cfg: Any) -> list[Check]:
+        return list(self.programs)
+
+    def security_checks(self, home: Path, bot_number: str) -> list[Check]:
+        self.homes.append(home)
+        self.numbers.append(bot_number)  # used to find her account, never shown
+        return list(self.security)
+
+    def install_checks(self) -> list[Check]:
+        return list(self.install)
 
     def now(self) -> float:
         return self.clock
@@ -130,6 +155,16 @@ def test_ollama_must_run_and_have_the_model(home: Path) -> None:
     del probe.answers["http://127.0.0.1:11434/api/tags"]
     down = by_part(run(path, probe))["Model"]
     assert down.status == "fail" and "brew services start ollama" in down.fix
+
+
+def test_a_cloud_model_under_the_alias_is_a_fail(home: Path) -> None:
+    """Ollama's own entry marks a model that runs on its servers: answers pause, so doctor says ✗ and how to fix it."""
+    probe = FakeProbe(home)
+    remote = {"remote_model": "gpt-oss:120b", "remote_host": "https://ollama.com:443"}
+    probe.answers["http://127.0.0.1:11434/api/tags"] = {"models": [{"name": "local-worker:latest", **remote}]}
+    model = by_part(run(write_config(home, MINIMAL), probe))["Model"]
+    assert model.status == "fail" and "cloud model" in model.text and "Ollama's servers" in model.text
+    assert "create local-worker from it" in model.fix
 
 
 def test_the_bot_number_must_be_registered(home: Path) -> None:
@@ -805,3 +840,291 @@ def test_doctor_says_her_own_messages_are_off_until_turned_on_and_who_turned_the
     store.close()
     found = by_part(run(path, probe))["Initiative"]
     assert found == Finding("ok", "Initiative", prompts.DOCTOR_INITIATIVE_OFF_BY_USER)
+
+
+def test_with_speech_stopping_her_doctor_shows_the_speech_detector(home: Path) -> None:
+    probe = FakeProbe(home)
+    short = tempfile.mkdtemp(prefix="c", dir="/tmp")  # socket paths are at most 104 bytes
+    calls = f'[calls]\nsocket_dir = "{short}"\n'
+    loudness = write_config(home, MINIMAL + VOICE + calls)
+    probe.answers[HEALTH] = {"stt": "ready", "tts": "ready", "vad": "ready"}
+    assert "Speech detector" not in by_part(run(loudness, probe))  # loudness, the default: nothing to show
+    path = write_config(home, MINIMAL + VOICE + calls + 'barge = "speech"\n')
+    assert by_part(run(path, probe))["Speech detector"] == Finding("ok", "Speech detector", "ready")
+    probe.answers[HEALTH] = {"stt": "ready", "tts": "ready", "vad": "loading"}
+    waiting = by_part(run(path, probe))["Speech detector"]
+    assert waiting == Finding(
+        "warn", "Speech detector", prompts.DOCTOR_DETECTOR_LOADING, prompts.DOCTOR_DETECTOR_LOADING_FIX
+    )
+    assert waiting.text == "loading: loudness stops her on calls until it is ready"
+    probe.answers[HEALTH] = {"stt": "ready", "tts": "ready", "vad": "unavailable"}
+    broken = by_part(run(path, probe))["Speech detector"]
+    assert broken == Finding(
+        "warn", "Speech detector", prompts.DOCTOR_DETECTOR_UNAVAILABLE, prompts.DOCTOR_DETECTOR_UNAVAILABLE_FIX
+    )
+    assert broken.fix == (  # its own fix: the model folder downloads again at the next start
+        "delete ~/Library/Application Support/local-assistant/voice-models/silero-vad, then run"
+        " scripts/install-voice-daemon.sh (asks for sudo: run it yourself); see ~/Library/Logs/local-assistant/voice.log"
+    )
+    probe.answers[HEALTH] = {"stt": "ready", "tts": "ready"}
+    old = by_part(run(path, probe))["Speech detector"]
+    assert old == Finding("warn", "Speech detector", prompts.DOCTOR_DETECTOR_OLD, prompts.DOCTOR_VOICE_REINSTALL)
+    assert old.text == "old voice service: loudness stops her on calls until it is updated"
+    del probe.answers[HEALTH]
+    silent = by_part(run(path, probe))["Speech detector"]
+    assert silent.status == "warn" and silent.text.startswith("not ready")  # the Voice line fails already
+
+
+# hardening: her Signal account's devices, the safety number, the model's pin, retention, the Mac and her own user
+
+DIGEST = "ab" * 32
+
+
+def test_her_signal_accounts_devices_come_from_status_json(home: Path) -> None:
+    path = write_config(home, MINIMAL)
+    assert by_part(run(path, FakeProbe(home)))["Her Signal account"].status == "untested"  # not counted yet
+    status = recorded(path)
+    status.linked_devices(1)
+    one = by_part(run(path, FakeProbe(home)))["Her Signal account"]
+    assert (one.status, one.text) == ("ok", "1 device: this Mac (checked 11:35)")
+    status.linked_devices(2)
+    findings = run(path, FakeProbe(home))
+    two = by_part(findings)["Her Signal account"]
+    assert two.status == "fail" and two.text.startswith("2 devices") and "removeDevice" in two.fix
+    assert exit_code(findings) == 1
+
+
+def test_a_changed_safety_number_is_red_with_the_compare_then_trust_steps(home: Path) -> None:
+    path = write_config(home, MINIMAL)
+    fine = by_part(run(path, FakeProbe(home)))["Safety number"]
+    assert fine.status == "ok"
+    recorded(path).identity_changed()
+    findings = run(path, FakeProbe(home))
+    changed = by_part(findings)["Safety number"]
+    assert changed.status == "fail" and changed.text.startswith("changed 11:35")
+    assert changed.fix == prompts.SAFETY_NUMBER_FIX and ACI not in render(findings)
+
+
+def test_without_a_pin_the_model_line_says_how_to_pin_it(home: Path) -> None:
+    probe = FakeProbe(home)
+    probe.answers["http://127.0.0.1:11434/api/tags"] = {"models": [{"name": "local-worker:latest", "digest": DIGEST}]}
+    pin = by_part(run(write_config(home, MINIMAL), probe))["Model pin"]
+    assert pin.status == "warn" and f'model_digest = "sha256:{DIGEST}"' in pin.fix
+
+
+def test_a_pinned_model_is_green_when_it_matches_and_red_when_not(home: Path) -> None:
+    probe = FakeProbe(home)
+    probe.answers["http://127.0.0.1:11434/api/tags"] = {"models": [{"name": "local-worker:latest", "digest": DIGEST}]}
+    path = write_config(home, MINIMAL + f'model_digest = "sha256:{DIGEST}"\n')
+    assert by_part(run(path, probe))["Model pin"].status == "ok"
+    other = "cd" * 32
+    probe.answers["http://127.0.0.1:11434/api/tags"] = {"models": [{"name": "local-worker:latest", "digest": other}]}
+    findings = run(path, probe)
+    pin = by_part(findings)["Model pin"]
+    assert pin.status == "fail" and "answers are paused" in pin.text and other in pin.fix
+    assert exit_code(findings) == 1
+
+
+def test_history_retention_is_shown(home: Path) -> None:
+    kept = by_part(run(write_config(home, MINIMAL), FakeProbe(home)))["History"]
+    assert (kept.status, kept.text) == ("ok", "kept until you delete it ([privacy] keep_days is not set)")
+    path = write_config(home, MINIMAL + "[privacy]\nkeep_days = 90\n")
+    cfg = load_config(path)
+    store = Store.open(cfg.db_path)
+    try:
+        assert by_part(run(path, FakeProbe(home)))["History"].status == "untested"  # not pruned yet
+        store.set_state("privacy:pruned_at", f"{NOW - 3600:.0f}")
+        recent = by_part(run(path, FakeProbe(home)))["History"]
+        assert recent.status == "ok" and recent.text.startswith("older than 90 days deleted each night; last 10:40")
+        store.set_state("privacy:pruned_at", f"{NOW - 4 * 86_400:.0f}")
+        late = by_part(run(path, FakeProbe(home)))["History"]
+        assert late.status == "warn" and "4 Oct" in late.text
+    finally:
+        store.close()
+
+
+def test_the_macs_and_her_own_users_checks_follow_the_daemon_line_one_to_one(home: Path) -> None:
+    probe = FakeProbe(home)
+    probe.security = [
+        Check("firewall", "warn", "Firewall", "off", "scripts/harden.sh", (("/usr/bin/true",),)),
+        Check("registration_lock", "ok", "Registration Lock", "set"),
+    ]
+    probe.install = [
+        Check("own_user_code", "fail", "Her code", "writable by you", "/usr/bin/sudo /usr/local/estia/bin/estia-deploy")
+    ]
+    findings = run(write_config(home, MINIMAL), probe)
+    parts = [finding.part for finding in findings]
+    daemon = parts.index("Always on")
+    assert parts[daemon + 1 : daemon + 4] == ["Firewall", "Registration Lock", "Her code"]
+    assert findings[daemon + 1] == Finding("warn", "Firewall", "off", "scripts/harden.sh")
+    assert findings[daemon + 3] == Finding(
+        "fail", "Her code", "writable by you", "/usr/bin/sudo /usr/local/estia/bin/estia-deploy"
+    )
+    assert probe.homes == [home] and probe.numbers == [NUMBER] and exit_code(findings) == 1
+    assert NUMBER not in render(findings)
+
+
+def test_a_mac_check_that_cannot_run_is_a_warning(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken(self: Probe, home: Path, bot_number: str) -> list[Check]:
+        raise OSError("no such tool")
+
+    monkeypatch.setattr(FakeProbe, "security_checks", broken)
+    found = by_part(run(write_config(home, MINIMAL), FakeProbe(home)))["Mac security"]
+    assert found.status == "warn"
+
+
+def test_with_her_own_user_installed_a_missing_config_points_to_her_doctor(
+    home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    probe = FakeProbe(home)
+    probe.own = True
+    config = by_part(run(home / ".config/local-assistant/config.toml", probe))["Config"]
+    assert (
+        config.status == "fail"
+        and config.fix == "she runs as her own user: /usr/bin/sudo /usr/local/estia/bin/estia doctor"
+    )
+    probe.own = False  # rolled back, or never moved: your own config is missing
+    config = by_part(run(home / ".config/local-assistant/config.toml", probe))["Config"]
+    assert "cp config.example.toml" in config.fix
+
+
+# her own user: the fixes say how, as her
+
+
+def test_in_her_own_user_the_pin_says_how_to_edit_her_config_and_restart_her(home: Path) -> None:
+    probe = FakeProbe(home)
+    probe.own = True
+    probe.answers["http://127.0.0.1:11434/api/tags"] = {"models": [{"name": "local-worker:latest", "digest": DIGEST}]}
+    path = write_config(home, MINIMAL)
+    pin = by_part(run(path, probe))["Model pin"]
+    assert (
+        f"/usr/bin/sudo -u _estia -e {path}" in pin.fix
+        and "/usr/bin/sudo /usr/local/estia/bin/estia restart" in pin.fix
+    )
+    assert f'model_digest = "sha256:{DIGEST}"' in pin.fix
+
+
+def test_in_her_own_user_a_soul_others_can_read_is_fixed_as_her(home: Path) -> None:
+    probe = FakeProbe(home)
+    probe.own = True
+    path = write_config(home, MINIMAL)
+    soul = path.parent / "soul.md"
+    soul.write_text("Warm.\n")
+    soul.chmod(0o644)
+    found = by_part(run(path, probe))["Personality"]
+    assert found.status == "warn" and found.fix.startswith(f"/usr/bin/sudo -u _estia chmod 600 {soul}")
+
+
+def test_her_programs_follow_her_own_users_checks(home: Path) -> None:
+    probe = FakeProbe(home)
+    probe.own = True
+    probe.install = [Check("plists", "ok", "Services", "bridge runs as _estia")]
+    probe.programs = [
+        Check("programs", "fail", "Her programs", "signal-cli (x)", "/usr/bin/sudo /usr/local/estia/bin/estia-deploy")
+    ]
+    findings = run(write_config(home, MINIMAL), probe)
+    parts = [finding.part for finding in findings]
+    assert parts.index("Her programs") == parts.index("Services") + 1 and exit_code(findings) == 1
+
+
+def test_run_as_her_the_tools_line_leaves_your_tools_out(home: Path) -> None:
+    """Homebrew's ollama and uv are yours and not on her PATH: as her, doctor checks what she runs instead."""
+    probe = FakeProbe(home)
+    probe.her = True
+    probe.tools = set()
+    tools = by_part(run(write_config(home, MINIMAL), probe))["Tools"]
+    assert tools.status == "ok" and "Her programs" in tools.text
+
+
+def test_the_safety_number_and_linked_device_fixes_name_her_signal_command() -> None:
+    assert "/usr/bin/sudo /usr/local/estia/bin/estia signal listIdentities" in prompts.SAFETY_NUMBER_FIX
+    assert "/usr/bin/sudo /usr/local/estia/bin/estia signal removeDevice" in prompts.LINKED_FIX
+
+
+# her projects folder: read as whoever runs doctor (as her: /usr/bin/sudo /usr/local/estia/bin/estia doctor)
+
+
+def projects_config(home: Path) -> Path:
+    return write_config(home, MINIMAL + f'[projects]\nroot = "{home / "dev"}"\n')
+
+
+def a_repository(home: Path) -> Path:
+    import subprocess
+
+    repo = home / "dev" / "alpha"
+    repo.mkdir(parents=True)
+    (repo / "README.md").write_text("# alpha\n")
+    env = {"PATH": "/usr/bin:/bin", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+    for argv in (["init", "-q", "-b", "main"], ["add", "README.md"]):
+        subprocess.run(["/usr/bin/git", "-C", str(repo), *argv], check=True, capture_output=True, env=env)
+    return repo
+
+
+def test_projects_off_have_no_line(home: Path) -> None:
+    """Projects are an extra: without [projects] nothing is read and doctor names no projects folder."""
+    a_repository(home)
+    probe = FakeProbe(home)
+    probe.own = True
+    probe.projects = lambda cfg: pytest.fail("the projects folder is read while projects are off")  # type: ignore[method-assign]
+    assert "Projects" not in by_part(run(write_config(home, MINIMAL), probe))
+
+
+def test_a_readable_projects_folder_is_ok(home: Path) -> None:
+    a_repository(home)
+    found = by_part(run(projects_config(home), FakeProbe(home)))["Projects"]
+    assert found.status == "ok" and str(home / "dev") in found.text and "README" in found.text
+
+
+def test_a_projects_folder_her_user_cannot_read_names_your_share_command(home: Path) -> None:
+    a_repository(home)
+    probe = FakeProbe(home)
+    probe.own = True
+    (home / "dev").chmod(0)
+    try:
+        findings = run(projects_config(home), probe)
+    finally:
+        (home / "dev").chmod(0o755)
+    found = by_part(findings)["Projects"]
+    assert found.status == "fail" and exit_code(findings) == 1
+    assert found.fix.endswith(f"scripts/share-projects.sh {home / 'dev'}") and "no sudo" in found.fix
+
+
+@pytest.mark.parametrize(
+    ("access", "own", "status", "word"),
+    [
+        (("missing", 0, None, 0), True, "untested", "no folder"),
+        (("open", 2, None, 0), True, "untested", "nothing to check"),
+        (("open", 2, None, 2), True, "fail", "cannot be read"),
+        (("open", 3, "alpha", 1), True, "warn", "cannot be read"),
+        (("open", 3, "alpha", 0), True, "ok", "3 project(s)"),
+        (("closed", 0, None, 0), False, "warn", "cannot be read"),
+    ],
+)
+def test_the_projects_line(
+    home: Path, access: tuple[str, int, str | None, int], own: bool, status: str, word: str
+) -> None:
+    from local_assistant.projects import Access
+
+    probe = FakeProbe(home)
+    probe.own = own
+    probe.projects = lambda cfg: Access(*access)  # type: ignore[method-assign]
+    found = by_part(run(projects_config(home), probe))["Projects"]
+    assert found.status == status and word in found.text, found
+    if status in ("fail", "warn") and own:
+        assert "scripts/share-projects.sh" in found.fix
+    if not own:
+        assert "share-projects" not in found.fix  # she runs as you: nothing to share
+
+
+def test_the_always_on_line_reads_the_service_file_under_the_root_it_checks(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Never the live /Library/LaunchDaemons from a test: the service file is looked for under ESTIA_ROOT."""
+    root = tmp_path / "root"
+    (root / "Library/LaunchDaemons").mkdir(parents=True)
+    monkeypatch.setenv("ESTIA_ROOT", str(root))
+    always_on = by_part(run(write_config(home, MINIMAL), FakeProbe(home)))["Always on"]
+    assert always_on.status == "warn"
+    (root / "Library/LaunchDaemons/com.local-assistant.bridge.plist").write_bytes(b"x")
+    always_on = by_part(run(write_config(home, MINIMAL), FakeProbe(home)))["Always on"]
+    assert always_on.status == "ok"

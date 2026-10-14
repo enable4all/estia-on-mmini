@@ -18,10 +18,20 @@ import pytest
 
 from local_assistant import prompts
 from local_assistant.call_audio import FRAME_BYTES, RATE, rms
-from local_assistant.calls import CallManager, CallSettings, Turn, ends_with_goodbye, is_wrap_up, wants_hang_up
+from local_assistant.calls import (
+    CallManager,
+    CallSettings,
+    Turn,
+    ends_with_goodbye,
+    is_own_voice,
+    is_wrap_up,
+    played_part,
+    wants_hang_up,
+)
 from local_assistant.config import DEFAULT_NAME
 from local_assistant.voice import Transcript, VoiceUnavailableError
 from tests.conftest import ME, STRANGER
+from tests.fakes.fake_voice import speech_probability
 from tests.test_call_audio import typing
 
 CALL = -7  # signal-cli's call ids are signed
@@ -39,11 +49,11 @@ def noise(seconds: float, level: int = 20) -> bytes:
     return array.array("h", (rnd.randint(-level, level) for _ in range(int(RATE * seconds)))).tobytes()
 
 
-def speech(seconds: float) -> bytes:
+def speech(seconds: float, level: int = 3000) -> bytes:
     out = bytearray()
     syllable = 0
     while len(out) < 2 * RATE * seconds:
-        out += tone(0.15, hz=200.0 + 37 * syllable) + noise(0.05)
+        out += tone(0.15, level, hz=200.0 + 37 * syllable) + noise(0.05)
         syllable += 1
     return bytes(out[: int(2 * RATE * seconds)])
 
@@ -62,6 +72,8 @@ class FakeVoice:
     def __init__(self, transcripts: list[str], ready: bool = True) -> None:
         self.transcripts = transcripts
         self.ready = ready
+        self.detector: str | None = None  # the speech detector's state in the health; None: an older service
+        self.chunks: list[tuple[str, int]] = []  # (stream, bytes) of each chunk the detector was asked about
         self.spoken: list[str] = []
         self.languages: list[str | None] = []  # the language of each spoken text
         self.heard_in: list[str | None] = []  # the language of each transcription
@@ -85,7 +97,12 @@ class FakeVoice:
         return wav24(min(0.03 * len(text), 8.0))
 
     async def health(self) -> dict[str, str] | None:
-        return {"stt": "ready", "tts": "ready"} if self.ready else {"stt": "loading", "tts": "loading"}
+        health = {"stt": "ready", "tts": "ready"} if self.ready else {"stt": "loading", "tts": "loading"}
+        return health | ({"vad": self.detector} if self.detector is not None else {})
+
+    async def vad(self, chunk: bytes, *, stream: str) -> float | str:
+        self.chunks.append((stream, len(chunk)))
+        return speech_probability(chunk) if self.detector == "ready" else "http"
 
 
 class FakeHost:
@@ -98,19 +115,24 @@ class FakeHost:
         self.summaries: list[tuple[list[str], int]] = []
         self.interruptions: list[tuple[int, str]] = []
         self.started: list[str] = []
+        self.started_practice: list[bool] = []  # per call: whether it started as a practice call
         self.ended = 0
         self.dropped_waiting = 0
         self.cancelled_turns = 0
         self.gate: asyncio.Event | None = None  # when set, an answer also waits for it
+        self.practice_ended: list[str] = []
+        self.practice_turns: list[bool] = []  # per turn: whether the call said it is a practice call
 
-    def call_started(self, aci: str) -> None:
+    def call_started(self, aci: str, *, practice: bool = False) -> None:
         self.started.append(aci)
+        self.started_practice.append(practice)
 
     def call_ended(self) -> None:
         self.ended += 1
 
-    async def call_turn(self, aci: str, text: str, on_tools: Callable[[], None]) -> Turn:
+    async def call_turn(self, aci: str, text: str, on_tools: Callable[[], None], *, practice: bool = False) -> Turn:
         self.turns.append(text)
+        self.practice_turns.append(practice)
         if self.use_tools:
             on_tools()
         try:
@@ -133,6 +155,10 @@ class FakeHost:
 
     async def call_summary(self, aci: str, lines: list[str], minutes: int) -> None:
         self.summaries.append((lines, minutes))
+
+    async def practice_call_ended(self, aci: str) -> None:
+        self.practice_ended.append(aci)
+        self.notes.append("(practice ended)")  # in order with the notes
 
 
 class FakeHelper:
@@ -270,6 +296,10 @@ class Harness:
         rng: random.Random | None = None,
         clock: Callable[[], float] = time.monotonic,
         name: str = NAME,
+        practice: Callable[[str], str | None] | None = None,
+        locked: Callable[[], bool] = lambda: False,
+        missed: Callable[[str, bool], None] | None = None,
+        reached: Callable[[str], None] | None = None,
         **settings: Any,
     ) -> None:
         self.folder = Path(tempfile.mkdtemp(prefix="c", dir="/tmp"))  # short: socket paths are at most 104 bytes
@@ -301,8 +331,13 @@ class Harness:
             rng=rng,
             clock=clock,
             name=name,
+            practice=practice or (lambda aci: None),
+            locked=locked,
+            missed=missed or (lambda aci, promised: None),
+            reached=reached or (lambda aci: None),
         )
-        self.greeting = GREETING if language == "en" else prompts.spoken(language, name=name).greeting
+        spoken_in = (practice(ME) if practice is not None else None) or language
+        self.greeting = GREETING if spoken_in == "en" else prompts.spoken(spoken_in, name=name).greeting
         self.task: asyncio.Task[None] | None = None
 
     async def __aenter__(self) -> "Harness":
@@ -370,6 +405,22 @@ async def test_a_strangers_call_is_never_answered() -> None:
         assert h.signal.accepted == [] and h.signal.hung_up == [] and h.host.started == []
 
 
+async def test_while_locked_the_owners_call_is_ignored_and_none_is_placed() -> None:
+    """/lock: a call from the allowed account rings out (ignored, never rejected: a reject is a reply), and no reminder
+    call is placed; after /unlock calls work again."""
+    locked = [True]
+    async with Harness(locked=lambda: locked[0]) as h:
+        h.signal.ring()
+        await asyncio.sleep(0.2)
+        assert h.signal.accepted == [] and h.signal.hung_up == [] and h.host.started == [] and h.host.notes == []
+        assert await h.manager.can_place(ME) == "locked"
+        assert await h.manager.place(ME, wake=True, time="7:00", text="x") == "call_failed"
+        assert h.signal.started == []
+        locked[0] = False
+        assert await h.manager.can_place(ME) == ""
+        await h.connected()
+
+
 async def test_a_second_call_during_a_call_is_ignored() -> None:
     async with Harness() as h:
         await h.connected()
@@ -385,6 +436,75 @@ async def test_without_the_voice_service_the_call_rings_out_with_one_note() -> N
         await h.until(lambda: bool(h.host.notes))
         await asyncio.sleep(0.2)
         assert h.signal.accepted == [] and h.host.notes == [prompts.CALL_NOT_READY]  # once, not per ring
+
+
+def test_the_not_ready_note_says_why_and_that_she_texts_when_ready() -> None:
+    assert prompts.CALL_NOT_READY == (
+        "I can't take calls yet: my voice is still loading (up to 15 minutes after an install, a move or a macOS "
+        "update). I'll text you when it's ready."
+    )
+
+
+async def test_every_ring_while_the_voice_is_not_ready_is_a_missed_call() -> None:
+    """The voice-ready note keeps the promise: each ring while not ready counts, also one whose note is held back;
+    only a ring that got the note (its "I'll text you") is a promise."""
+    missed: list[tuple[str, bool]] = []
+    async with Harness(ready=False, missed=lambda aci, promised: missed.append((aci, promised))) as h:
+        h.signal.ring()
+        await h.until(lambda: bool(h.host.notes))
+        h.signal.ring(call_id=8)
+        await h.until(lambda: len(missed) == 2)
+    assert missed == [(ME, True), (ME, False)]
+
+
+async def test_a_ring_that_is_answered_or_ignored_is_no_missed_call() -> None:
+    missed: list[tuple[str, bool]] = []
+    async with Harness(missed=lambda aci, promised: missed.append((aci, promised))) as h:
+        await h.connected()
+    async with Harness(
+        ready=False, missed=lambda aci, promised: missed.append((aci, promised)), locked=lambda: True
+    ) as h:
+        h.signal.ring()
+        await asyncio.sleep(0.2)
+    assert missed == []
+
+
+async def test_a_call_counts_as_reached_only_once_connected() -> None:
+    """The voice-ready note is dropped only for a caller who heard her: never for one who hung up while it rang."""
+    reached: list[str] = []
+    async with Harness(answer_after_s=0.4, reached=reached.append) as h:
+        h.signal.ring()
+        await asyncio.sleep(0.1)
+        h.signal.remote_hangup()
+        await asyncio.sleep(0.6)
+        assert reached == [] and h.host.started == [ME]
+    async with Harness(reached=reached.append) as h:
+        await h.connected()
+        assert reached == [ME]
+
+
+async def test_a_placed_call_counts_as_reached_only_when_picked_up() -> None:
+    reached: list[str] = []
+    async with Harness(reached=reached.append) as h:
+        task = await placing(h)
+        await asyncio.sleep(0.2)
+        assert reached == []
+        await h.signal.pick_up()
+        assert await task == "answered"
+        assert reached == [ME]
+
+
+async def test_every_ring_while_the_voice_is_not_ready_leaves_a_log_line(caplog: pytest.LogCaptureFixture) -> None:
+    """The note is held back for 10 minutes; the log is not (live 13 Oct: a second call left no trace)."""
+    caplog.set_level(logging.INFO, logger="local_assistant.calls")
+    async with Harness(ready=False) as h:
+        h.signal.ring()
+        await h.until(lambda: bool(h.host.notes))
+        h.signal.ring(call_id=8)
+        await asyncio.sleep(0.2)
+    lines = [record.getMessage() for record in caplog.records if "not ready" in record.getMessage()]
+    assert len(lines) == 2, lines
+    assert "note sent" in lines[0] and "note held back" in lines[1]
 
 
 async def test_a_sound_without_words_gets_no_sorry_he_just_listens() -> None:
@@ -1420,3 +1540,353 @@ async def test_a_minute_of_silence_after_the_wake_line_ends_the_call_with_a_good
 async def test_the_status_line_shows_the_next_call() -> None:
     async with Harness() as h:
         assert h.manager.status_line(next_call="Tue 13 Oct 07:00") == "Calls: ready · next call Tue 13 Oct 07:00"
+
+
+WEATHER = "The weather in Amsterdam stays sunny and warm until Friday."
+
+
+@pytest.mark.parametrize(
+    ("heard", "played", "own"),
+    [
+        # her echo: her sentence, or a long part of it, in her order
+        (WEATHER, [WEATHER], True),
+        ("weather in amsterdam stays sunny", [WEATHER], True),
+        ("um, the weather in Amsterdam stays sunny", [WEATHER], True),  # fillers left out
+        ("the weather in amsterdam stays sunny and warm till friday", [WEATHER], True),  # one word heard otherwise
+        ("the train leaves from platform four", ["The train leaves from platform four.", "It is on time."], True),
+        ("Don’t worry, the train is running late tonight", ["Don't worry, the train is running late tonight."], True),
+        ("esta bien gracias por tu paciencia hoy", ["Está bien, gracias por tu paciencia hoy."], True),  # accents
+        ("le train part à neuf heures ce soir", ["Le train part à neuf heures ce soir."], True),
+        ("Привет как дела у тебя сегодня", ["Привет, как дела у тебя сегодня?"], True),
+        ("今日は晴れです", ["今日は晴れですね。"], True),  # Japanese, without spaces: by characters
+        # the caller (review of 13 Oct): a few of her words are no echo
+        ("the dentist at three", ["You see the dentist at three tomorrow."], False),  # two real words of hers
+        ("turn it off", ["Should I turn the heater off?"], False),
+        ("no, not Amsterdam", ["We land at nine tonight in Amsterdam."], False),
+        ("wait, it is at five", ["The meeting is at five, it is in the big room."], False),
+        ("wait, the meeting is at five in the big room", ["The meeting is at five in the big room."], False),
+        ("no the weather in amsterdam stays sunny", [WEATHER], False),  # a no she did not say
+        ("yes the weather in amsterdam stays sunny", [WEATHER], False),
+        ("no, está bien gracias por tu paciencia", ["Está bien, gracias por tu paciencia hoy."], False),
+        ("non le train part à neuf heures", ["Le train part à neuf heures ce soir."], False),
+        ("nein der Zug fährt um neun Uhr ab", ["Der Zug fährt um neun Uhr ab."], False),
+        ("sunny Amsterdam weather", [WEATHER], False),  # her words, not in her order
+        ("weather in amsterdam", [WEATHER], False),  # two words of hers
+        ("the weather in amsterdam stays sunny but what about rome and paris next week", [WEATHER], False),  # half
+        ("what about rain on friday afternoon", ["Tomorrow looks dry,"], False),  # words she has not said yet
+        ("Answer.", [WEATHER], False),
+        ("", [WEATHER], False),
+        ("はい", ["はい、今日は晴れです。"], False),  # one word of two characters
+        ("明日の予定を教えて", ["はい、今日は晴れです。"], False),
+        ("待って、今日は晴れです", ["今日は晴れですね。"], False),  # a stop word she did not say
+        ("今日は晴れです", ["今日は"], False),  # not said yet
+    ],
+)
+def test_her_own_voice_is_a_long_part_of_what_she_played(heard: str, played: list[str], own: bool) -> None:
+    assert is_own_voice(heard, played) is own
+
+
+@pytest.mark.parametrize(
+    ("hers", "fraction", "played"),
+    [
+        (("Ten past four.", "The weather in Amsterdam is sunny today."), 0.5, ("Ten past four.", "The weather in")),
+        (("The weather is fine.",), 11 / 20, ("The weather",)),  # cut at a word's end: the word is said
+        (("The weather is fine.",), 1.0, ("The weather is fine.",)),
+        (("今日は晴れですね。",), 0.5, ("今日は晴",)),  # Japanese by characters
+        ((), 0.5, ()),
+    ],
+)
+def test_what_she_played_is_the_sentence_before_and_this_one_up_to_the_stop(
+    hers: tuple[str, ...], fraction: float, played: tuple[str, ...]
+) -> None:
+    assert played_part(hers, fraction) == played
+
+
+async def test_her_own_voice_over_her_answer_only_pauses_her(caplog: pytest.LogCaptureFixture) -> None:
+    # a loud speaker next to the caller's microphone (13 Oct): her own words came back and stopped her, and she took
+    # them for the caller's turn
+    caplog.set_level(logging.INFO, logger="local_assistant.calls")
+    answer = f"{WEATHER} " * 6
+    async with Harness(["tell me more", "weather in amsterdam stays sunny"], [Turn(answer, reply_id=5)]) as h:
+        await h.connected()
+        await h.quiet_after(GREETING)
+        greeting = h.helper.her_frames()
+        h.helper.caller_says_when(lambda: h.helper.her_frames() > greeting + 250, speech(1.0))  # her echo
+        h.helper.caller_says(speech(1.0))
+        await h.until(lambda: h.voice.heard == 2)  # she stopped and listened to her own voice
+        await h.until(lambda: h.manager.said.count(WEATHER) == 6)  # then carried on to the end
+        assert h.host.interruptions == [] and h.host.turns == ["tell me more"]
+        h.signal.remote_hangup()
+        await h.until(lambda: h.host.ended == 1)
+    lines = [record.getMessage() for record in caplog.records]
+    assert "calls: her own voice heard; carrying on" in lines
+    assert any(line.startswith("calls: barge-in loudness") and "her own voice 1" in line for line in lines)
+
+
+async def test_her_words_she_has_not_said_yet_are_the_callers() -> None:
+    # the caller asks about the end of her sentence while she is at its start: no echo of hers
+    sentence = "Tomorrow looks dry, but rain comes back on Friday afternoon, and it stays wet over the weekend."
+    async with Harness(
+        ["tell me more", "what about rain on friday afternoon"], [Turn(sentence, reply_id=5), Turn("Okay.")]
+    ) as h:
+        await h.connected()
+        await h.quiet_after(GREETING)
+        greeting = h.helper.her_frames()
+        h.helper.caller_says_when(lambda: h.helper.her_frames() > greeting + 30, speech(1.0))
+        h.helper.caller_says(speech(1.0))
+        await h.quiet_after("Okay.")
+        assert h.host.turns == ["tell me more", f"{prompts.CUTTING_IN} what about rain on friday afternoon"]
+
+
+async def test_after_her_own_voice_a_caller_as_loud_as_it_no_longer_stops_her() -> None:
+    answer = f"{WEATHER} " * 8
+    async with Harness(["tell me more", "weather in amsterdam stays sunny"], [Turn(answer, reply_id=5)]) as h:
+        await h.connected()
+        await h.quiet_after(GREETING)
+        greeting = h.helper.her_frames()
+        h.helper.caller_says_when(lambda: h.helper.her_frames() > greeting + 250, speech(1.0))  # her echo
+        h.helper.caller_says_when(lambda: h.voice.heard == 2, noise(0.5) + speech(1.0))  # as loud, after it
+        h.helper.caller_says(speech(1.0))
+        await h.until(lambda: h.manager.said.count(WEATHER) == 8)
+        assert h.voice.heard == 2  # the second time it did not stop her: no third transcription
+
+
+async def test_her_own_voice_never_reaches_gemma_even_after_three_false_alarms() -> None:
+    # after MAX_FALSE_BARGE false alarms in one sentence the next stop is taken as the caller's: her own words never are
+    answer = f"{WEATHER} " * 30  # her sentences, and an echo that stops her four times in a row
+    echo = ["weather in amsterdam stays sunny"] * 4
+    async with Harness(["tell me more", *echo, "what time is it"], [Turn(answer, reply_id=5), Turn("Four.")]) as h:
+        await h.connected()
+        await h.quiet_after(GREETING)
+
+        greeting = h.helper.her_frames()
+
+        def heard(times: int) -> Callable[[], bool]:
+            return lambda: h.voice.heard == times
+
+        h.helper.caller_says_when(lambda: h.helper.her_frames() > greeting + 250, speech(1.0))  # in her 2nd sentence
+        for times in range(2, 5):  # louder than the level raised after the first (raised once, never again)
+            h.helper.caller_says_when(heard(times), noise(0.4) + speech(1.0, level=4800))
+        h.helper.caller_says(speech(1.0))  # "tell me more"
+        await h.until(lambda: h.voice.heard == 5)
+        h.helper.caller_says(noise(0.5) + speech(1.0))
+        await h.quiet_after("Four.")
+        assert h.host.turns == ["tell me more", "what time is it"]
+
+
+async def test_speech_rule_road_noise_over_her_answer_does_not_stop_her(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger="local_assistant.calls")
+    answer = "This is a long answer. " * 6
+    async with Harness(["tell me more"], [Turn(answer, reply_id=5)], barge="speech") as h:
+        h.voice.detector = "ready"
+        await h.connected()
+        await h.quiet_after(GREETING)
+        greeting = h.helper.her_frames()
+        h.helper.caller_says_when(lambda: h.helper.her_frames() > greeting + 100, noise(3.0, 3000))  # the road
+        h.helper.caller_says(speech(1.0))
+        await h.until(lambda: h.manager.said.count("This is a long answer.") == 6)
+        assert h.voice.heard == 1 and h.host.interruptions == []  # never stopped: nothing to transcribe
+        h.signal.remote_hangup()
+        await h.until(lambda: h.host.ended == 1)
+    streams = {stream for stream, _ in h.voice.chunks}
+    assert len(streams) == 1 and re.fullmatch(r"[0-9a-f]{32}", streams.pop())  # one detector state for the call
+    assert {size for _, size in h.voice.chunks} == {8192}
+    lines = [record.getMessage() for record in caplog.records]
+    shadow = (
+        r"calls: barge-in speech: speech stopped her 0 times, would have 0; loudness stopped her 0 times, would have"
+        r" [1-9]\d*; her own voice 0; detector \d+ chunks, slowest \d+ ms, 0 failed"
+    )
+    assert any(re.fullmatch(shadow, line) for line in lines)  # once in each sentence the road was under
+
+
+async def test_speech_rule_a_caller_talking_over_her_still_stops_her() -> None:
+    long_answer = "This is a long answer. " * 8
+    async with Harness(
+        ["tell me more", "wait, what about tomorrow"], [Turn(long_answer, reply_id=5), Turn("Okay.")], barge="speech"
+    ) as h:
+        h.voice.detector = "ready"
+        await h.connected()
+        await h.quiet_after(GREETING)
+        greeting = h.helper.her_frames()
+        h.helper.caller_says_when(lambda: h.helper.her_frames() > greeting + 150, speech(1.2))
+        h.helper.caller_says(speech(1.0))
+        await h.quiet_after("Okay.")
+        assert h.host.turns == ["tell me more", f"{prompts.CUTTING_IN} wait, what about tomorrow"]
+
+
+@pytest.mark.parametrize(
+    ("detector", "state"), [(None, "old voice service"), ("loading", "loading"), ("unavailable", "unavailable")]
+)
+async def test_speech_rule_without_a_detector_loudness_decides_the_call(
+    caplog: pytest.LogCaptureFixture, detector: str | None, state: str
+) -> None:
+    caplog.set_level(logging.INFO, logger="local_assistant.calls")
+    async with Harness(barge="speech") as h:
+        h.voice.detector = detector
+        await h.connected()
+        h.signal.remote_hangup()
+        await h.until(lambda: h.host.ended == 1)
+    assert h.voice.chunks == []  # never asked
+    lines = [record.getMessage() for record in caplog.records]
+    assert f"calls: speech detector {state}; loudness decides this call" in lines
+    end = (
+        "calls: barge-in speech (loudness: no speech detector): loudness stopped her 0 times, would have 0;"
+        " her own voice 0"
+    )
+    assert end in lines
+
+
+async def test_speech_rule_a_stop_without_words_counts_what_loudness_did_beside_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # speech stopped her, loudness fired first in the same clip, and the words were none: a false stop both made
+    caplog.set_level(logging.INFO, logger="local_assistant.calls")
+    answer = f"{WEATHER} " * 4
+    async with Harness(["tell me more", ""], [Turn(answer, reply_id=5)], barge="speech") as h:
+        h.voice.detector = "ready"
+        await h.connected()
+        await h.quiet_after(GREETING)
+        greeting = h.helper.her_frames()
+        h.helper.caller_says_when(lambda: h.helper.her_frames() > greeting + 250, speech(1.0))  # no words in it
+        h.helper.caller_says(speech(1.0))
+        await h.until(lambda: h.manager.said.count(WEATHER) == 4)
+        assert h.voice.heard == 2 and h.host.turns == ["tell me more"]
+        h.signal.remote_hangup()
+        await h.until(lambda: h.host.ended == 1)
+    end = [record.getMessage() for record in caplog.records if record.getMessage().startswith("calls: barge-in")]
+    assert len(end) == 1
+    assert "speech stopped her 1 time, would have 0; loudness stopped her 0 times, would have 1;" in end[0]
+
+
+async def test_a_call_that_falls_back_to_loudness_midway_counts_each_rule(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger="local_assistant.calls")
+    caplog.set_level(logging.INFO, logger="local_assistant.call_audio")
+    long_answer = f"{WEATHER} " * 8
+    async with Harness(
+        ["tell me more", "wait, what about tomorrow", "and the day after"],
+        [Turn(long_answer, reply_id=5), Turn(long_answer, reply_id=6), Turn("Okay.")],
+        barge="speech",
+    ) as h:
+        h.voice.detector = "ready"
+        await h.connected()
+        await h.quiet_after(GREETING)
+        greeting = h.helper.her_frames()
+        h.helper.caller_says_when(lambda: h.helper.her_frames() > greeting + 150, speech(1.2))  # speech stops her
+        h.helper.caller_says(speech(1.0))
+        await h.until(lambda: h.voice.heard == 2)
+        h.voice.detector = "unavailable"  # from here every chunk fails: loudness after the third
+        second = h.helper.her_frames()
+        h.helper.caller_says_when(lambda: h.helper.her_frames() > second + 150, speech(1.2))  # loudness stops her
+        await h.quiet_after("Okay.")
+        assert h.host.turns == [
+            "tell me more",
+            f"{prompts.CUTTING_IN} wait, what about tomorrow",
+            f"{prompts.CUTTING_IN} and the day after",
+        ]
+        h.signal.remote_hangup()
+        await h.until(lambda: h.host.ended == 1)
+    lines = [record.getMessage() for record in caplog.records]
+    assert "calls: the speech detector failed 3 times in a row; loudness for the rest of the call" in lines
+    end = (
+        r"calls: barge-in speech \(loudness after 3 failed answers in a row\): speech stopped her 1 time, would have 0;"
+        r" loudness stopped her 1 time, would have 0; her own voice 0; detector \d+ chunks, slowest \d+ ms, 3 failed"
+        r" \(http 3\)"
+    )
+    assert any(re.fullmatch(end, line) for line in lines), [line for line in lines if "barge-in" in line]
+
+
+async def test_loudness_rule_measures_speech_beside_it_when_the_service_has_a_detector() -> None:
+    async with Harness() as h:  # barge = "loudness", the default
+        h.voice.detector = "ready"
+        await h.connected()
+        await h.quiet_after(GREETING)
+        assert h.voice.chunks  # the caller's audio under the greeting went to the detector: speech is the shadow
+
+
+async def test_the_status_line_shows_the_speech_detector_when_speech_stops_her() -> None:
+    async with Harness(barge="speech") as h:
+        h.voice.detector = "ready"
+        assert await h.manager.detector() == "ready"
+        assert h.manager.status_line(detector="ready") == "Calls: ready · speech detector: ready"
+        h.voice.detector = None
+        assert await h.manager.detector() == "old voice service"
+    async with Harness() as h:
+        assert await h.manager.detector() == ""  # loudness: nothing to show
+
+
+# /babble: a call during practice is a practice call
+
+
+async def test_a_practice_call_is_in_the_practised_language_and_ends_practice_instead_of_a_summary() -> None:
+    said = ["Ik woon in Utrecht.", "Ik werk bij een bank.", "Ik heb twee katten."]
+    turns = [Turn("Waar werk je?"), Turn("Heb je huisdieren?"), Turn("Wat leuk!")]
+    async with Harness(said, turns, practice=lambda aci: "nl" if aci == ME else None) as h:
+        await h.connected()
+        greeting = prompts.spoken("nl", name=NAME).greeting
+        assert greeting in h.voice.spoken and h.voice.languages[0] == "nl"
+        await h.quiet_after(greeting)
+        for answer in ("Waar werk je?", "Heb je huisdieren?", "Wat leuk!"):
+            h.helper.caller_says(speech(1.0))
+            await h.quiet_after(answer)
+        assert set(h.voice.heard_in) == {"nl"} and set(h.voice.languages) == {"nl"}
+        assert h.host.practice_turns == [True, True, True]  # the app answers them as practice turns
+        assert h.host.started_practice == [True]  # and its start says so (no glance of the day for practice)
+        h.signal.remote_hangup()
+        await h.until(lambda: bool(h.host.practice_ended))
+        await asyncio.sleep(0.1)
+        assert h.host.practice_ended == [ME] and h.host.summaries == []  # the recap replaces the summary
+
+
+async def test_a_practice_call_without_a_turn_leaves_practice_running() -> None:
+    async with Harness(practice=lambda aci: "de") as h:
+        await h.connected()
+        await h.quiet_after(prompts.spoken("de", name=NAME).greeting)
+        h.signal.remote_hangup()
+        await h.until(lambda: h.host.ended == 1)
+        await asyncio.sleep(0.1)
+        assert h.host.practice_ended == [] and h.host.summaries == []
+
+
+async def test_a_practice_call_ends_practice_before_its_notes() -> None:
+    async with Harness(["Ik ben moe."], delay=30.0, practice=lambda aci: "nl") as h:
+        await h.connected()
+        await h.quiet_after(prompts.spoken("nl", name=NAME).greeting)
+        h.helper.caller_says(speech(0.8))
+        await h.until(lambda: h.host.turns == ["Ik ben moe."])
+        h.signal.remote_hangup()
+        await h.until(lambda: len(h.host.notes) == 2)
+        assert h.host.notes == ["(practice ended)", prompts.CALL_UNFINISHED]
+
+
+async def test_without_practice_a_call_keeps_its_language_and_summary() -> None:
+    async with Harness(
+        ["first idea", "second idea"], [Turn("Nice."), Turn("Good one.")], practice=lambda aci: None
+    ) as h:
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(1.0))
+        await h.quiet_after("Nice.")
+        h.helper.caller_says(speech(1.0))
+        await h.quiet_after("Good one.")
+        h.signal.remote_hangup()
+        await h.until(lambda: bool(h.host.summaries))
+        assert h.host.practice_ended == [] and set(h.voice.heard_in) == {"en"}
+
+
+async def test_a_call_she_places_during_practice_is_an_ordinary_call() -> None:
+    # a wake-up call or a reminder call: the user's own language, ordinary turns (tools, reminders), its summary, and
+    # practice keeps running (only a call the user makes during practice is a practice call)
+    said = ["ok, remind me again in 10 minutes", "thanks"]
+    async with Harness(said, [Turn("Done."), Turn("Bye!")], practice=lambda aci: "nl") as h:
+        task = await placing(h)
+        await h.signal.pick_up()
+        assert await task == "answered"
+        await h.quiet_after("Good morning! It's 7:00. wake up")  # English, as /language says, not Dutch
+        for answer in ("Done.", "Bye!"):
+            h.helper.caller_says(speech(1.0))
+            await h.quiet_after(answer)
+        assert h.host.practice_turns == [False, False] and set(h.voice.heard_in) == {"en"}
+        assert h.host.started_practice == [False]
+        h.signal.remote_hangup()
+        await h.until(lambda: bool(h.host.summaries))
+        assert h.host.practice_ended == []

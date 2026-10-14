@@ -371,3 +371,26 @@ async def test_learning_keeps_the_users_own_facts_and_counts_only_real_changes(s
     ]
     assert store.get_state(UNANNOUNCED_KEY) == "1"
     assert store.get_state(LAST_LEARNED_KEY) == str(later)
+
+
+def practised(store: Store, words: str, ts: int) -> int:
+    """A practice turn (/babble): stored in the chat, then moved into its own practice conversation."""
+    practice = store.start_practice_conversation()
+    message_id = store.add_incoming(store.current_conversation().id, ME, ts, "text", words, defer_seq=True)
+    assert message_id is not None
+    store.assign_seq(message_id, practice.id)
+    return message_id
+
+
+async def test_idle_learning_never_reads_a_practice_turn(store: Store) -> None:
+    practised(store, "Ik ben een piloot van beroep.", T0)  # a roleplay: never a fact about the user
+    gemma = FakeGemma()
+    _, _, profiler = make(store, gemma)
+    assert not profiler.has_work()
+    assert await profiler.learn() == 0 and gemma.calls == []
+    chat = user(store, "I work at Acme.", T0 + 1_000)
+    gemma.add(ops(op("add", text_="Work: The user works at Acme.", source_message_id=chat)))
+    assert profiler.has_work()
+    assert await profiler.learn() == 1
+    prompt = gemma.calls[0]["messages"][1]["content"]
+    assert "I work at Acme." in prompt and "piloot" not in prompt

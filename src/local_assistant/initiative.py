@@ -11,14 +11,15 @@ the rules and counts as the announcement; turned on in the config, the announcem
 welcome tells instead). Off, nothing runs but the housekeeping: no calendar read, no Gemma call, no message.
 
 The gate, in order; the first failure is the reason, a fixed word: on, and the kind on (`off`), not paused by /quiet (`quiet`),
-not in quiet hours (`quiet_hours`), under the day's cap for all kinds together (`day_cap`), under the kind's weekly cap
-(`week_cap`), not busy: no answer, nothing queued, no call and no user message in the last 15 minutes (`busy`), one
-allowed account for the look back and the improvised note (`several_users`); then for Gemma's kinds her answer
-(`gemma_down`) and the checks of her text (`check_failed`). An item that waits keeps its slot and is looked at again
-each minute; one that is not sent is logged once, as skipped with its reason. When several are due: calendar, then
-follow-up, then look back, then the improvised note (the announcement before all); a kind that loses keeps its own
-rule (a follow-up moves to the next day, a look back is skipped that week, an improvised note moves to another day,
-a calendar note is dropped).
+not locked by /lock (`locked`: waits like /quiet), not in quiet hours (`quiet_hours`), under the day's cap for all kinds
+together (`day_cap`), under the kind's weekly cap (`week_cap`), not busy: no answer, nothing queued, no call and no user
+message in the last 15 minutes (`busy`), no language practice running (`practice`: her message would land in the
+roleplay), one allowed account for the look back and the improvised note (`several_users`); then for Gemma's kinds her
+answer (`gemma_down`) and the checks of her text (`check_failed`). An item that waits keeps its slot and is looked at
+again each minute; one that is not sent is logged once, as skipped with its reason. When several are due: calendar,
+then follow-up, then look back, then the improvised note (the announcement before all); a kind that loses keeps its own
+rule (a follow-up moves to the next day, a look back is skipped that week, an improvised note moves to another day, a
+calendar note is dropped).
 
 Gemma writes in a call of her own (no tools, no chat history, no outside text: only the user's own words, their profile
 facts from chat, and the moment), with her style below these rules; code checks the text (claims, secrets, links,
@@ -64,8 +65,8 @@ from local_assistant.config import (
 from local_assistant.context import ContextBuilder
 from local_assistant.fetcher import strip_control_tokens
 from local_assistant.followups import own_words, words
-from local_assistant.gemma import GemmaClient, GemmaError, OllamaGemma
-from local_assistant.language import CODES, ENGLISH, LANGUAGE_KEY
+from local_assistant.gemma import GemmaClient, GemmaError, ModelPin, OllamaGemma, PinnedGemma
+from local_assistant.language import CODES, ENGLISH, LANGUAGE_KEY, SECRET_WORDS, SUBSTRING_CODES
 from local_assistant.profile import Profile
 from local_assistant.reminders import iso
 from local_assistant.store import FollowUp, InitiativeKind, InitiativeOutcome, Store
@@ -105,14 +106,23 @@ LOOKBACK_KEY = "initiative:lookback_week"  # the ISO week whose look back went o
 EARLY_KEY = "initiative:early_day"  # the day whose early-start check is done
 PRIORITY: tuple[InitiativeKind, ...] = ("announce", "calendar", "early_start", "followup", "lookback", "improvise")
 NOTES: tuple[InitiativeKind, ...] = ("announce", "calendar", "early_start")  # code-written: notes, out of history
-WAITS = ("quiet_hours", "busy", "gemma_down", "quiet")  # an item waits for these while its slot lasts
+WAITS = (
+    "quiet_hours",
+    "busy",
+    "practice",
+    "gemma_down",
+    "quiet",
+    "locked",
+)  # an item waits for these while its slot lasts
 REASONS = (
     "off",
     "quiet",
+    "locked",
     "quiet_hours",
     "day_cap",
     "week_cap",
     "busy",
+    "practice",
     "several_users",
     "first_week",
     "unanswered",
@@ -140,11 +150,11 @@ _SOUTH: tuple[str, ...] = (  # zones in the southern hemisphere: the seasons tur
 # the checks of Gemma's text: English word lists, and reminder or call claims in the 11 languages (claims' precise set,
 # never an ordinary sentence); otherwise other languages rely on the rules and the Dutch eval run
 
-_URL = re.compile(
-    r"(?:https?://|www\.)\S+|\b(?:[a-z0-9-]+\.)+(?:com|net|org|io|ai|app|dev|info|biz|co|me|nl|de|uk|eu|gr|fr|es|it|be"
-    r"|pl|ru|jp|kr|pt|ly|link|xyz|site|online|shop)\b",
-    re.IGNORECASE,
-)
+_SCHEME = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
+# a name with a dot on any ending of two letters or more ("evil.ch/x", "пример.рф", "xn--…"): no list of endings;
+# "_" may sit on either side (markdown) and dots before it ("Wait...evil.ch"), only not a dot right after a letter
+_HOST = re.compile(r"(?<![^\W_])(?<![@-])(?<![^\W_]\.)((?:[^\W_][\w-]*\.)+(?:[^\W\d_]{2,}|xn--[\w-]+))(?![^\W_]|-)(/?)")
+_FULL_STOPS = str.maketrans({"。": ".", "．": ".", "｡": "."})  # IDNA reads them as a dot
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 _PHONE = re.compile(r"\+?\d(?:[\s().-]*\d){7,}")
 _IBAN = re.compile(r"\b[A-Z]{2}\d{2}(?:\s?[A-Z0-9]){10,30}\b")
@@ -157,16 +167,50 @@ _ACTIONS = re.compile(
 )
 _NEGATED = re.compile(r"\b(?:no|not|never|cannot|unable)\b|n't\b")
 _QUESTION = re.compile(r"[?？]+")
-_SECRETS = re.compile(
-    r"\b(?:passwords?|passcodes?|passphrases?|pins?|pin codes?|log-?ins?|credentials|bank (?:details|account|login"
-    r"|app|card)s?|account numbers?|card (?:numbers?|details)|credit cards?|debit cards?|cvv|cvc|iban|"
-    r"(?:verification|security|one-time|sms|login|access|confirmation) codes?|2fa|otp)\b"
-)
+
+
+def _secret_pattern() -> re.Pattern[str]:
+    """The words that ask for a code or a password, in the 11 languages (language.SECRET_WORDS), for casefolded text:
+    whole words ("*": any ending), Japanese and Korean inside the text."""
+    whole: list[str] = []
+    inside: list[str] = []
+    for code, listed in SECRET_WORDS.items():
+        for word in listed:
+            if code in SUBSTRING_CODES:
+                inside.append(r"\s*".join(re.escape(part.rstrip("*")) for part in word.casefold().split()))
+            else:  # "*" ends any word of the entry: "кредитн* карт*"
+                parts = [
+                    re.escape(part.rstrip("*")) + (r"\w*" if part.endswith("*") else "")
+                    for part in word.casefold().split()
+                ]
+                whole.append(r"\s+".join(parts))
+    whole.sort(key=len, reverse=True)
+    return re.compile(rf"(?<!\w)(?:{'|'.join(whole)})(?!\w)|{'|'.join(inside)}")
+
+
+_SECRETS = _secret_pattern()
 _SOURCES = re.compile(r"\b(?:e-?mails?|mails?|mailbox(?:es)?|inbox(?:es)?|calendars?)\b")
 _GUILT = re.compile(
     r"\bmiss(?:ed|ing)? you\b|\blonely\b|\bwhere have you been\b|\bhaven't heard from you\b|\bignor(?:e|ed|ing) me\b"
     r"|\byou (?:never|haven't|didn't) (?:write|written|wrote|reply|replied|answer|answered)\b|\bwhy didn't you\b"
 )
+
+
+def has_link(text: str) -> bool:
+    """A web address, with or without https:// or www.: a name with a dot on any ending of two letters or more
+    ("evil.ch", "t.co/x"). Abbreviations ("e.g.", "i.e.", "a.m.", "p.m.", "z.B.", "m.in.", "p.ej."), decimals and
+    times are none: an ending of one letter or of digits is no name, and a short one-letter-first name directly
+    followed by a dot and without a path is an abbreviation (a known gap: "x.co." at the end of a sentence)."""
+    text = text.translate(_FULL_STOPS)
+    if _SCHEME.search(text):
+        return True
+    for found in _HOST.finditer(text):
+        labels = found.group(1).split(".")
+        dotted = text[found.end(1) : found.end(1) + 1] == "."
+        short = len(labels[0]) == 1 and all(len(label) <= 2 and label.isalpha() for label in labels)
+        if not (dotted and short and not found.group(2)):
+            return True
+    return False
 
 
 def claims_an_action(text: str) -> bool:
@@ -194,7 +238,7 @@ def check_text(text: str, *, limit: int, allowed: frozenset[str] | set[str] = fr
         return "token"
     if _COMMAND.search(text):
         return "footer"
-    if _URL.search(text) or _EMAIL.search(text):
+    if has_link(text) or _EMAIL.search(text):
         return "link"
     if _PHONE.search(text) or _IBAN.search(text) or _DIGITS.search(text):
         return "number"
@@ -480,6 +524,8 @@ class Initiative:
         tz: ZoneInfo,
         acis: frozenset[str],
         busy: Callable[[], bool] = lambda: False,
+        practising: Callable[[], bool] = lambda: False,
+        locked: Callable[[], bool] = lambda: False,
         calendar: CalendarNotes | None = None,
         reminders: bool = True,
         wake_calls: bool = False,
@@ -494,6 +540,8 @@ class Initiative:
         self._tz = tz
         self._acis = tuple(sorted(acis))
         self._busy = busy  # an answer in progress, messages queued, or a call
+        self._practising = practising  # a /babble session runs: her message would land in the roleplay
+        self._locked = locked  # /lock: nothing is started (like /quiet, without a word to the user)
         self._calendar = calendar
         self._reminders = reminders  # what the announcement says is new
         self._wake_calls = wake_calls
@@ -596,7 +644,7 @@ class Initiative:
                 self._calendar.forget()  # turned on later: a new baseline, never what changed while off
             return
         if self._calendar is not None and self.settings.calendar:
-            if self.quiet:
+            if self.quiet or self._locked():
                 self._calendar.forget()
             elif not in_quiet_hours(local, self.settings.quiet_hours) and self._calendar.due_check(now):
                 await self._calendar.check(now)
@@ -768,6 +816,8 @@ class Initiative:
             return "off"
         if self.quiet:
             return "quiet"
+        if self._locked():
+            return "locked"
         if in_quiet_hours(local, settings.quiet_hours):
             return "quiet_hours"
         day = local.date().isoformat()
@@ -781,6 +831,8 @@ class Initiative:
         newest = self._store.last_incoming_ts()
         if self._busy() or (newest is not None and now - newest / 1000 < BUSY_S):
             return "busy"
+        if self._practising():
+            return "practice"
         if item.kind in ("lookback", "improvise") and len(self._acis) != 1:
             return "several_users"
         if item.kind == "improvise":
@@ -902,7 +954,7 @@ class Initiative:
 
     def _blocked(self, item: _Item, reason: str, detail: str, now: float, local: datetime) -> None:
         """Each kind keeps its own rule: wait while its slot lasts, move, or be skipped (logged once)."""
-        if reason not in ("quiet_hours", "busy") and detail != "waiting":
+        if reason not in ("quiet_hours", "busy", "practice") and detail != "waiting":
             log.info("initiative: %s not sent now (%s%s)", item.kind, reason, f": {detail}" if detail else "")
         if reason == "gemma_down" and detail != "waiting":
             self._retry_at[item.key] = now + GEMMA_RETRY_S
@@ -916,7 +968,7 @@ class Initiative:
             case "calendar":
                 if reason == "nothing_to_say":  # nothing holds any more: nothing to tell
                     return
-                if reason in ("day_cap", "quiet", "off", "check_failed"):
+                if reason in ("day_cap", "quiet", "locked", "off", "check_failed"):
                     if self._calendar is not None:
                         self._calendar.drop()
                     self._skip("calendar", reason, now, local)
@@ -1152,7 +1204,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     try:
         context = ContextBuilder(store, Profile(store), cfg.timezone, soul_path=cfg.soul_path, name=cfg.name)
-        gemma = OllamaGemma(cfg.ollama_base_url, cfg.model)
+        ollama = OllamaGemma(cfg.ollama_base_url, cfg.model)
+        gemma = PinnedGemma(
+            ollama, ModelPin(ollama.model_entry, cfg.model_digest)
+        )  # as the bridge: never a cloud model
+        if asyncio.run(gemma.pin.check()) is False:
+            print(f"initiative: no draft: {gemma.paused_reason()}", file=sys.stderr)
+            return 1
         text = asyncio.run(draft(cfg, args.draft, gemma, store=store, style=context.style(), now=time.time()))
     finally:
         store.close()

@@ -1,7 +1,8 @@
 """Voice notes: what audio a file holds, the local voice service (tools/voice), the spoken text, AAC.
 
 The voice service listens (WhisperKit) and speaks (Kokoro for English, Supertonic-3 for the other languages) on the
-Neural Engine; the bridge only talks HTTP to it on 127.0.0.1, in one language at a time. Spoken answers are cleaned
+Neural Engine, and on a call tells how likely the caller's last 256 ms are speech (Silero VAD through FluidAudio);
+the bridge only talks HTTP to it on 127.0.0.1, in one language at a time. Spoken answers are cleaned
 deterministically (spec 3.3) and converted to AAC in M4A with macOS's own `afconvert`, so Signal shows a real
 voice-note bubble.
 """
@@ -16,6 +17,7 @@ import re
 import urllib.error
 import urllib.request
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -28,6 +30,7 @@ CONVERT_TIMEOUT = 60.0
 MAX_RESPONSE = 50 * 1024 * 1024
 MIN_SPOKEN = 10
 REST = " The rest is in the text."
+VAD_TIMEOUT = 0.3  # a call never waits for the speech detector: a slower answer is no answer
 
 
 class VoiceError(Exception):
@@ -156,6 +159,25 @@ class VoiceClient:
             for key, value in data.items()
         }
 
+    async def vad(self, chunk: bytes, *, stream: str) -> float | str:
+        """How likely `chunk` (4096 samples of the caller's 16 kHz audio: 256 ms) is speech, from 0 to 1; the service
+        keeps one detector state per `stream` (one call). On a failure, its kind (call_audio.Barge counts them, metadata
+        only): "timeout" (no answer within VAD_TIMEOUT) or "http" (no service, an older one, a model still loading, a
+        refusal or an answer that is not a probability). Never raises into the call and never marks the voice as
+        failing (part_status)."""
+        try:
+            status, body = await self._request(
+                "POST", f"/vad?stream={stream}", chunk, "application/octet-stream", seconds=VAD_TIMEOUT
+            )
+            p = json.loads(body).get("p") if status == 200 else None
+        except VoiceUnavailableError as exc:
+            return "timeout" if _timed_out(exc) else "http"
+        except Exception:
+            return "http"
+        if isinstance(p, bool) or not isinstance(p, int | float) or not 0.0 <= p <= 1.0:
+            return "http"
+        return float(p)
+
     async def languages(self) -> tuple[str, ...] | None:
         """The languages the installed service has: () when it is older than the language feature, None when it does
         not answer."""
@@ -198,6 +220,30 @@ class VoiceClient:
                 raise VoiceUnavailableError(f"the voice service is not answering ({type(exc).__name__})") from exc
 
         return await asyncio.to_thread(call)
+
+
+DETECTOR_STATES = ("ready", "loading", "unavailable")  # what the voice service's health says as "vad"
+
+
+def detector_state(health: Mapping[str, object] | None) -> str:
+    """The speech detector's state from the voice service's health: "ready", "loading" (the model loads or downloads
+    at start), "unavailable" (its model did not download or failed its check: it needs downloading again), "old voice
+    service" (built before the detector) or "not ready" (no answer, or a state this bridge does not know). Anything
+    but "ready" means loudness stops her on calls meanwhile."""
+    if health is None:
+        return "not ready"
+    if "vad" not in health:
+        return "old voice service"
+    state = health["vad"]
+    return state if isinstance(state, str) and state in DETECTOR_STATES else "not ready"
+
+
+def _timed_out(exc: BaseException) -> bool:
+    """Whether a request failed for lack of an answer in time (a read or a connect that timed out)."""
+    cause = exc.__cause__
+    if isinstance(cause, urllib.error.URLError):
+        cause = cause.reason if isinstance(cause.reason, BaseException) else None
+    return isinstance(cause, TimeoutError)
 
 
 def _refusal(status: int) -> VoiceError:

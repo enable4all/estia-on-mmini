@@ -28,7 +28,7 @@ public enum Languages {
 }
 
 /// The `/health` answer: each engine's state, and the languages (the bridge reads their presence to know the
-/// installed service takes a language).
-public func healthBody(stt: String, tts: String) -> [String: Any] {
-    ["stt": stt, "tts": tts, "languages": Languages.all]
+/// installed service takes a language); `vad` is the speech detector's (its presence: the service has `/vad`).
+public func healthBody(stt: String, tts: String, vad: String) -> [String: Any] {
+    ["stt": stt, "tts": tts, "vad": vad, "languages": Languages.all]
 }

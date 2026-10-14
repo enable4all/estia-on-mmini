@@ -1,0 +1,572 @@
+{
+ "language": "fr",
+ "items": [
+  {
+   "id": "fr-01",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "J'ai acheté un nouvelle voiture le mois dernier.",
+   "error_type": "article/gender",
+   "gold_said": "un nouvelle voiture",
+   "gold_better": "une nouvelle voiture",
+   "gold_full": "J'ai acheté une nouvelle voiture le mois dernier.",
+   "why_en": "'Voiture' is feminine, so the article is 'une'."
+  },
+  {
+   "id": "fr-02",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Mon fils est dix ans.",
+   "error_type": "verb choice (age with avoir)",
+   "gold_said": "est dix ans",
+   "gold_better": "a dix ans",
+   "gold_full": "Mon fils a dix ans.",
+   "why_en": "French gives age with 'avoir': 'il a dix ans'."
+  },
+  {
+   "id": "fr-03",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Hier, j'ai allé au cinéma avec mes amis.",
+   "error_type": "auxiliary (être/avoir)",
+   "gold_said": "j'ai allé",
+   "gold_better": "je suis allé",
+   "gold_full": "Hier, je suis allé au cinéma avec mes amis.",
+   "why_en": "'Aller' forms the passé composé with 'être'."
+  },
+  {
+   "id": "fr-04",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Ma sœur est arrivé à Paris hier soir.",
+   "error_type": "past participle agreement (with être)",
+   "gold_said": "est arrivé",
+   "gold_better": "est arrivée",
+   "gold_full": "Ma sœur est arrivée à Paris hier soir.",
+   "why_en": "With 'être', the past participle agrees with the subject: 'arrivée' for a woman."
+  },
+  {
+   "id": "fr-05",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Je ne mange pas de la viande depuis deux ans.",
+   "error_type": "partitive after negation",
+   "gold_said": "pas de la viande",
+   "gold_better": "pas de viande",
+   "gold_full": "Je ne mange pas de viande depuis deux ans.",
+   "why_en": "After a negation, 'du/de la/des' become 'de'."
+  },
+  {
+   "id": "fr-06",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "J'ai habité à Lyon depuis cinq ans.",
+   "error_type": "tense (present with depuis)",
+   "gold_said": "J'ai habité",
+   "gold_better": "J'habite",
+   "gold_full": "J'habite à Lyon depuis cinq ans.",
+   "why_en": "For something that started in the past and still goes on, 'depuis' takes the present tense.",
+   "gold_also": [
+    {
+     "gold_said": "depuis",
+     "gold_better": "pendant",
+     "gold_full": "J'ai habité à Lyon pendant cinq ans.",
+     "note": "A finished stay: also right (the practice evals' diagnostics, 13 Oct: every sample)."
+    }
+   ]
+  },
+  {
+   "id": "fr-07",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "L'année dernière, je suis allé en Japon.",
+   "error_type": "preposition (countries: au/en)",
+   "gold_said": "en Japon",
+   "gold_better": "au Japon",
+   "gold_full": "L'année dernière, je suis allé au Japon.",
+   "why_en": "Masculine countries like 'le Japon' take 'au'; 'en' is for feminine ones."
+  },
+  {
+   "id": "fr-08",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Mon frère habite à Lille et il est un ingénieur.",
+   "error_type": "article (none with profession after il est)",
+   "gold_said": "il est un ingénieur",
+   "gold_better": "il est ingénieur",
+   "gold_full": "Mon frère habite à Lille et il est ingénieur.",
+   "why_en": "After 'il est/elle est', a profession has no article."
+  },
+  {
+   "id": "fr-09",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "J'emprunte souvent des livres à la librairie près de chez moi.",
+   "error_type": "false friend (librairie/bibliothèque)",
+   "gold_said": "librairie",
+   "gold_better": "bibliothèque",
+   "gold_full": "J'emprunte souvent des livres à la bibliothèque près de chez moi.",
+   "why_en": "A 'librairie' is a bookshop; borrowing books happens at a 'bibliothèque'."
+  },
+  {
+   "id": "fr-11",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Si tu viendras demain, je te montrerai mes photos.",
+   "error_type": "conditional (no future after si)",
+   "gold_said": "Si tu viendras",
+   "gold_better": "Si tu viens",
+   "gold_full": "Si tu viens demain, je te montrerai mes photos.",
+   "why_en": "After 'si' in a condition, French uses the present, not the future."
+  },
+  {
+   "id": "fr-12",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Il faut que je vais à la banque cet après-midi.",
+   "error_type": "mood (subjunctive after il faut que)",
+   "gold_said": "que je vais",
+   "gold_better": "que j'aille",
+   "gold_full": "Il faut que j'aille à la banque cet après-midi.",
+   "why_en": "'Il faut que' is followed by the subjunctive: 'que j'aille'."
+  },
+  {
+   "id": "fr-13",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "J'attends pour le bus depuis vingt minutes.",
+   "error_type": "verb pattern (no preposition after attendre)",
+   "gold_said": "attends pour le bus",
+   "gold_better": "attends le bus",
+   "gold_full": "J'attends le bus depuis vingt minutes.",
+   "why_en": "'Attendre' takes a direct object: 'attendre le bus', without 'pour'."
+  },
+  {
+   "id": "fr-14",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "C'est l'anniversaire de mon frère, je le téléphone ce soir.",
+   "error_type": "pronoun (indirect object)",
+   "gold_said": "je le téléphone",
+   "gold_better": "je lui téléphone",
+   "gold_full": "C'est l'anniversaire de mon frère, je lui téléphone ce soir.",
+   "why_en": "'Téléphoner à quelqu'un' takes an indirect object, so 'le' becomes 'lui'."
+  },
+  {
+   "id": "fr-15",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "J'aime écouter à la musique classique.",
+   "error_type": "verb pattern (no preposition after écouter)",
+   "gold_said": "écouter à la musique",
+   "gold_better": "écouter la musique",
+   "gold_full": "J'aime écouter la musique classique.",
+   "why_en": "'Écouter' takes a direct object, without 'à'.",
+   "gold_also": [
+    {
+     "gold_said": "écouter à la musique",
+     "gold_better": "écouter de la musique",
+     "gold_full": "J'aime écouter de la musique classique.",
+     "note": "The partitive is also right (the practice evals' diagnostics, 13 Oct: every sample)."
+    }
+   ]
+  },
+  {
+   "id": "fr-16",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Ce restaurant est plus bon que l'autre.",
+   "error_type": "comparative (irregular)",
+   "gold_said": "plus bon",
+   "gold_better": "meilleur",
+   "gold_full": "Ce restaurant est meilleur que l'autre.",
+   "why_en": "The comparative of 'bon' is 'meilleur', not 'plus bon'."
+  },
+  {
+   "id": "fr-17",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Il y a beaucoup des touristes en été.",
+   "error_type": "quantity expression (beaucoup de)",
+   "gold_said": "beaucoup des",
+   "gold_better": "beaucoup de",
+   "gold_full": "Il y a beaucoup de touristes en été.",
+   "why_en": "After 'beaucoup', French uses 'de', not 'des'."
+  },
+  {
+   "id": "fr-18",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Pendant que j'ai préparé le dîner, ma mère a téléphoné.",
+   "error_type": "tense (imparfait for an action in progress)",
+   "gold_said": "j'ai préparé",
+   "gold_better": "je préparais",
+   "gold_full": "Pendant que je préparais le dîner, ma mère a téléphoné.",
+   "why_en": "An action in progress when something else happened takes the imparfait: 'je préparais'."
+  },
+  {
+   "id": "fr-19",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Le livre qui j'ai lu était très intéressant.",
+   "error_type": "relative pronoun (qui/que)",
+   "gold_said": "qui j'ai lu",
+   "gold_better": "que j'ai lu",
+   "gold_full": "Le livre que j'ai lu était très intéressant.",
+   "why_en": "When the noun is the object of the next verb, the relative pronoun is 'que'."
+  },
+  {
+   "id": "fr-20",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Je travaille en Paris depuis deux ans.",
+   "error_type": "preposition (cities: à)",
+   "gold_said": "en Paris",
+   "gold_better": "à Paris",
+   "gold_full": "Je travaille à Paris depuis deux ans.",
+   "why_en": "Cities take 'à', not 'en'."
+  },
+  {
+   "id": "fr-21",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Je joue au piano depuis dix ans.",
+   "error_type": "preposition (jouer de/à)",
+   "gold_said": "joue au piano",
+   "gold_better": "joue du piano",
+   "gold_full": "Je joue du piano depuis dix ans.",
+   "why_en": "Instruments take 'jouer de'; 'jouer à' is for games and sports."
+  },
+  {
+   "id": "fr-23",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Les rues sont très étroits dans ce quartier.",
+   "error_type": "adjective agreement",
+   "gold_said": "très étroits",
+   "gold_better": "très étroites",
+   "gold_full": "Les rues sont très étroites dans ce quartier.",
+   "why_en": "'Rue' is feminine, so the adjective is feminine plural: 'étroites'."
+  },
+  {
+   "id": "fr-24",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Nous avons une maison belle à la campagne.",
+   "error_type": "word order (adjective position)",
+   "gold_said": "une maison belle",
+   "gold_better": "une belle maison",
+   "gold_full": "Nous avons une belle maison à la campagne.",
+   "why_en": "A few short adjectives like 'belle' go before the noun."
+  },
+  {
+   "id": "fr-25",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Je dois aider à ma mère ce week-end.",
+   "error_type": "verb pattern (aider + direct object)",
+   "gold_said": "aider à ma mère",
+   "gold_better": "aider ma mère",
+   "gold_full": "Je dois aider ma mère ce week-end.",
+   "why_en": "'Aider' takes a direct object, without 'à'."
+  },
+  {
+   "id": "fr-26",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "J'ai demandé mon chef un jour de congé.",
+   "error_type": "verb pattern (demander à quelqu'un)",
+   "gold_said": "demandé mon chef",
+   "gold_better": "demandé à mon chef",
+   "gold_full": "J'ai demandé à mon chef un jour de congé.",
+   "why_en": "You 'demander quelque chose à quelqu'un': the person needs 'à'."
+  },
+  {
+   "id": "fr-27",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Ce matin, je m'ai réveillé à six heures.",
+   "error_type": "auxiliary (reflexive verbs take être)",
+   "gold_said": "je m'ai réveillé",
+   "gold_better": "je me suis réveillé",
+   "gold_full": "Ce matin, je me suis réveillé à six heures.",
+   "why_en": "Reflexive verbs form the passé composé with 'être'."
+  },
+  {
+   "id": "fr-28",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Je dois faire une décision importante cette semaine.",
+   "error_type": "collocation (prendre une décision)",
+   "gold_said": "faire une décision",
+   "gold_better": "prendre une décision",
+   "gold_full": "Je dois prendre une décision importante cette semaine.",
+   "why_en": "French says 'prendre une décision', not 'faire'."
+  },
+  {
+   "id": "fr-29",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "On vont au marché le samedi matin.",
+   "error_type": "verb agreement (on + 3rd person singular)",
+   "gold_said": "On vont",
+   "gold_better": "On va",
+   "gold_full": "On va au marché le samedi matin.",
+   "why_en": "'On' always takes a third-person singular verb."
+  },
+  {
+   "id": "fr-31",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Je sais pas encore ce que je vais faire ce week-end.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "Dropping 'ne' is normal informal French; do not add it."
+  },
+  {
+   "id": "fr-32",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "On est allés au cinéma hier soir.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "With 'on' meaning 'nous', plural agreement of the participle is accepted."
+  },
+  {
+   "id": "fr-33",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "C'est mon frère qui m'a appris à nager.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  },
+  {
+   "id": "fr-34",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Il fait beau aujourd'hui, on va se promener ?",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "Question by intonation is correct informal French."
+  },
+  {
+   "id": "fr-35",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Je lui ai dit que j'arriverais en retard.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "Conditional as future-in-the-past in reported speech."
+  },
+  {
+   "id": "fr-36",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Ça fait trois ans que j'habite à Lyon.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "Correct alternative to 'depuis'."
+  },
+  {
+   "id": "fr-37",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Je vais à Montréal en avion la semaine prochaine.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  },
+  {
+   "id": "fr-38",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "J'ai trop mangé, je n'ai plus faim.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  },
+  {
+   "id": "fr-39",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Si j'avais plus de temps, je voyagerais plus souvent.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  },
+  {
+   "id": "fr-40",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Quand j'étais petite, j'allais chez ma grand-mère tous les étés.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  },
+  {
+   "id": "fr-43",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Tu veux venir avec nous ?",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  },
+  {
+   "id": "fr-44",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Il y a plein de choses à faire à Lisbonne.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'plein de' is informal but correct."
+  }
+ ],
+ "conversations": [
+  {
+   "id": "fr-conv-1",
+   "level": "B1",
+   "topic": "weekend",
+   "user_turns": [
+    "Salut ! J'ai passé un très bon week-end, merci.",
+    "Samedi, je suis allé à la plage avec des amis.",
+    "Le soir, on a mangé des pâtes dans une restaurant italien.",
+    "Dimanche, j'ai resté à la maison parce que j'étais très fatigué.",
+    "J'ai lu un livre et j'ai regardé à un film.",
+    "Et toi, qu'est-ce que tu as fait ce week-end ?"
+   ],
+   "planted": [
+    {
+     "said": "une restaurant",
+     "better": "un restaurant"
+    },
+    {
+     "said": "j'ai resté",
+     "better": "je suis resté"
+    },
+    {
+     "said": "regardé à un film",
+     "better": "regardé un film"
+    }
+   ]
+  },
+  {
+   "id": "fr-conv-2",
+   "level": "B1",
+   "topic": "work",
+   "user_turns": [
+    "Je travaille dans une petite entreprise de logiciels à Nantes.",
+    "Mes collègues sont très sympas et on déjeune souvent ensemble.",
+    "Mais ma chef est très stricte et elle me donne trop beaucoup de travail.",
+    "La semaine prochaine, je dois faire une présentation devant tout l'équipe.",
+    "Je suis un peu stressé parce que je ne suis pas habitué de parler en public.",
+    "Tu as des conseils pour moi ?"
+   ],
+   "planted": [
+    {
+     "said": "trop beaucoup de",
+     "better": "trop de"
+    },
+    {
+     "said": "tout l'équipe",
+     "better": "toute l'équipe"
+    },
+    {
+     "said": "habitué de parler",
+     "better": "habitué à parler"
+    }
+   ]
+  },
+  {
+   "id": "fr-conv-3",
+   "level": "B1",
+   "topic": "food",
+   "user_turns": [
+    "J'adore cuisiner, surtout des plats japonais.",
+    "Hier soir, j'ai préparé des ramen pour mon famille.",
+    "J'ai acheté tous les ingrédients au marché, mais je n'ai pas trouvé des algues.",
+    "Mes enfants ont dit que c'était délicieux.",
+    "Pour le dessert, j'ai fait un gâteau au chocolat, mais il était un peu trop sucré.",
+    "Tu connais une bonne recette de gâteau sans sucre ? Ma mère doit manger moins du sucre."
+   ],
+   "planted": [
+    {
+     "said": "mon famille",
+     "better": "ma famille"
+    },
+    {
+     "said": "pas trouvé des algues",
+     "better": "pas trouvé d'algues"
+    },
+    {
+     "said": "moins du sucre",
+     "better": "moins de sucre"
+    }
+   ]
+  },
+  {
+   "id": "fr-conv-4",
+   "level": "B1",
+   "topic": "travel",
+   "user_turns": [
+    "Le mois prochain, je pars en Espagne pour deux semaines.",
+    "Je vais visiter Madrid, Séville et peut-être Barcelone.",
+    "J'ai déjà réservé l'hôtel, mais je n'ai pas encore achetés les billets de train.",
+    "Je ne suis jamais allé à Espagne, donc je suis très curieux.",
+    "Mon ami pense qu'il faut que je vais à Grenade aussi.",
+    "L'année dernière, je suis allé au Portugal et j'ai adoré."
+   ],
+   "planted": [
+    {
+     "said": "achetés les billets",
+     "better": "acheté les billets"
+    },
+    {
+     "said": "allé à Espagne",
+     "better": "allé en Espagne"
+    },
+    {
+     "said": "que je vais",
+     "better": "que j'aille"
+    }
+   ]
+  }
+ ]
+}

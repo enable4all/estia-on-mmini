@@ -2,11 +2,12 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, quote_plus
 from zoneinfo import ZoneInfo
 
 import pytest
 
-from local_assistant.maps import PLACES_URL, ROUTES_URL, Maps, MapsError, find_pin
+from local_assistant.maps import PLACES_URL, ROUTES_URL, Maps, MapsError, find_pin, forget_home_address
 from local_assistant.part_status import PartStatus, Record
 from local_assistant.store import Store
 from tests.fakes.fake_http import FakeHttp
@@ -175,13 +176,14 @@ async def test_a_route_by_transit_from_the_pin_with_lines_and_a_link(tmp_path: P
 async def test_a_route_by_bike_from_home_or_a_named_place(tmp_path: Path, store: Store) -> None:
     http = FakeHttp()
     http.add(ROUTES_URL, 200, {"routes": [{"duration": "600s", "distanceMeters": 2500}]})
+    http.add(PLACES_URL, 200, HOME_LOCATION)
     search = maps(tmp_path, http, store)
     home = await search.route("Vondelpark", "bike")
     assert home.origin == "home" and home.lines == () and (home.minutes, home.km) == (10, 2.5)
     assert sent_json(http, 0)["origin"] == {"address": HOME} and sent_json(http, 0)["travelMode"] == "BICYCLE"
-    assert "origin=Home+Street+1" in home.link and "travelmode=bicycling" in home.link
+    assert "origin=52.37%2C4.89" in home.link and "travelmode=bicycling" in home.link
     named = await search.route("Vondelpark", "walk", origin="Centraal Station")
-    assert named.origin == "Centraal Station" and sent_json(http, 1)["origin"] == {"address": "Centraal Station"}
+    assert named.origin == "Centraal Station" and sent_json(http, 2)["origin"] == {"address": "Centraal Station"}
 
 
 @pytest.mark.parametrize("mode", ["boat", "", "plane"])
@@ -194,9 +196,9 @@ async def test_the_daily_cap_stops_requests(tmp_path: Path, store: Store) -> Non
     http = FakeHttp()
     http.add(ROUTES_URL, 200, ROUTE)
     search = maps(tmp_path, http, store, cap=1)
-    await search.route("Schiphol", "car")
+    await search.route("Schiphol", "car", origin="Centraal Station")
     with pytest.raises(MapsError, match="daily limit of 1 route"):
-        await search.route("Schiphol", "car")
+        await search.route("Schiphol", "car", origin="Centraal Station")
     assert len(http.requests) == 1 and search.usage() == "places 0/1, routes 1/1 today"
 
 
@@ -251,14 +253,17 @@ def test_a_signal_location_pin_is_found(text: str, pin: tuple[float, float] | No
 async def test_home_means_the_home_address_even_with_a_pin(tmp_path: Path, store: Store) -> None:
     http = FakeHttp()
     http.add(ROUTES_URL, 200, ROUTE)
+    http.add(PLACES_URL, 200, HOME_LOCATION)
     search = maps(tmp_path, http, store)
     search.set_here(51.92, 4.48)
     for origin in ("home", "my home", "Home"):
         route = await search.route("Schiphol", "transit", origin=origin)
         assert route.origin == "home"
-    assert all(sent_json(http, n)["origin"] == {"address": HOME} for n in range(3))
     back = await search.route("home", "bike")
-    assert back.link.count("destination=Home+Street+1") == 1 and sent_json(http, 3)["destination"] == {"address": HOME}
+    routes = [sent_json(http, n) for n, url in enumerate(http.urls()) if url == ROUTES_URL]
+    assert all(body["origin"] == {"address": HOME} for body in routes[:3])
+    assert routes[3]["destination"] == {"address": HOME}
+    assert back.link.count("destination=52.37%2C4.89") == 1 and "Home" not in back.link
 
 
 async def test_near_home_searches_the_home_area_even_with_a_pin(tmp_path: Path, store: Store) -> None:
@@ -383,10 +388,10 @@ async def test_google_answers_are_recorded_and_our_own_limits_are_not(tmp_path: 
     http.add(ROUTES_URL, 200, ROUTE)
     status = recorder(tmp_path)
     search = maps(tmp_path, http, store, cap=1, status=status)
-    await search.route("Schiphol", "car")
+    await search.route("Schiphol", "car", origin="Centraal Station")
     assert status.snapshot() == {"places": Record(ok=NOW)}
     with pytest.raises(MapsError, match="daily limit"):
-        await search.route("Schiphol", "car")  # our own cap: Google was not asked
+        await search.route("Schiphol", "car", origin="Centraal Station")  # our own cap: Google was not asked
     with pytest.raises(ValueError):
         await search.places("pizza near anna@example.com")
     assert status.snapshot() == {"places": Record(ok=NOW)}
@@ -421,3 +426,167 @@ async def test_a_missing_google_key_is_recorded(tmp_path: Path, store: Store) ->
     with pytest.raises(MapsError):
         await maps(tmp_path, FakeHttp(), store, status=status, text="BRAVE_API_KEY=b\n").places("pizza", "Town")
     assert status.snapshot() == {"places": Record(failed=NOW, reason="no_key")}
+
+
+# ------------------------------------------------------------------ the home address stays in the private config
+
+
+def stored_values(store: Store) -> list[str]:
+    return [str(row[0]) for row in store._conn.execute("SELECT value FROM state")]
+
+
+def database_bytes(tmp_path: Path) -> bytes:
+    folder = tmp_path / "data"
+    return b"".join(path.read_bytes() for path in sorted(folder.glob("assistant.db*")))
+
+
+async def test_the_home_area_is_kept_without_the_address(tmp_path: Path, store: Store) -> None:
+    """Only the rounded centre and a tag of the address (to notice a new one) are kept, never the address."""
+    http = FakeHttp()
+    http.add(PLACES_URL, 200, HOME_LOCATION)
+    http.add(PLACES_URL, 200, PLACES)
+    await maps(tmp_path, http, store).places("pizza")
+    area = store.get_state("maps_home_area") or ""
+    centre, _, tag = area.partition("|")
+    assert centre == "52.37,4.89" and len(tag) == 64 and all(ch in "0123456789abcdef" for ch in tag)
+    assert not any(HOME in value or "Home Street" in value for value in stored_values(store))
+    await maps(tmp_path, http, store).places("sushi")  # the same address: no new lookup
+    assert [sent_json(http, n).get("textQuery") for n in range(len(http.requests))] == [HOME, "pizza", "sushi"]
+
+
+async def test_a_new_home_address_is_looked_up_again(tmp_path: Path, store: Store) -> None:
+    http = FakeHttp()
+    http.add(PLACES_URL, 200, HOME_LOCATION)
+    http.add(PLACES_URL, 200, PLACES)
+    await maps(tmp_path, http, store).places("pizza")
+    moved = Maps(http, keys(tmp_path), store, home="New Road 9, 2000 City, NL", daily_cap=30, tz=ZoneInfo("UTC"))
+    await moved.places("sushi")
+    asked = [sent_json(http, n).get("textQuery") for n in range(len(http.requests))]
+    assert asked == [HOME, "pizza", "New Road 9, 2000 City, NL", "sushi"]
+    assert not any("New Road" in value for value in stored_values(store))
+
+
+async def test_a_failed_home_lookup_keeps_no_address(tmp_path: Path, store: Store) -> None:
+    http = FakeHttp()
+    http.add(PLACES_URL, 200, {"places": []})
+    await maps(tmp_path, http, store).places("pizza")
+    assert store.get_state("maps_home_failed_2026-10-10")  # the day's mark is there
+    assert not any("Home Street" in value for value in stored_values(store))
+
+
+def test_at_start_an_address_kept_by_an_earlier_version_is_removed(tmp_path: Path, store: Store) -> None:
+    """The area of the configured address keeps its centre (with the tag); the failed-lookup rows go; afterwards the
+    address is in no byte of the database or its log (secure_delete, then the log is written back)."""
+    store.set_state("maps_home_area", f"52.37,4.89|{HOME}")
+    store.set_state("maps_home_failed_2026-10-09", HOME)
+    store.set_state("maps_home_failed_2026-10-10", HOME)
+    store.set_state("maps_places_2026-10-10", "3")  # the day's counter stays
+    assert HOME.encode() in database_bytes(tmp_path)
+    forget_home_address(store, HOME, keys(tmp_path))
+    area = store.get_state("maps_home_area") or ""
+    assert area.startswith("52.37,4.89|") and HOME not in area
+    assert store.get_state("maps_home_failed_2026-10-09") is None
+    assert store.get_state("maps_home_failed_2026-10-10") is None
+    assert store.get_state("maps_places_2026-10-10") == "3"
+    assert HOME.encode() not in database_bytes(tmp_path)
+
+
+async def test_after_the_tidy_the_centre_is_used_without_a_lookup(tmp_path: Path, store: Store) -> None:
+    store.set_state("maps_home_area", f"52.37,4.89|{HOME}")
+    forget_home_address(store, HOME, keys(tmp_path))
+    http = FakeHttp()
+    http.add(PLACES_URL, 200, PLACES)
+    await maps(tmp_path, http, store).places("pizza")
+    assert [sent_json(http, n).get("textQuery") for n in range(len(http.requests))] == ["pizza"]
+    assert sent_json(http, 0)["locationBias"]["circle"]["center"] == {"latitude": 52.37, "longitude": 4.89}
+
+
+@pytest.mark.parametrize(
+    ("home", "key_text"),
+    [("", "GOOGLE_MAPS_API_KEY=g-key\n"), ("Other Lane 3", "GOOGLE_MAPS_API_KEY=g-key\n"), (HOME, "")],
+    ids=["maps off", "another address", "no key"],
+)
+def test_at_start_an_old_area_that_cannot_be_kept_goes(tmp_path: Path, store: Store, home: str, key_text: str) -> None:
+    store.set_state("maps_home_area", f"52.37,4.89|{HOME}")
+    forget_home_address(store, home, keys(tmp_path, key_text))
+    assert store.get_state("maps_home_area") is None
+    assert HOME.encode() not in database_bytes(tmp_path)
+
+
+def test_a_kept_tag_is_left_as_it_is(tmp_path: Path, store: Store) -> None:
+    tag = "ab" * 32
+    store.set_state("maps_home_area", f"52.37,4.89|{tag}")
+    store.set_state("maps_home_failed_2026-10-10", tag)
+    forget_home_address(store, HOME, keys(tmp_path))
+    assert store.get_state("maps_home_area") == f"52.37,4.89|{tag}"
+    assert store.get_state("maps_home_failed_2026-10-10") == tag
+
+
+def address_forms(address: str) -> list[bytes]:
+    return [form.encode() for form in (address, quote_plus(address), quote(address), quote(address, safe=""))]
+
+
+async def test_a_route_to_or_from_home_keeps_the_address_out_of_the_link(tmp_path: Path, store: Store) -> None:
+    """The Directions link is sent as a note and stored: a home end is the rounded centre, never the address."""
+    http = FakeHttp()
+    http.add(ROUTES_URL, 200, ROUTE)
+    http.add(PLACES_URL, 200, HOME_LOCATION)
+    search = maps(tmp_path, http, store)
+    back = await search.route("home", "bike")
+    out = await search.route("Vondelpark", "walk", origin="home")
+    assert sent_json(http, 0)["destination"] == {"address": HOME}  # the route itself is from the address
+    assert "destination=52.37%2C4.89" in back.link and "origin=52.37%2C4.89" in out.link
+    for link in (back.link, out.link):
+        assert not any(form.decode() in link for form in address_forms(HOME)) and "Street" not in link
+
+
+async def test_without_a_home_centre_a_route_home_has_no_link_and_from_home_no_origin(
+    tmp_path: Path, store: Store
+) -> None:
+    http = FakeHttp()
+    http.add(ROUTES_URL, 200, ROUTE)
+    http.add(PLACES_URL, 200, {"places": []})  # Google cannot place the address
+    search = maps(tmp_path, http, store)
+    back = await search.route("home", "bike")
+    out = await search.route("Vondelpark", "walk", origin="home")
+    assert back.link == ""
+    assert out.link == "https://www.google.com/maps/dir/?api=1&destination=Vondelpark&travelmode=walking"
+
+
+def directions_note(store: Store, address: str, *, plus: bool = True) -> int:
+    encoded = quote_plus(address) if plus else quote(address, safe="")
+    link = f"https://www.google.com/maps/dir/?api=1&origin={encoded}&destination=Vondelpark&travelmode=bicycling"
+    conversation = store.current_conversation()
+    return store.add_outgoing(conversation.id, "aci-1", "note", f"Sources:\n- Directions: {link}", None)
+
+
+def fts_hits(store: Store, words: str) -> int:
+    return int(
+        store._conn.execute("SELECT count(*) FROM messages_fts WHERE messages_fts MATCH ?", (words,)).fetchone()[0]
+    )
+
+
+@pytest.mark.parametrize("plus", [True, False], ids=["plus", "percent"])
+def test_at_start_directions_notes_lose_the_address(tmp_path: Path, store: Store, plus: bool) -> None:
+    """Directions notes an earlier version sent hold the address in their link: at start that part becomes the
+    rounded centre (kept) or "home", the search index follows, and no byte of the database or its log holds it."""
+    store.set_state("maps_home_area", f"52.37,4.89|{HOME}")
+    note = directions_note(store, HOME, plus=plus)
+    other = store.add_outgoing(store.current_conversation().id, "aci-1", "note", "Sources:\n- Other Lane 3", None)
+    words = "street AND town" if plus else "20street AND 20town"  # the search index's words for each form
+    assert fts_hits(store, words) == 1
+    forget_home_address(store, HOME, keys(tmp_path))
+    text = str(store._conn.execute("SELECT text FROM messages WHERE id = ?", (note,)).fetchone()[0])
+    assert "origin=52.37%2C4.89&destination=Vondelpark" in text
+    assert store._conn.execute("SELECT text FROM messages WHERE id = ?", (other,)).fetchone()[0].endswith("Lane 3")
+    assert fts_hits(store, words) == 0 and fts_hits(store, "vondelpark") == 1
+    data = database_bytes(tmp_path)
+    assert not any(form in data for form in address_forms(HOME))
+
+
+def test_at_start_a_directions_note_without_a_kept_centre_says_home(tmp_path: Path, store: Store) -> None:
+    note = directions_note(store, HOME)
+    forget_home_address(store, HOME, keys(tmp_path))
+    text = str(store._conn.execute("SELECT text FROM messages WHERE id = ?", (note,)).fetchone()[0])
+    assert "origin=home&destination=Vondelpark" in text
+    assert not any(form in database_bytes(tmp_path) for form in address_forms(HOME))

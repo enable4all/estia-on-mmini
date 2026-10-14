@@ -6,6 +6,8 @@
 #   scripts/set-calendar-url.sh family   a calendar from [[calendar.sources]] (key CALENDAR_ICS_URL_FAMILY)
 # Only that one key is replaced (and, next to it, CALENDAR_SAVED_AT[_NAME]: when it was saved, for doctor): the other
 # lines stay, in one atomic write. Hidden prompt: the address is never shown, logged or passed on a command line.
+# Once she runs as her own user _estia, the address goes through a pipe into
+# /usr/bin/sudo /usr/local/estia/bin/estia secret set calendar.env <KEY>, which writes her calendar.env the same way.
 set -euo pipefail
 name_rule='^[a-z0-9][a-z0-9_-]{0,19}$'
 name="${1:-calendar}"
@@ -21,8 +23,7 @@ fi
 saved_key="${key/CALENDAR_ICS_URL/CALENDAR_SAVED_AT}"
 dir="$HOME/.config/local-assistant"
 file="$dir/calendar.env"
-mkdir -p "$dir"
-chmod 700 "$dir"
+source "$(dirname "$0")/own-user.sh"  # moved, and her commands' fixed paths ($estia, $estia_deploy)
 printf 'Paste the iCal address of calendar "%s" (secret or public; nothing shows while you paste), then press Enter:\n' "$name"
 IFS= read -rs url || true
 printf '\n'
@@ -32,6 +33,14 @@ if [[ "$url" != https://calendar.google.com/calendar/ical/*.ics ]]; then
   echo "That is not a Google iCal address (https://calendar.google.com/calendar/ical/…/basic.ics); nothing saved." >&2
   exit 1
 fi
+if moved; then
+  printf '%s\n' "$url" | "$sudo" "$estia" secret set calendar.env "$key" >/dev/null
+  unset url
+  echo "saved $key in her calendar.env (mode 600, readable only by _estia); the bridge uses it from the next calendar read on"
+  exit 0
+fi
+mkdir -p "$dir"
+chmod 700 "$dir"
 umask 077
 tmp="$(mktemp "$dir/.calendar.XXXXXX")"
 trap 'rm -f "$tmp"' EXIT

@@ -1,0 +1,578 @@
+{
+ "language": "pt",
+ "items": [
+  {
+   "id": "pt-01",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Não se preocupe, já resolvemos a problema.",
+   "error_type": "article/gender",
+   "gold_said": "a problema",
+   "gold_better": "o problema",
+   "gold_full": "Não se preocupe, já resolvemos o problema.",
+   "why_en": "'Problema' is masculine even though it ends in -a, so it takes 'o'."
+  },
+  {
+   "id": "pt-02",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Fizemos um viagem incrível pelo norte do país.",
+   "error_type": "article/gender",
+   "gold_said": "um viagem",
+   "gold_better": "uma viagem",
+   "gold_full": "Fizemos uma viagem incrível pelo norte do país.",
+   "why_en": "Nouns in -agem like 'viagem' are feminine: 'uma viagem'."
+  },
+  {
+   "id": "pt-03",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Gosto muito do cor azul.",
+   "error_type": "gender (contraction)",
+   "gold_said": "do cor",
+   "gold_better": "da cor",
+   "gold_full": "Gosto muito da cor azul.",
+   "why_en": "'Cor' is feminine in Portuguese, so 'de' + 'a' gives 'da cor'."
+  },
+  {
+   "id": "pt-04",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Deixei as chaves em a mesa da cozinha.",
+   "error_type": "contraction (em + a)",
+   "gold_said": "em a mesa",
+   "gold_better": "na mesa",
+   "gold_full": "Deixei as chaves na mesa da cozinha.",
+   "why_en": "'Em' + 'a' always contracts to 'na'."
+  },
+  {
+   "id": "pt-05",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Hoje a minha irmã é doente e não pode vir.",
+   "error_type": "ser/estar (temporary state)",
+   "gold_said": "é doente",
+   "gold_better": "está doente",
+   "gold_full": "Hoje a minha irmã está doente e não pode vir.",
+   "why_en": "Being ill today is a temporary state, so it takes 'estar'."
+  },
+  {
+   "id": "pt-06",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Hoje é muito frio, por isso vou ficar em casa.",
+   "error_type": "ser/estar (weather)",
+   "gold_said": "é muito frio",
+   "gold_better": "está muito frio",
+   "gold_full": "Hoje está muito frio, por isso vou ficar em casa.",
+   "why_en": "Today's weather is a passing state, so it takes 'estar'."
+  },
+  {
+   "id": "pt-07",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Eu gosto muito chocolate quente no inverno.",
+   "error_type": "preposition (gostar de)",
+   "gold_said": "gosto muito chocolate",
+   "gold_better": "gosto muito de chocolate",
+   "gold_full": "Eu gosto muito de chocolate quente no inverno.",
+   "why_en": "'Gostar' always takes 'de' before what is liked."
+  },
+  {
+   "id": "pt-08",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Quando eu terei mais tempo, vou aprender a tocar piano.",
+   "error_type": "future subjunctive (quando)",
+   "gold_said": "Quando eu terei",
+   "gold_better": "Quando eu tiver",
+   "gold_full": "Quando eu tiver mais tempo, vou aprender a tocar piano.",
+   "why_en": "After 'quando' about the future, Portuguese uses the future subjunctive: 'tiver'."
+  },
+  {
+   "id": "pt-09",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Se amanhã fará sol, vamos à praia.",
+   "error_type": "future subjunctive (se)",
+   "gold_said": "fará",
+   "gold_better": "fizer",
+   "gold_full": "Se amanhã fizer sol, vamos à praia.",
+   "why_en": "After 'se' about a future possibility, use the future subjunctive: 'fizer'."
+  },
+  {
+   "id": "pt-10",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Quero que você vem ao meu aniversário.",
+   "error_type": "present subjunctive (querer que)",
+   "gold_said": "vem",
+   "gold_better": "venha",
+   "gold_full": "Quero que você venha ao meu aniversário.",
+   "why_en": "After 'quero que' the verb goes in the subjunctive."
+  },
+  {
+   "id": "pt-11",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Enquanto eu cozinhei o jantar, a minha mãe telefonou.",
+   "error_type": "tense (imperfeito for an action in progress)",
+   "gold_said": "cozinhei",
+   "gold_better": "cozinhava",
+   "gold_full": "Enquanto eu cozinhava o jantar, a minha mãe telefonou.",
+   "why_en": "An action in progress when something else happened takes the imperfeito: 'cozinhava'."
+  },
+  {
+   "id": "pt-12",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Ontem eu acordava às sete, tomei café e saí de casa.",
+   "error_type": "tense (perfeito for completed events)",
+   "gold_said": "acordava",
+   "gold_better": "acordei",
+   "gold_full": "Ontem eu acordei às sete, tomei café e saí de casa.",
+   "why_en": "A single completed action in a sequence takes the pretérito perfeito."
+  },
+  {
+   "id": "pt-13",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Ontem tenho visto um filme muito bom.",
+   "error_type": "tense (simple vs compound perfect)",
+   "gold_said": "tenho visto",
+   "gold_better": "vi",
+   "gold_full": "Ontem vi um filme muito bom.",
+   "why_en": "For one finished event, use the simple past; 'tenho visto' means something repeated up to now."
+  },
+  {
+   "id": "pt-14",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Não conheço alguém nesta cidade.",
+   "error_type": "negation (ninguém)",
+   "gold_said": "alguém",
+   "gold_better": "ninguém",
+   "gold_full": "Não conheço ninguém nesta cidade.",
+   "why_en": "After 'não', Portuguese uses 'ninguém'; the double negative is standard."
+  },
+  {
+   "id": "pt-15",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "O meu filho é dez anos e adora futebol.",
+   "error_type": "verb choice (ter anos)",
+   "gold_said": "é dez anos",
+   "gold_better": "tem dez anos",
+   "gold_full": "O meu filho tem dez anos e adora futebol.",
+   "why_en": "Age is expressed with 'ter': 'tem dez anos'."
+  },
+  {
+   "id": "pt-16",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Tenho de devolver os livros à livraria até sexta-feira, senão pago uma multa.",
+   "error_type": "false friend",
+   "gold_said": "livraria",
+   "gold_better": "biblioteca",
+   "gold_full": "Tenho de devolver os livros à biblioteca até sexta-feira, senão pago uma multa.",
+   "why_en": "A 'livraria' is a bookshop; a place that lends books is a 'biblioteca'."
+  },
+  {
+   "id": "pt-17",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "A minha irmã está embaraçada e vai ter um filho em maio.",
+   "error_type": "false friend",
+   "gold_said": "embaraçada",
+   "gold_better": "grávida",
+   "gold_full": "A minha irmã está grávida e vai ter um filho em maio.",
+   "why_en": "'Embaraçada' means embarrassed; pregnant is 'grávida' (Spanish 'embarazada' misleads)."
+  },
+  {
+   "id": "pt-18",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "A minha prima vai casar a um rapaz argentino.",
+   "error_type": "preposition (casar com)",
+   "gold_said": "casar a",
+   "gold_better": "casar com",
+   "gold_full": "A minha prima vai casar com um rapaz argentino.",
+   "why_en": "'To marry someone' is 'casar com'."
+  },
+  {
+   "id": "pt-19",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Isso depende em quanto custa a viagem.",
+   "error_type": "preposition (depender de)",
+   "gold_said": "depende em",
+   "gold_better": "depende de",
+   "gold_full": "Isso depende de quanto custa a viagem.",
+   "why_en": "'Depender' takes 'de'."
+  },
+  {
+   "id": "pt-20",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Amanhã vou a comprar um presente para a minha mãe.",
+   "error_type": "periphrasis (ir + infinitive)",
+   "gold_said": "vou a comprar",
+   "gold_better": "vou comprar",
+   "gold_full": "Amanhã vou comprar um presente para a minha mãe.",
+   "why_en": "'Going to' do something is 'ir' + infinitive with no preposition."
+  },
+  {
+   "id": "pt-21",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Os meus pais mora numa cidade pequena.",
+   "error_type": "verb agreement",
+   "gold_said": "mora",
+   "gold_better": "moram",
+   "gold_full": "Os meus pais moram numa cidade pequena.",
+   "why_en": "The subject 'os meus pais' is plural, so the verb is 'moram'."
+  },
+  {
+   "id": "pt-22",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "As praias desta região são muito bonitos.",
+   "error_type": "adjective agreement",
+   "gold_said": "bonitos",
+   "gold_better": "bonitas",
+   "gold_full": "As praias desta região são muito bonitas.",
+   "why_en": "The adjective agrees with 'praias', which is feminine plural."
+  },
+  {
+   "id": "pt-23",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Tenho muito amigas no Brasil.",
+   "error_type": "agreement (muito as determiner)",
+   "gold_said": "muito amigas",
+   "gold_better": "muitas amigas",
+   "gold_full": "Tenho muitas amigas no Brasil.",
+   "why_en": "Before a noun, 'muito' agrees with it: 'muitas amigas'."
+  },
+  {
+   "id": "pt-24",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Ontem eu fazi o jantar para os meus amigos.",
+   "error_type": "verb form (irregular preterite)",
+   "gold_said": "fazi",
+   "gold_better": "fiz",
+   "gold_full": "Ontem eu fiz o jantar para os meus amigos.",
+   "why_en": "The preterite of 'fazer' is irregular: 'fiz'."
+  },
+  {
+   "id": "pt-25",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Este restaurante é mais bom que o outro.",
+   "error_type": "comparative",
+   "gold_said": "mais bom",
+   "gold_better": "melhor",
+   "gold_full": "Este restaurante é melhor que o outro.",
+   "why_en": "The comparative of 'bom' is 'melhor', not 'mais bom'."
+  },
+  {
+   "id": "pt-26",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Estudo português por dois anos, mas ainda falo pouco.",
+   "error_type": "time expression (há)",
+   "gold_said": "por dois anos",
+   "gold_better": "há dois anos",
+   "gold_full": "Estudo português há dois anos, mas ainda falo pouco.",
+   "why_en": "For something that started in the past and is still going on, use the present + 'há'."
+  },
+  {
+   "id": "pt-27",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "No fim de semana a gente vamos ao cinema.",
+   "error_type": "verb agreement (a gente)",
+   "gold_said": "a gente vamos",
+   "gold_better": "a gente vai",
+   "gold_full": "No fim de semana a gente vai ao cinema.",
+   "why_en": "'A gente' takes a third-person singular verb: 'a gente vai'."
+  },
+  {
+   "id": "pt-29",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Perguntei ao meu chefe um dia de folga.",
+   "error_type": "verb choice (pedir/perguntar)",
+   "gold_said": "Perguntei",
+   "gold_better": "Pedi",
+   "gold_full": "Pedi ao meu chefe um dia de folga.",
+   "why_en": "Asking for something is 'pedir'; 'perguntar' is asking a question."
+  },
+  {
+   "id": "pt-30",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Comprei dois pãos na padaria.",
+   "error_type": "plural (irregular)",
+   "gold_said": "pãos",
+   "gold_better": "pães",
+   "gold_full": "Comprei dois pães na padaria.",
+   "why_en": "The plural of 'pão' is 'pães'."
+  },
+  {
+   "id": "pt-31",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "A água do mar está muito fria hoje.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'água' is feminine: 'a água', 'fria'"
+  },
+  {
+   "id": "pt-32",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "O problema é que não tenho tempo.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'o problema' is masculine"
+  },
+  {
+   "id": "pt-33",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Gosto de cozinhar aos domingos.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  },
+  {
+   "id": "pt-34",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Moro nesta cidade há três anos.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'há' + present for an ongoing situation"
+  },
+  {
+   "id": "pt-35",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Quando eu terminar o trabalho, vou dormir.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "future subjunctive after 'quando'"
+  },
+  {
+   "id": "pt-37",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "A gente vai ao cinema no sábado.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "informal 'a gente' + singular verb is correct"
+  },
+  {
+   "id": "pt-38",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Ontem fui ao mercado e comprei peixe.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  },
+  {
+   "id": "pt-39",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Não conheço ninguém aqui.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "double negative is standard"
+  },
+  {
+   "id": "pt-42",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "O meu irmão é mais alto do que eu.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'do que eu' (subject pronoun) is correct"
+  },
+  {
+   "id": "pt-43",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Tenho que ir ao médico na quinta-feira.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'ter que' and 'ter de' are both correct"
+  },
+  {
+   "id": "pt-44",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Depois de jantarmos, fomos dar uma volta.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "personal infinitive after 'depois de'"
+  },
+  {
+   "id": "pt-45",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Quantos anos tem a sua filha?",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  }
+ ],
+ "conversations": [
+  {
+   "id": "pt-conv-1",
+   "level": "B1",
+   "topic": "weekend",
+   "user_turns": [
+    "Olá! Neste fim de semana fui à montanha com uns amigos.",
+    "No sábado fazia sol e caminhamos seis horas.",
+    "À noite nós éramos muito cansados, mas o jantar foi ótimo.",
+    "No domingo visitamos uma vila pequena e almoçamos num restaurante típico.",
+    "Eu adoro a natureza e gosto muito acampar.",
+    "Se fará bom tempo no próximo mês, vamos voltar."
+   ],
+   "planted": [
+    {
+     "said": "éramos",
+     "better": "estávamos"
+    },
+    {
+     "said": "gosto muito acampar",
+     "better": "gosto muito de acampar"
+    },
+    {
+     "said": "Se fará",
+     "better": "Se fizer"
+    }
+   ]
+  },
+  {
+   "id": "pt-conv-2",
+   "level": "B1",
+   "topic": "work",
+   "user_turns": [
+    "Trabalho numa empresa de software há três anos.",
+    "O meu trabalho é interessante, mas às vezes é muito cansativo.",
+    "Esta semana temos um projeto novo e o meu chefe quer que eu trabalho no sábado.",
+    "Gosto muito dos meus colegas, são muito simpáticos.",
+    "Ontem perguntei ao meu chefe mais tempo para terminar o relatório.",
+    "Ele disse que sim, mas a gente vamos ficar até tarde no escritório."
+   ],
+   "planted": [
+    {
+     "said": "que eu trabalho",
+     "better": "que eu trabalhe"
+    },
+    {
+     "said": "perguntei",
+     "better": "pedi"
+    },
+    {
+     "said": "a gente vamos",
+     "better": "a gente vai"
+    }
+   ]
+  },
+  {
+   "id": "pt-conv-3",
+   "level": "B1",
+   "topic": "food",
+   "user_turns": [
+    "Adoro cozinhar, principalmente comida italiana.",
+    "Ontem fiz uma massa com tomate e manjericão para os meus amigos.",
+    "Eles disseram que a massa estava muito bom.",
+    "Normalmente compro os legumes no mercado aos sábados.",
+    "O meu avô cozinha mais bom do que eu.",
+    "Quando eu terei uma casa maior, quero ter uma horta."
+   ],
+   "planted": [
+    {
+     "said": "muito bom",
+     "better": "muito boa"
+    },
+    {
+     "said": "mais bom",
+     "better": "melhor"
+    },
+    {
+     "said": "Quando eu terei",
+     "better": "Quando eu tiver"
+    }
+   ]
+  },
+  {
+   "id": "pt-conv-4",
+   "level": "B1",
+   "topic": "travel",
+   "user_turns": [
+    "No verão passado viajei para o Japão com a minha irmã.",
+    "Ficamos lá duas semanas e visitamos muitas cidades.",
+    "Um dia fizemos um viagem de barco muito bonita.",
+    "Em Quioto conhecemos uma estudante que nos convidou para jantar.",
+    "Não conhecíamos alguém lá, mas as pessoas foram muito simpáticas.",
+    "No próximo ano quero que o meu namorado vem comigo."
+   ],
+   "planted": [
+    {
+     "said": "um viagem",
+     "better": "uma viagem"
+    },
+    {
+     "said": "alguém",
+     "better": "ninguém"
+    },
+    {
+     "said": "vem comigo",
+     "better": "venha comigo"
+    }
+   ]
+  }
+ ]
+}

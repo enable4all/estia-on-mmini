@@ -1,0 +1,581 @@
+{
+ "language": "de",
+ "items": [
+  {
+   "id": "de-01",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Der Mädchen von nebenan spielt jeden Tag im Garten.",
+   "error_type": "article/gender",
+   "gold_said": "Der Mädchen",
+   "gold_better": "Das Mädchen",
+   "gold_full": "Das Mädchen von nebenan spielt jeden Tag im Garten.",
+   "why_en": "'Mädchen' is neuter (all -chen words are), so it takes 'das'."
+  },
+  {
+   "id": "de-02",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Ich habe ein Bruder und eine Schwester.",
+   "error_type": "case (accusative masculine)",
+   "gold_said": "ein Bruder",
+   "gold_better": "einen Bruder",
+   "gold_full": "Ich habe einen Bruder und eine Schwester.",
+   "why_en": "'Haben' takes the accusative, and masculine 'ein' becomes 'einen'."
+  },
+  {
+   "id": "de-03",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Ich fahre jeden Tag mit der Bus zur Arbeit.",
+   "error_type": "case (dative after mit)",
+   "gold_said": "mit der Bus",
+   "gold_better": "mit dem Bus",
+   "gold_full": "Ich fahre jeden Tag mit dem Bus zur Arbeit.",
+   "why_en": "'Mit' takes the dative, and 'der Bus' becomes 'dem Bus'."
+  },
+  {
+   "id": "de-04",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Am Wochenende ich besuche meine Eltern in Köln.",
+   "error_type": "word order (V2 inversion)",
+   "gold_said": "Am Wochenende ich besuche",
+   "gold_better": "Am Wochenende besuche ich",
+   "gold_full": "Am Wochenende besuche ich meine Eltern in Köln.",
+   "why_en": "The verb comes second; after a time phrase, the subject follows the verb."
+  },
+  {
+   "id": "de-05",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Ich glaube, dass er kommt morgen.",
+   "error_type": "word order (verb-final after dass)",
+   "gold_said": "dass er kommt morgen",
+   "gold_better": "dass er morgen kommt",
+   "gold_full": "Ich glaube, dass er morgen kommt.",
+   "why_en": "After 'dass', the conjugated verb goes to the end."
+  },
+  {
+   "id": "de-06",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Ich habe gestern nach Berlin gefahren.",
+   "error_type": "auxiliary (haben/sein)",
+   "gold_said": "Ich habe gestern",
+   "gold_better": "Ich bin gestern",
+   "gold_full": "Ich bin gestern nach Berlin gefahren.",
+   "why_en": "Verbs of movement to a place form the perfect with 'sein'."
+  },
+  {
+   "id": "de-07",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Wir haben im Urlaub jeden Tag Fisch geesst.",
+   "error_type": "past participle (strong verb)",
+   "gold_said": "geesst",
+   "gold_better": "gegessen",
+   "gold_full": "Wir haben im Urlaub jeden Tag Fisch gegessen.",
+   "why_en": "'Essen' is irregular: the participle is 'gegessen'."
+  },
+  {
+   "id": "de-08",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Ich versuche, jeden Tag früher zu aufstehen.",
+   "error_type": "separable verb (zu placement)",
+   "gold_said": "zu aufstehen",
+   "gold_better": "aufzustehen",
+   "gold_full": "Ich versuche, jeden Tag früher aufzustehen.",
+   "why_en": "With a separable verb, 'zu' goes inside: 'aufzustehen'."
+  },
+  {
+   "id": "de-09",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Wenn ich ein Kind war, habe ich in Hamburg gewohnt.",
+   "error_type": "conjunction (als/wenn)",
+   "gold_said": "Wenn ich ein Kind war",
+   "gold_better": "Als ich ein Kind war",
+   "gold_full": "Als ich ein Kind war, habe ich in Hamburg gewohnt.",
+   "why_en": "For a single period in the past, German uses 'als', not 'wenn'."
+  },
+  {
+   "id": "de-10",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Ich lerne schon für zwei Jahre Deutsch, aber ich spreche noch nicht gut.",
+   "error_type": "preposition (seit/für)",
+   "gold_said": "für zwei Jahre",
+   "gold_better": "seit zwei Jahren",
+   "gold_full": "Ich lerne schon seit zwei Jahren Deutsch, aber ich spreche noch nicht gut.",
+   "why_en": "For something that started in the past and still goes on, German uses 'seit' + dative."
+  },
+  {
+   "id": "de-11",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Ich kenne nicht, wo der Bahnhof ist.",
+   "error_type": "verb choice (kennen/wissen)",
+   "gold_said": "Ich kenne nicht",
+   "gold_better": "Ich weiß nicht",
+   "gold_full": "Ich weiß nicht, wo der Bahnhof ist.",
+   "why_en": "For knowing a fact or a 'where/what' answer, German uses 'wissen'; 'kennen' is for people, places and things."
+  },
+  {
+   "id": "de-12",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Nach dem Studium möchte ich Arzt bekommen.",
+   "error_type": "false friend (bekommen/werden)",
+   "gold_said": "Arzt bekommen",
+   "gold_better": "Arzt werden",
+   "gold_full": "Nach dem Studium möchte ich Arzt werden.",
+   "why_en": "'Bekommen' means 'to get'; 'to become' is 'werden'."
+  },
+  {
+   "id": "de-13",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Morgen fahre ich nach meiner Oma.",
+   "error_type": "preposition (zu/nach)",
+   "gold_said": "nach meiner Oma",
+   "gold_better": "zu meiner Oma",
+   "gold_full": "Morgen fahre ich zu meiner Oma.",
+   "why_en": "Going to a person is 'zu'; 'nach' is for cities, countries and directions."
+  },
+  {
+   "id": "de-14",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Wir haben einen kleinen Garten mit viele Blumen.",
+   "error_type": "adjective ending (dative plural)",
+   "gold_said": "mit viele Blumen",
+   "gold_better": "mit vielen Blumen",
+   "gold_full": "Wir haben einen kleinen Garten mit vielen Blumen.",
+   "why_en": "'Mit' takes the dative, and in the dative plural 'viele' becomes 'vielen'."
+  },
+  {
+   "id": "de-15",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Berlin ist eine sehr interessant Stadt.",
+   "error_type": "adjective ending (missing ending)",
+   "gold_said": "interessant Stadt",
+   "gold_better": "interessante Stadt",
+   "gold_full": "Berlin ist eine sehr interessante Stadt.",
+   "why_en": "An adjective before a noun needs an ending: 'eine interessante Stadt'."
+  },
+  {
+   "id": "de-16",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Im Sommer fahre ich nach die Schweiz.",
+   "error_type": "preposition (countries with article)",
+   "gold_said": "nach die Schweiz",
+   "gold_better": "in die Schweiz",
+   "gold_full": "Im Sommer fahre ich in die Schweiz.",
+   "why_en": "Countries with an article, like 'die Schweiz', take 'in', not 'nach'."
+  },
+  {
+   "id": "de-17",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Ich habe zwei Schwester und einen Bruder.",
+   "error_type": "plural form",
+   "gold_said": "zwei Schwester",
+   "gold_better": "zwei Schwestern",
+   "gold_full": "Ich habe zwei Schwestern und einen Bruder.",
+   "why_en": "After 'zwei', the noun is plural: 'Schwestern'."
+  },
+  {
+   "id": "de-18",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Ich freue auf den Urlaub im August.",
+   "error_type": "reflexive verb",
+   "gold_said": "Ich freue auf",
+   "gold_better": "Ich freue mich auf",
+   "gold_full": "Ich freue mich auf den Urlaub im August.",
+   "why_en": "'Sich freuen auf' is reflexive: 'ich freue mich'."
+  },
+  {
+   "id": "de-20",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Kannst du mir Spanisch lernen?",
+   "error_type": "verb choice (lernen/beibringen)",
+   "gold_said": "Spanisch lernen",
+   "gold_better": "Spanisch beibringen",
+   "gold_full": "Kannst du mir Spanisch beibringen?",
+   "why_en": "'Lernen' is what the student does; teaching someone is 'beibringen'."
+  },
+  {
+   "id": "de-21",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Ich helfe dich gern beim Umzug.",
+   "error_type": "case (dative verb)",
+   "gold_said": "helfe dich",
+   "gold_better": "helfe dir",
+   "gold_full": "Ich helfe dir gern beim Umzug.",
+   "why_en": "'Helfen' takes the dative: 'dir', not 'dich'."
+  },
+  {
+   "id": "de-22",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Das Buch, der ich gerade lese, ist sehr spannend.",
+   "error_type": "relative pronoun (gender)",
+   "gold_said": "der ich",
+   "gold_better": "das ich",
+   "gold_full": "Das Buch, das ich gerade lese, ist sehr spannend.",
+   "why_en": "The relative pronoun matches the noun's gender: 'das Buch, das ...'."
+  },
+  {
+   "id": "de-23",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Ich muss morgen früh zu arbeiten.",
+   "error_type": "modal verb (no zu)",
+   "gold_said": "früh zu arbeiten",
+   "gold_better": "früh arbeiten",
+   "gold_full": "Ich muss morgen früh arbeiten.",
+   "why_en": "Modal verbs like 'müssen' take the infinitive without 'zu'."
+  },
+  {
+   "id": "de-24",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Ich gehe in die Stadt, für neue Schuhe zu kaufen.",
+   "error_type": "purpose clause (um ... zu)",
+   "gold_said": "für neue Schuhe",
+   "gold_better": "um neue Schuhe",
+   "gold_full": "Ich gehe in die Stadt, um neue Schuhe zu kaufen.",
+   "why_en": "Purpose is expressed with 'um ... zu', not 'für ... zu'."
+  },
+  {
+   "id": "de-27",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Er lest jeden Abend die Zeitung.",
+   "error_type": "verb conjugation (stem vowel change)",
+   "gold_said": "Er lest",
+   "gold_better": "Er liest",
+   "gold_full": "Er liest jeden Abend die Zeitung.",
+   "why_en": "'Lesen' changes its vowel with du/er/sie/es: 'er liest'."
+  },
+  {
+   "id": "de-28",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "In meiner Stadt gibt es ein großer Park.",
+   "error_type": "case (accusative after es gibt)",
+   "gold_said": "ein großer Park",
+   "gold_better": "einen großen Park",
+   "gold_full": "In meiner Stadt gibt es einen großen Park.",
+   "why_en": "'Es gibt' takes the accusative: 'einen großen Park'."
+  },
+  {
+   "id": "de-29",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Mein Bruder ist mehr alt als ich.",
+   "error_type": "comparative",
+   "gold_said": "mehr alt",
+   "gold_better": "älter",
+   "gold_full": "Mein Bruder ist älter als ich.",
+   "why_en": "German forms the comparative with -er (often with an umlaut): 'älter'."
+  },
+  {
+   "id": "de-31",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Am Wochenende habe ich meine Eltern besucht.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  },
+  {
+   "id": "de-32",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Ich glaube, er kommt morgen.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "Complement clause without 'dass' keeps main-clause order: correct."
+  },
+  {
+   "id": "de-33",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Ich habe keine Lust, heute zu kochen.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  },
+  {
+   "id": "de-34",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Das weiß ich nicht genau.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "Object first, verb second: correct V2."
+  },
+  {
+   "id": "de-35",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Weil ich müde war, bin ich früh ins Bett gegangen.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  },
+  {
+   "id": "de-36",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Ich trinke lieber Tee als Kaffee.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  },
+  {
+   "id": "de-37",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Kannst du mir mal das Salz geben?",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "Informal particle 'mal' is correct."
+  },
+  {
+   "id": "de-38",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Wir haben uns schon lange nicht mehr gesehen.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  },
+  {
+   "id": "de-39",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Den Film habe ich schon zweimal gesehen.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "Object-first order (OVS) is correct."
+  },
+  {
+   "id": "de-40",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Ich bin gestern im Park joggen gegangen.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  },
+  {
+   "id": "de-41",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Mir ist kalt.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "Dative construction with no subject; 'Ich bin kalt' would be wrong."
+  },
+  {
+   "id": "de-42",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Es hat die ganze Nacht geregnet, deshalb sind wir zu Hause geblieben.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  },
+  {
+   "id": "de-43",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Hast du Lust, am Samstag mitzukommen?",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  },
+  {
+   "id": "de-44",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Ich hab heute leider keine Zeit.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "Colloquial 'hab' (without apostrophe) is accepted by Duden."
+  },
+  {
+   "id": "de-45",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Ich wohne seit drei Jahren in Wien.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "Present tense with 'seit' is correct; do not change to the perfect."
+  }
+ ],
+ "conversations": [
+  {
+   "id": "de-conv-1",
+   "level": "B1",
+   "topic": "weekend",
+   "user_turns": [
+    "Hallo! Mein Wochenende war sehr schön.",
+    "Am Samstag ich bin mit meiner Freundin in die Berge gefahren.",
+    "Wir sind vier Stunden gewandert und haben oben ein Picknick gemacht.",
+    "Der Aussicht vom Gipfel war wunderschön.",
+    "Am Sonntag habe ich lange geschlafen und dann einen Kuchen gebackt.",
+    "Und du, was hast du am Wochenende gemacht?"
+   ],
+   "planted": [
+    {
+     "said": "Am Samstag ich bin",
+     "better": "Am Samstag bin ich"
+    },
+    {
+     "said": "Der Aussicht",
+     "better": "Die Aussicht"
+    },
+    {
+     "said": "gebackt",
+     "better": "gebacken"
+    }
+   ]
+  },
+  {
+   "id": "de-conv-2",
+   "level": "B1",
+   "topic": "work",
+   "user_turns": [
+    "Ich arbeite seit zwei Jahren als Krankenpfleger in einem Krankenhaus in Hamburg.",
+    "Die Arbeit ist anstrengend, aber ich mag meine Kollegen sehr.",
+    "Letzte Woche musste ich jede Nacht zu arbeiten, weil ein Kollege krank war.",
+    "Nächsten Monat möchte ich mit mein Chef über eine Gehaltserhöhung sprechen.",
+    "Ich hoffe, dass er sagt ja, denn meine Miete ist gerade gestiegen.",
+    "Wenn nicht, suche ich mir vielleicht eine neue Stelle."
+   ],
+   "planted": [
+    {
+     "said": "jede Nacht zu arbeiten",
+     "better": "jede Nacht arbeiten"
+    },
+    {
+     "said": "mit mein Chef",
+     "better": "mit meinem Chef"
+    },
+    {
+     "said": "dass er sagt ja",
+     "better": "dass er ja sagt"
+    }
+   ]
+  },
+  {
+   "id": "de-conv-3",
+   "level": "B1",
+   "topic": "food",
+   "user_turns": [
+    "Ich koche sehr gern, besonders italienische Gerichte.",
+    "Gestern habe ich für meine Freunde ein Lasagne gemacht.",
+    "Ich habe alle Zutaten auf dem Markt gekauft, weil das Gemüse dort frischer ist.",
+    "Die Lasagne war ein bisschen zu salzig, aber meine Freunde haben sie trotzdem gegessen.",
+    "Zum Nachtisch gab es Eis mit frische Erdbeeren.",
+    "Kennst du ein gutes Rezept für ein Kuchen ohne Zucker?"
+   ],
+   "planted": [
+    {
+     "said": "ein Lasagne",
+     "better": "eine Lasagne"
+    },
+    {
+     "said": "mit frische Erdbeeren",
+     "better": "mit frischen Erdbeeren"
+    },
+    {
+     "said": "für ein Kuchen",
+     "better": "für einen Kuchen"
+    }
+   ]
+  },
+  {
+   "id": "de-conv-4",
+   "level": "B1",
+   "topic": "travel",
+   "user_turns": [
+    "Im Sommer fahre ich mit meiner Familie nach Italien.",
+    "Wir wollen zwei Wochen am Meer bleiben und dann nach Rom besuchen.",
+    "Ich war noch nie in Rom, deshalb freue ich auf die Reise.",
+    "Wir haben schon ein Hotel gebucht, das sehr nah am Strand liegt.",
+    "Weißt du, ob man in Italien überall mit Karte bezahlen kann?",
+    "Wann wir in Rom sind, möchte ich unbedingt das Kolosseum sehen."
+   ],
+   "planted": [
+    {
+     "said": "nach Rom besuchen",
+     "better": "Rom besuchen"
+    },
+    {
+     "said": "freue ich auf",
+     "better": "freue ich mich auf"
+    },
+    {
+     "said": "Wann wir",
+     "better": "Wenn wir"
+    }
+   ]
+  }
+ ]
+}

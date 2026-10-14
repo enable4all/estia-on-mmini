@@ -34,6 +34,7 @@ TOOL_UNAVAILABLE = "Error: the calendar can't be reached right now; try again in
 TOOL_GONE = "Error: the calendar's secret address no longer works (scripts/set-calendar-url.sh on the Mac)."
 TOOL_NOT_SET = "Error: the calendar is not set up (scripts/set-calendar-url.sh on the Mac)."
 CUT_SHORT = "(not everything could be read)"
+GLANCE_NOT_READ = "Calendar today: not read just now."
 TODAY_LINES = 15
 TOMORROW_TIMED = 4
 AGENDA_LINES = 60
@@ -79,6 +80,15 @@ def _on_day(other: date, day: date) -> str:
     return f"{other:%a} {other.day}" + (f" {other:%b}" if abs((other - day).days) >= 7 else "")
 
 
+def _in(wait: timedelta) -> str:
+    """How soon: "in 15 min", "in 1 h", "in 2 h 45 min" (whole minutes, rounded up)."""
+    minutes = max(1, -(-int(wait.total_seconds()) // 60))
+    hours, rest = divmod(minutes, 60)
+    if not hours:
+        return f"in {rest} min"
+    return f"in {hours} h" + (f" {rest} min" if rest else "")
+
+
 def _full(day: date) -> str:
     return f"{day:%a} {day.day} {day:%b} {day.year}"
 
@@ -113,6 +123,51 @@ class CalendarTools:
         head = "Calendar today:" if lines else "Calendar today: nothing"
         cut = [CUT_SHORT] if agenda.truncated else []
         return "\n".join([head, *lines, self._tomorrow(agenda.events, tomorrow), *cut, *missed])
+
+    async def glance(self) -> str:
+        """Today at the start of a call, as counts and times only: the events not over yet (declined left out), the one
+        going on, the next one's times and how soon, when the last ends, the all-day items. Never a title, place or
+        calendar name (that text would make the whole call outside text). Read live, with no note to the user."""
+        now = datetime.fromtimestamp(self._clock(), self._tz)
+        today = now.date()
+        try:
+            agenda = await self._feed.events(self._midnight(today), self._midnight(today + timedelta(days=1)))
+        except FeedError:
+            return GLANCE_NOT_READ
+        if self._none_read(agenda):
+            return GLANCE_NOT_READ
+        items = self._on(agenda.events, today)
+        all_day = sum(1 for event in items if event.all_day)
+        left = [event for event in items if not event.all_day and (event.end > now or event.start >= now)]
+        going = [event for event in left if event.start <= now < event.end]
+        coming = [event for event in left if event.start > now]
+        parts: list[str] = []
+        if left:
+            head = f"{len(left)} event{'' if len(left) == 1 else 's'} left"
+            if going:
+                until = f", until {going[0].end:%H:%M}" if len(going) == 1 else ""
+                head += f" ({len(going)} now{until})"
+            parts.append(head)
+        if coming:
+            first = coming[0]
+            span = f"–{first.end:%H:%M}" if first.end.date() == today and first.end != first.start else ""
+            parts.append(f"next {first.start:%H:%M}{span} ({_in(first.start - now)})")
+        if len(left) > 1:
+            last = max(event.end for event in left)
+            parts.append(
+                f"last ends {last:%H:%M}"
+                if last.date() == today
+                else f"last ends {_on_day(last.date(), today)}, {last:%H:%M}"
+            )
+        text = ", ".join(parts) if parts else ("no more events" if all_day else "nothing more")
+        if all_day:
+            text += f"; {all_day} all-day item{'' if all_day == 1 else 's'}"
+        missed = (
+            f" ({len(agenda.missed)} calendar{'' if len(agenda.missed) == 1 else 's'} not read)"
+            if agenda.missed
+            else ""
+        )
+        return f"Calendar today: {text}{missed}."
 
     async def agenda(self, start: str, days: int = 1) -> str:
         """Whole days from `start` (1 to 14), every event."""

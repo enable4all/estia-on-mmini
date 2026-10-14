@@ -1,3 +1,8 @@
+import dataclasses
+import json
+import os
+import subprocess
+import sys
 import tempfile
 import tomllib
 from pathlib import Path
@@ -134,6 +139,7 @@ def test_health_and_projects_sections(tmp_path: Path) -> None:
     assert (cfg.health_interval_hours, cfg.health_confirm_minutes, cfg.disk_free_min_percent) == (2, 3, 15)
     assert (cfg.projects_root, cfg.projects_default) == (tmp_path, "summary")
     assert (cfg.projects_docs, cfg.projects_code) == (frozenset({"my-project"}), frozenset({"other-project"}))
+    assert cfg.projects_enabled
 
 
 def test_health_and_projects_defaults() -> None:
@@ -141,6 +147,16 @@ def test_health_and_projects_defaults() -> None:
     assert (cfg.health_interval_hours, cfg.health_confirm_minutes, cfg.disk_free_min_percent) == (4, 5, 10)
     assert cfg.projects_root == Path.home() / "dev" and cfg.projects_default == "summary"
     assert cfg.projects_docs == frozenset() and cfg.photo_max_count == 4
+
+
+def test_projects_are_an_extra_off_without_their_section() -> None:
+    """Not everyone is a developer: no [projects], no project tools; the section alone turns them on, at summary."""
+    assert not parse_config({"bot_number": "+306900000000", "allowed_acis": [ACI]}).projects_enabled
+    assert not Config(bot_number="+306900000000", allowed_acis=frozenset({ACI})).projects_enabled
+    on = parse_config({"bot_number": "+306900000000", "allowed_acis": [ACI], "projects": {}})
+    assert on.projects_enabled and on.projects_default == "summary" and on.projects_root == Path.home() / "dev"
+    docs = parse_config({"bot_number": "+306900000000", "allowed_acis": [ACI], "projects": {"default": "docs"}})
+    assert docs.projects_enabled and docs.projects_default == "docs"  # the owner's own config keeps working
 
 
 @pytest.mark.parametrize(
@@ -387,8 +403,9 @@ def test_digest_time_is_top_level_and_the_mail_one_still_works() -> None:
         parse_config({**base, "digest_time": "12:30"})
 
 
-def test_calls_section_with_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_calls_section_with_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HOME", "/Users/alex")  # a short name: the socket folder fits in the data folder
+    monkeypatch.setattr(config_module, "CODE_ROOT", tmp_path)  # a checkout without a vendor folder
     cfg = parse_config({"bot_number": "+306900000000", "allowed_acis": [ACI], "voice": {}, "calls": {}})
     assert cfg.calls_enabled  # an empty [calls] turns calls on (it needs [voice])
     vendor = cfg.data_dir / "vendor"  # nothing under ~/dev or /opt/homebrew: the helpers live in the data folder
@@ -611,6 +628,16 @@ def test_call_fillers_and_ringing() -> None:
     assert (chosen.calls_fillers, chosen.calls_answer_after_seconds) == (True, 0.0)
     with pytest.raises(ConfigError, match=r"calls\.answer_after_seconds"):
         parse_config(base | {"calls": {"answer_after_seconds": 30}})
+
+
+def test_what_stops_her_on_a_call_is_loudness_unless_speech_is_chosen() -> None:
+    base: dict[str, object] = {"bot_number": "+306900000000", "allowed_acis": [ACI], "voice": {}}
+    assert parse_config(base | {"calls": {}}).calls_barge == "loudness"
+    assert parse_config(base).calls_barge == "loudness"  # no [calls]: the default all the same
+    assert parse_config(base | {"calls": {"barge": "speech"}}).calls_barge == "speech"
+    for wrong in ("vad", "Speech", "", True, 1):
+        with pytest.raises(ConfigError, match=r'calls\.barge must be "loudness" or "speech"'):
+            parse_config(base | {"calls": {"barge": wrong}})
 
 
 BASE: dict[str, object] = {"bot_number": "+306900000000", "allowed_acis": [ACI]}
@@ -851,7 +878,10 @@ def test_the_call_env_names_java_only_when_it_is_known(tmp_path: Path) -> None:
     assert unknown["SIGNAL_CALL_TUNNEL_BIN"] == "/t/sct"
 
 
-def test_the_calls_signal_cli_comes_from_the_data_folder_with_the_configured_java(tmp_path: Path) -> None:
+def test_the_calls_signal_cli_comes_from_the_data_folder_with_the_configured_java(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(config_module, "CODE_ROOT", tmp_path / "checkout")  # a checkout without a vendor folder
     sockets = Path(tempfile.mkdtemp(prefix="c", dir="/tmp"))
     cfg = Config(
         bot_number="+306900000000",
@@ -1037,3 +1067,141 @@ def test_the_style_file_is_read_next_to_the_config_that_was_loaded(tmp_path: Pat
     """soul.md sits next to the config file actually loaded, never in the real home when another config is given."""
     cfg = load_config(write(tmp_path, GOOD))
     assert cfg.soul_path == tmp_path / "soul.md"
+
+
+# hardening: the code's own folder, every user path under $HOME, history retention and the model pin
+
+
+def test_code_root_is_the_folder_the_code_runs_from() -> None:
+    """The release (or checkout) the bridge runs from: src/local_assistant/config.py two folders up."""
+    assert Path(config_module.__file__).resolve().parents[2] == config_module.CODE_ROOT
+    assert (config_module.CODE_ROOT / "src" / "local_assistant" / "config.py").is_file()
+
+
+def test_the_call_helpers_come_from_the_codes_vendor_folder_when_it_has_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An install in its own user ships the call helpers inside the release (root-owned); a checkout without a vendor
+    folder keeps them in the data folder, as before."""
+    code = tmp_path / "release"
+    code.mkdir()
+    monkeypatch.setattr(config_module, "CODE_ROOT", code)
+    cfg = Config(bot_number="+306900000000", allowed_acis=frozenset({ACI}), data_dir=tmp_path / "data")
+    assert cfg.vendor_dir == tmp_path / "data" / "vendor"  # no vendor folder in the code: the data folder's
+    (code / "vendor").mkdir()
+    assert cfg.vendor_dir == code / "vendor"
+    assert cfg.call_signal_cli == code / "vendor" / "signal-cli-0.14.9-jvm/signal-cli-0.14.9/bin/signal-cli"
+    assert (
+        cfg.call_tunnel == code / "vendor" / "signal-call-tunnel/signal-call-tunnel/target/release/signal-call-tunnel"
+    )
+    chosen = dataclasses.replace(cfg, calls_signal_cli=Path("/opt/sc"), calls_tunnel=Path("/opt/sct"))
+    assert (chosen.call_signal_cli, chosen.call_tunnel) == (Path("/opt/sc"), Path("/opt/sct"))  # the config wins
+
+
+def test_every_user_path_follows_home(tmp_path: Path) -> None:
+    """Run as another user (HOME=/var/estia under launchd), every default path is under that HOME, never a path
+    fixed in the code: checked in a fresh interpreter, since some defaults are read when the module is imported."""
+    home = tmp_path / "home"
+    home.mkdir()
+    script = (
+        "import json; from pathlib import Path; from local_assistant import config as c\n"
+        "cfg = c.Config(bot_number='+306900000000', allowed_acis=frozenset())\n"
+        "print(json.dumps([str(p) for p in (c.DEFAULT_CONFIG_PATH, cfg.data_dir, cfg.log_dir, cfg.db_path,"
+        " cfg.signal_attachments_dir, cfg.web_keys_path, cfg.projects_root, cfg.mail_token_path, *cfg.watched_log_dirs,"
+        " c._default_call_socket_dir(Path('/x' * 40)))]))\n"
+    )
+    env = {**os.environ, "HOME": str(home)}
+    done = subprocess.run([sys.executable, "-I", "-c", script], env=env, capture_output=True, text=True, check=True)
+    paths = json.loads(done.stdout)
+    assert paths and all(path.startswith(str(home) + "/") for path in paths), paths
+
+
+def test_history_is_kept_forever_unless_keep_days_is_set() -> None:
+    assert parse_config(BASE).keep_days is None
+    assert parse_config(BASE | {"privacy": {}}).keep_days is None
+    assert parse_config(BASE | {"privacy": {"keep_days": 90}}).keep_days == 90
+    assert parse_config(BASE | {"privacy": {"keep_days": 1}}).keep_days == 1
+
+
+@pytest.mark.parametrize(
+    ("privacy", "message"),
+    [
+        ("yes", r"\[privacy\] must be a table"),
+        ({"keep_days": 0}, "privacy.keep_days"),
+        ({"keep_days": -3}, "privacy.keep_days"),
+        ({"keep_days": True}, "privacy.keep_days"),
+        ({"keep_days": 30.5}, "privacy.keep_days"),
+        ({"keep_days": "30"}, "privacy.keep_days"),
+        ({"keep_days": 36_501}, "privacy.keep_days"),
+    ],
+)
+def test_bad_privacy_settings(privacy: object, message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        parse_config(BASE | {"privacy": privacy})
+
+
+DIGEST = "a1" * 32
+
+
+@pytest.mark.parametrize("model", ["gpt-oss:120b-cloud", "gemma4:cloud", "GLM-5:Cloud", "deepseek-v3.1:671b-cloud"])
+def test_an_ollama_cloud_model_is_refused_by_its_name(model: str) -> None:
+    """The model always runs on the Mac: a cloud model's tag ends in -cloud or :cloud (it runs on Ollama's servers)."""
+    with pytest.raises(ConfigError, match="cloud model"):
+        parse_config(BASE | {"model": model})
+
+
+@pytest.mark.parametrize(
+    "model", ["local-worker", "gemma4:26b-mlx", "cloudberry:7b", "gemma4:cloudless", "my-cloud", "home-cloud:latest"]
+)
+def test_a_local_model_name_is_kept(model: str) -> None:
+    assert parse_config(BASE | {"model": model}).model == model
+
+
+def test_the_model_digest_is_optional_and_kept_as_64_hex_digits() -> None:
+    assert parse_config(BASE).model_digest == ""
+    assert parse_config(BASE | {"model_digest": DIGEST}).model_digest == DIGEST
+    assert parse_config(BASE | {"model_digest": f"sha256:{DIGEST.upper()}"}).model_digest == DIGEST
+    assert parse_config(BASE | {"model_digest": f"  {DIGEST}  "}).model_digest == DIGEST
+
+
+@pytest.mark.parametrize(
+    "value", ["", "abc", "sha256:" + "a1" * 31, "a1" * 33, "g1" * 32, "sha512:" + DIGEST, 1234, True]
+)
+def test_a_model_digest_that_is_no_sha256_is_refused(value: object) -> None:
+    with pytest.raises(ConfigError, match="model_digest"):
+        parse_config(BASE | {"model_digest": value})
+
+
+def test_the_example_config_explains_retention_and_the_model_pin() -> None:
+    example = (Path(__file__).resolve().parents[1] / "config.example.toml").read_text(encoding="utf-8")
+    assert "#model_digest = " in example and "#[privacy]" in example and "#keep_days = " in example
+    cfg = parse_config(tomllib.loads(example))
+    assert cfg.keep_days is None and cfg.model_digest == ""  # commented out: kept forever, no pin
+    lines = example.splitlines()
+    pin = next(line for line in lines if line.startswith("#model_digest"))
+    keep = lines[lines.index("#[privacy]") + 1]
+    uncommented = tomllib.loads("\n".join(line.lstrip("#").split("  #")[0] for line in (pin, keep)))
+    assert parse_config(BASE | {"model_digest": uncommented["model_digest"]}).model_digest
+    assert parse_config(BASE | {"privacy": {"keep_days": uncommented["keep_days"]}}).keep_days
+
+
+def test_her_own_signal_cli_and_java_come_from_the_release_when_it_has_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In her own user nothing she runs may sit in a folder you can change (Homebrew is yours): the release's copies
+    are the defaults; a checkout without them keeps "signal-cli" on PATH and the Java macOS knows, as before."""
+    code = tmp_path / "release"
+    code.mkdir()
+    monkeypatch.setattr(config_module, "CODE_ROOT", code)
+    assert load_config(write(tmp_path, GOOD)).signal_cli == "signal-cli"
+    cfg = Config(bot_number="+306900000000", allowed_acis=frozenset({ACI}), data_dir=tmp_path / "data")
+    assert cfg.java_home is None
+    native = code / "vendor/signal-cli-native/bin/signal-cli"
+    native.parent.mkdir(parents=True)
+    native.write_text("x")
+    (code / "vendor/openjdk.jdk/Contents/Home").mkdir(parents=True)
+    assert load_config(write(tmp_path, GOOD)).signal_cli == str(native)
+    assert cfg.java_home == code / "vendor/openjdk.jdk/Contents/Home"
+    chosen = dataclasses.replace(cfg, calls_java_home=Path("/Library/Java/x/Contents/Home"))
+    assert chosen.java_home == Path("/Library/Java/x/Contents/Home")  # the config wins
+    assert load_config(write(tmp_path, GOOD + 'signal_cli = "/opt/sc"\n')).signal_cli == "/opt/sc"

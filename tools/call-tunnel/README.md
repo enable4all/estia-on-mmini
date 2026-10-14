@@ -11,7 +11,7 @@ Voice calls need two things outside this repo, both built or installed as the no
    - local changes: relay-only ICE (callers never learn the Mac's IP addresses), WebRTC audio processing off in
      pipe mode (the audio is synthetic), and a real-time clock thread (without it macOS stretches the 10 ms audio
      timer to ~90 ms in background processes and the call sounds garbled), with a clock stats log line.
-2. **signal-cli, JVM build**, same version as Homebrew's (`install-signal-cli-jvm.sh`, signature checked).
+2. **signal-cli, JVM build**, same version as Homebrew's (`install-signal-cli-jvm.sh`: the signature is checked, and the maintainer's key and the signer must both have the pinned fingerprint `FA10826A74907F9EC6BBB7FC2BA2CD21B5B09570`, or nothing is unpacked).
    Homebrew's native build cannot place calls (missing reflection metadata for `TurnServerInfo`; also on master).
    Runs on Homebrew `openjdk` (keg-only); the bridge sets `JAVA_HOME` and `JAVA_OPTS` for it.
 

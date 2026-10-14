@@ -19,9 +19,20 @@ name = "Estia"
 language = "en"
 ollama_base_url = "http://127.0.0.1:11434/v1"
 #model = "local-worker"          # default: the alias made in setup_assistant.md, 2.2 (or another tag you made the same way)
+# The model always runs on this Mac: a cloud model (a tag ending in -cloud or :cloud, which Ollama runs on its own
+# servers) is refused here, and one Ollama lists as remote pauses every answer until the model is on the Mac again.
+# The model's pin: answers pause (a note says so) when the alias no longer has this digest, so a model put in its place
+# gets no message. Left out: no pin. Doctor shows the digest Ollama has now; after you change the model yourself, put
+# the new one here and restart her.
+#model_digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 signal_cli = "signal-cli"       # on PATH (Homebrew's default), or a full path
 digest_time = "09:15"           # the morning digest (calendar, then mail), every day; before 12:00
 #host_label = "the Mac"          # top level, not under [health]: how status messages name this machine, e.g. "the study Mac"
+
+# History: messages, pages read and tool calls are kept until you delete them. With keep_days, older ones are deleted
+# each night and overwritten in the database file; a message an open reminder or check-in points to stays.
+#[privacy]
+#keep_days = 365
 
 # Health checks: alerts only for real problems, as Signal notes. The Mac is checked every interval_hours.
 [health]
@@ -39,13 +50,17 @@ disk_free_min_percent = 10
 #  { label = "my-backup", launchd = "system/com.example.backup", stuck_after_minutes = 1500 },
 #]
 
-# Projects Gemma may look at, read-only: git repositories directly in root. On by default: the README, AGENTS.md,
-# todo.md and recent commits of each repository in root are readable to the model.
-[projects]
-#root = "~/dev"                 # default: ~/dev
-default = "summary"             # every project: project_status (README start, AGENTS.md, todo, commits)
-docs = []                       # e.g. ["my-project", "local-assistant"]: also project_read and project_search on the docs
-#code = []                      # a level for source files; for now it works like docs
+# Projects (extra, off by default): the git projects in one folder of this Mac, read-only. Off without [projects];
+# setup asks (most people: no). Levels: summary (the README, open to-do items and recent commits), docs (also the
+# project's documents) and code (also its source code). Only files git tracks, never secret-like names such as .env,
+# never outside the folder you named. In her own user (_estia) root is your folder's absolute path (the move writes
+# it), and her user reads that folder read-only, nothing else in your home: scripts/share-projects.sh (as you, no sudo;
+# the move runs it). scripts/setup.sh --extras switches it on later. After a change: restart her.
+#[projects]
+#root = "~/dev"                 # the folder that holds the projects (git repositories directly in it)
+#default = "summary"            # every project: summary, docs or code
+#docs = []                      # single projects at level docs, e.g. ["my-project"]
+#code = []                      # single projects at level code
 
 # Mail, read-only (Microsoft Graph, delegated Mail.Read). Off without [mail]. Work or school (Microsoft 365) mailboxes only.
 # IDs come from the app registration (Microsoft Entra admin center, "Accounts in this organizational directory only"):
@@ -132,6 +147,9 @@ docs = []                       # e.g. ["my-project", "local-assistant"]: also p
 #answer_after_seconds = 5     # let it ring (about twice) before she answers
 #wake_call = true             # "call me" reminders place a Signal call (the text always comes first); false: texts only
 #max_calls_per_day = 3        # call reminders a day (a second try two minutes later belongs to the same one)
+#barge = "loudness"           # what stops her when you talk over her: "loudness" or "speech" (the voice service's
+#                             # speech detector, on the Mac: road noise rarely stops her; a whisper may not, a radio or
+#                             # a passenger talking does). The other rule is only counted, in the log at each call's end
 
 # Reminders you set ("remind me at 17:00 to ...", /remind): on without this section. They come at night too and are never
 # paused: you set them. For anything that matters, keep your phone's own alarm (she runs on one Mac).
@@ -167,6 +185,7 @@ docs = []                       # e.g. ["my-project", "local-assistant"]: also p
 # Off without [maps]. Setup: setup_assistant.md "Places and routes (once)".
 #[maps]
 #home = "Street 1, 1000 AA Town"   # private file; sent to Google to find it and for routes from/to home; "near me" searches get only a ~1 km area
+                                   # the database keeps that area and a keyed tag of the address, never the address
 #daily_cap = 30                    # requests per API and day (Google's free monthly allowance with room to spare)
 #region = "NL"                     # two-letter region bias sent to Google; leave it out to send none
 

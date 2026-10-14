@@ -89,11 +89,12 @@ private func sine(_ hertz: Double, rate: Int, count: Int, amplitude: Float = 1) 
     }
 
     @Test func healthListsTheLanguages() throws {
-        let body = healthBody(stt: "ready", tts: "loading")
+        let body = healthBody(stt: "ready", tts: "loading", vad: "unavailable")
         #expect(body["stt"] as? String == "ready" && body["tts"] as? String == "loading")
         #expect(body["languages"] as? [String] == Languages.all)
+        // the speech detector's state is one more field; the others stay byte for byte as they were
         let text = String(decoding: HTTP.json(200, body), as: UTF8.self)
-        #expect(text.hasSuffix(#"{"languages":["en","es","it","ko","pt","nl","pl","de","ja","ru","fr"],"stt":"ready","tts":"loading"}"#))
+        #expect(text.hasSuffix(#"{"languages":["en","es","it","ko","pt","nl","pl","de","ja","ru","fr"],"stt":"ready","tts":"loading","vad":"unavailable"}"#))
     }
 }
 
@@ -104,7 +105,9 @@ private func sine(_ hertz: Double, rate: Int, count: Int, amplitude: Float = 1) 
         #expect(Route("POST", "/v1/audio/speech") == .speak)
         #expect(Route("GET", "/health") == .health)
         #expect(Route("GET", "/health?x=1") == .health)
+        #expect(Route("POST", "/vad?stream=call-1") == .vad)
         #expect(Route("GET", "/v1/audio/speech") == .methodNotAllowed)
+        #expect(Route("GET", "/vad?stream=call-1") == .methodNotAllowed)
         #expect(Route("GET", "/other") == .notFound)
     }
 }
@@ -202,6 +205,7 @@ private func sine(_ hertz: Double, rate: Int, count: Int, amplitude: Float = 1) 
         let cases: [(VoiceError, Int, String)] = [
             (.notAudio, 415, "not_audio"), (.tooLong, 413, "too_long"), (.unreadable, 422, "unreadable"),
             (.notReady, 503, "not_ready"), (.failed, 500, "failed"), (.unsupportedLanguage, 400, "unsupported_language"),
+            (.badStream, 400, "bad_stream"), (.badChunk, 400, "bad_chunk"), (.unavailable, 503, "unavailable"),
         ]
         for (error, status, code) in cases {
             let text = String(decoding: error.response, as: UTF8.self)

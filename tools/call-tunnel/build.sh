@@ -4,14 +4,15 @@
 # Needs (Homebrew): rustup cmake protobuf coreutils; then: rustup toolchain install 1.91.1 --profile minimal
 # Usage: tools/call-tunnel/build.sh [target dir]
 #   default: $LOCAL_ASSISTANT_VENDOR/signal-call-tunnel, with LOCAL_ASSISTANT_VENDOR defaulting to
-#   ~/Library/Application Support/local-assistant/vendor
+#   this checkout's vendor/ (gitignored; estia-deploy copies it into her release)
 set -eu
 
 TUNNEL_REPO=https://github.com/visigoth/signal-call-tunnel
 PR5_HEAD=2f924268e1d3083eef70dd82718f1e7e760b13d1   # PR #5 pipe audio, on upstream main 02c84e9
 RINGRTC=a86f8a6832cec291ef4f77e4ee9b941e5b91a01f     # submodule pin (RingRTC v2.65.1)
 HERE=$(cd "$(dirname "$0")" && pwd)
-VENDOR="${LOCAL_ASSISTANT_VENDOR:-$HOME/Library/Application Support/local-assistant/vendor}"
+REPO=$(cd "$(dirname "$0")/../.." && pwd)
+VENDOR="${LOCAL_ASSISTANT_VENDOR:-$REPO/vendor}"
 DEST=${1:-$VENDOR/signal-call-tunnel}
 BREW=$(brew --prefix 2>/dev/null || echo /opt/homebrew)  # Apple silicon default when brew is not on PATH
 

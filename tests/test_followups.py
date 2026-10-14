@@ -283,3 +283,10 @@ async def test_the_idle_pass_runs_the_follow_ups_after_learning(store: Store) ->
     profiler = Profiler(store, profile, context, FakeGemma(), TZ, clock=clock, after_learning=down)
     with pytest.raises(GemmaUnavailableError):  # raised after the summary step: the next pass waits for quiet
         await profiler.run_once()
+
+
+def test_a_practice_turn_is_never_looked_at_for_check_ins(store: Store) -> None:
+    practice = store.start_practice_conversation()
+    message_id = said(store, "Ik ga morgen de tandarts bellen.")
+    store.assign_seq(message_id, practice.id)
+    assert not make(store, FakeGemma()).has_work()

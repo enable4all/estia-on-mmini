@@ -7,6 +7,8 @@
 # (same with -s ollama or -s google-maps). Without a keychain, write web.env yourself (mode 0600, one per line):
 # BRAVE_API_KEY=..., OLLAMA_API_KEY=..., GOOGLE_MAPS_API_KEY=...
 # A key the keychain does not hold keeps its line from the old web.env; to remove a key, delete its line there.
+# Once she runs as her own user _estia, her web.env is hers alone: each key goes through a pipe into
+# /usr/bin/sudo /usr/local/estia/bin/estia secret set web.env <KEY> (never on a command line, never printed).
 set +x  # never trace: the keys pass through variables
 set -euo pipefail
 kc="$HOME/Library/Keychains/login.keychain-db"
@@ -28,6 +30,16 @@ fi
 if [[ -z "$brave" && -z "$ollama" && -z "$maps" ]]; then
   echo "No key is in the login keychain (services brave-search, ollama, google-maps); nothing saved." >&2
   exit 1
+fi
+source "$(dirname "$0")/own-user.sh"  # moved, and her commands' fixed paths ($estia, $estia_deploy)
+if moved; then
+  pipe_key() { [[ -z "$2" ]] || printf '%s\n' "$2" | "$sudo" "$estia" secret set web.env "$1" >/dev/null; }
+  pipe_key BRAVE_API_KEY "$brave"
+  pipe_key OLLAMA_API_KEY "$ollama"
+  pipe_key GOOGLE_MAPS_API_KEY "$maps"
+  echo "saved in her web.env (mode 600, readable only by _estia): Brave key ${#brave}, Ollama key ${#ollama}, Google Maps key ${#maps} characters (0 = not in the keychain: that key stays as it was)"
+  unset brave ollama maps
+  exit 0
 fi
 keep() { [[ -f "$file" ]] && grep -E "^$1=" "$file" | tail -1 || true; }  # a hand-written line, never printed
 kept=""

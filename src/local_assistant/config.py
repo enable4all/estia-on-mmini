@@ -22,16 +22,20 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from local_assistant.language import CODES
 
+# the folder the code runs from: a checkout, or a release of an install in its own user (root-owned, read-only)
+CODE_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "local-assistant" / "config.toml"
 LOCALTIME = Path("/etc/localtime")  # on a Mac a link into the time zone database
 JAVA_HOME_TOOL = Path("/usr/libexec/java_home")
 DEFAULT_HOST_LABEL = "the Mac"
 DEFAULT_NAME = "Estia"  # the assistant's name until the config's `name` gives her another (every home names its own)
 # the Signal profile picture until the config's `avatar` names another ("" for none): Estia's e., when the repo has it
-DEFAULT_AVATAR = Path(__file__).resolve().parents[2] / "docs" / "brand" / "estia-avatar.png"
+DEFAULT_AVATAR = CODE_ROOT / "docs" / "brand" / "estia-avatar.png"
 AVATAR_MAX_BYTES = 5_000_000
 _IMAGE_STARTS = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff")  # PNG, JPEG
 _NUMBER = re.compile(r"^\+[0-9]{8,15}$")
+_DIGEST = re.compile(r"^(?:sha256:)?([0-9a-f]{64})$")
+KEEP_DAYS_MAX = 36_500  # [privacy] keep_days: at most 100 years
 _ZONE_KEY = re.compile(r"zoneinfo(?:\.default)?/(.+)$")
 
 
@@ -170,13 +174,25 @@ class DeviceSpec:
 
 
 def _default_tapo_helper() -> tuple[str, ...]:
-    tapo = Path(__file__).resolve().parents[2] / "tools" / "tapo"
+    tapo = CODE_ROOT / "tools" / "tapo"
     return (str(tapo / ".venv" / "bin" / "python"), "-I", str(tapo / "helper.py"))  # -I: isolated mode
 
 
 def _default_ical_helper() -> tuple[str, ...]:
-    ical = Path(__file__).resolve().parents[2] / "tools" / "ical"
+    ical = CODE_ROOT / "tools" / "ical"
     return (str(ical / ".venv" / "bin" / "python"), "-I", str(ical / "helper.py"))
+
+
+# what a release of her own user holds in vendor/ besides the call helpers: Homebrew's signal-cli and a JDK, copied by
+# estia-deploy, so nothing she runs sits in a folder the owner can change
+_NATIVE_SIGNAL_CLI = Path("signal-cli-native/bin/signal-cli")
+_JDK_HOME = Path("openjdk.jdk/Contents/Home")
+
+
+def default_signal_cli() -> str:
+    """The release's own copy of signal-cli when it has one, else "signal-cli" on PATH (a checkout)."""
+    native = CODE_ROOT / "vendor" / _NATIVE_SIGNAL_CLI
+    return str(native) if native.is_file() else "signal-cli"
 
 
 # where tools/call-tunnel's scripts put the JVM signal-cli and our call helper, under <data_dir>/vendor
@@ -210,6 +226,8 @@ class Config:
     language: str = "en"  # the language at the start; /language changes it (kept in the database, which then wins)
     ollama_base_url: str = "http://127.0.0.1:11434/v1"
     model: str = "local-worker"
+    # the Ollama digest the model alias must have (64 hex digits); "" = not pinned: answers never pause for it
+    model_digest: str = ""
     signal_cli: str = "signal-cli"
     data_dir: Path = field(default_factory=_default_data_dir)
     log_dir: Path = field(default_factory=_default_log_dir)
@@ -234,6 +252,8 @@ class Config:
     disk_free_min_percent: float = 10
     health_extra_checks: tuple[ExtraCheck, ...] = ()  # more services to check, from [health] extra_checks
     watched_log_dirs: tuple[Path, ...] = field(default_factory=_default_watched_logs)  # *.log files scanned for ERROR
+    # projects: an extra, off without [projects] (not everyone is a developer); on, every project is at summary
+    projects_enabled: bool = False
     projects_root: Path = field(default_factory=_default_projects_root)
     projects_default: str = "summary"
     projects_docs: frozenset[str] = frozenset()
@@ -292,6 +312,9 @@ class Config:
     calls_answer_after_seconds: float = 5.0  # let it ring about twice
     calls_wake_call: bool = True  # "call me" reminders place a Signal call (with [calls] only: see wake_calls)
     calls_max_calls_per_day: int = 3  # call reminders a day (a retry is part of the same one)
+    # what stops her when the caller talks over her: "loudness" (default) or "speech" (the voice service's speech
+    # detector); the other one runs beside it and is only counted
+    calls_barge: str = "loudness"
 
     # reminders the user sets ("remind me at 17:00 to ..."): on without the [reminders] section
     reminders_enabled: bool = True
@@ -333,6 +356,9 @@ class Config:
     # her personality (the user's own soul.md, style only); None: no style file (the tests)
     soul_path: Path | None = None
 
+    # [privacy] keep_days: messages, pages and tool calls older than this are deleted; None = kept, as before
+    keep_days: int | None = None
+
     @property
     def spotify_enabled(self) -> bool:
         return bool(self.spotify_client_id)
@@ -343,13 +369,23 @@ class Config:
 
     @property
     def vendor_dir(self) -> Path:
-        """Where the call helpers are built and installed (tools/call-tunnel's scripts)."""
-        return self.data_dir / "vendor"
+        """Where the call helpers are (tools/call-tunnel's scripts): the code's own vendor folder when it has one (a
+        release of an install in its own user, root-owned), else the data folder's (a checkout)."""
+        shipped = CODE_ROOT / "vendor"
+        return shipped if shipped.is_dir() else self.data_dir / "vendor"
 
     @property
     def call_signal_cli(self) -> Path:
         """The JVM signal-cli that places and answers calls."""
         return self.calls_signal_cli or self.vendor_dir / _CALLS_SIGNAL_CLI
+
+    @property
+    def java_home(self) -> Path | None:
+        """Java for the JVM signal-cli: the config's, else the release's own JDK; None: the one macOS knows."""
+        if self.calls_java_home is not None:
+            return self.calls_java_home
+        shipped = CODE_ROOT / "vendor" / _JDK_HOME
+        return shipped if shipped.is_dir() else None
 
     @property
     def call_tunnel(self) -> Path:
@@ -444,7 +480,7 @@ def parse_config(raw: dict[str, object]) -> Config:
     for key, default in (
         ("ollama_base_url", "http://127.0.0.1:11434/v1"),
         ("model", "local-worker"),
-        ("signal_cli", "signal-cli"),
+        ("signal_cli", default_signal_cli()),
     ):
         value = raw.get(key, default)
         if not isinstance(value, str) or not value:
@@ -473,12 +509,14 @@ def parse_config(raw: dict[str, object]) -> Config:
         avatar=_avatar(raw),
         language=_language(raw),
         ollama_base_url=strings["ollama_base_url"],
-        model=strings["model"],
+        model=_model(strings["model"]),
+        model_digest=_model_digest(raw),
         signal_cli=strings["signal_cli"],
         health_interval_hours=_positive(health, "interval_hours", 4, "health"),
         health_confirm_minutes=_positive(health, "confirm_minutes", 5, "health"),
         disk_free_min_percent=_positive(health, "disk_free_min_percent", 10, "health"),
         **_health_settings(health),
+        projects_enabled="projects" in raw,
         projects_root=Path(str(projects.get("root", _default_projects_root()))).expanduser(),
         projects_default=str(default_level),
         projects_docs=_names(projects, "docs"),
@@ -495,7 +533,50 @@ def parse_config(raw: dict[str, object]) -> Config:
         **_reminder_settings(raw.get("reminders")),
         **_initiative_settings(raw.get("initiative")),
         soul_path=DEFAULT_CONFIG_PATH.parent / "soul.md",
+        keep_days=_keep_days(raw.get("privacy")),
     )
+
+
+def is_cloud_model(name: str) -> bool:
+    """An Ollama cloud model by its name: the tag ends in "-cloud" or is "cloud" (gpt-oss:120b-cloud, gemma4:cloud).
+    It runs on Ollama's servers. A local name that points at one is found by Ollama's own entry (gemma.ModelEntry)."""
+    _, colon, tag = name.strip().casefold().rpartition("/")[2].rpartition(":")
+    return bool(colon) and (tag == "cloud" or tag.endswith("-cloud"))  # a name without a tag ("my-cloud") is local
+
+
+def _model(name: str) -> str:
+    """The model always runs on this Mac: a cloud model's name is refused."""
+    if is_cloud_model(name):
+        raise ConfigError(
+            f'model "{name}" is an Ollama cloud model: it runs on Ollama\'s servers, and the model runs only on this '
+            'Mac. Use one downloaded here ("ollama list" shows them).'
+        )
+    return name
+
+
+def _model_digest(raw: dict[str, object]) -> str:
+    """The digest Ollama reports for the model alias (/api/tags), as 64 lowercase hex digits; "" when not pinned."""
+    if "model_digest" not in raw:
+        return ""
+    value = raw["model_digest"]
+    found = _DIGEST.match(value.strip().lower()) if isinstance(value, str) else None
+    if found is None:
+        raise ConfigError('model_digest must be the model\'s sha256 digest, like "sha256:" and 64 hex digits')
+    return found.group(1)
+
+
+def _keep_days(privacy: object) -> int | None:
+    """[privacy] keep_days: how many days of history are kept (whole days, at least 1); left out: all of it."""
+    if privacy is None:
+        return None
+    if not isinstance(privacy, dict):
+        raise ConfigError("[privacy] must be a table")
+    if "keep_days" not in privacy:
+        return None
+    days = privacy["keep_days"]
+    if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= KEEP_DAYS_MAX:
+        raise ConfigError(f"privacy.keep_days must be a whole number of days from 1 to {KEEP_DAYS_MAX}")
+    return days
 
 
 def _host_label(raw: dict[str, object]) -> str:
@@ -938,6 +1019,10 @@ class _CallsSettings(TypedDict, total=False):
     calls_answer_after_seconds: float
     calls_wake_call: bool
     calls_max_calls_per_day: int
+    calls_barge: str
+
+
+BARGE_RULES = ("loudness", "speech")
 
 
 def _calls_settings(calls: object, *, voice: bool) -> _CallsSettings:
@@ -993,6 +1078,9 @@ def _calls_settings(calls: object, *, voice: bool) -> _CallsSettings:
     per_day = calls.get("max_calls_per_day", 3)
     if isinstance(per_day, bool) or not isinstance(per_day, int) or not 1 <= per_day <= 10:
         raise ConfigError("calls.max_calls_per_day must be a whole number from 1 to 10")
+    barge = calls.get("barge", "loudness")
+    if barge not in BARGE_RULES:
+        raise ConfigError('calls.barge must be "loudness" or "speech"')
     settings: _CallsSettings = {
         "calls_enabled": True,
         "calls_speed": float(speed),
@@ -1006,6 +1094,7 @@ def _calls_settings(calls: object, *, voice: bool) -> _CallsSettings:
         "calls_answer_after_seconds": numbers["answer_after_seconds"],
         "calls_wake_call": wake_call,
         "calls_max_calls_per_day": per_day,
+        "calls_barge": barge,
     }
     if "signal_cli" in paths:
         settings["calls_signal_cli"] = paths["signal_cli"]

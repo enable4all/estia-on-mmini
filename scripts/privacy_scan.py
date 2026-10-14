@@ -277,6 +277,12 @@ def load_owner(config: Path | None, root: Path) -> list[tuple[str, re.Pattern[st
         return owner_values(path, example_text)
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         if config is None:
+            if (Path(os.environ.get("ESTIA_ROOT") or "/") / "var" / "estia").is_dir():  # her own user has it now
+                print(
+                    "privacy scan: note: your own config values were not checked: her config is in /var/estia, "
+                    "readable only by _estia. --config <file> checks against a copy you can read.",
+                    file=sys.stderr,
+                )
             return []
         raise ScanError(f"cannot read the config {config}") from exc
 

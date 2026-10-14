@@ -21,6 +21,7 @@ NUMBERS_KEY = "mail:numbers"
 LAST_DIGEST_KEY = "mail:last_digest_at"  # set by the morning digest: actions since then are new
 BLOCK_LIMIT = 10
 EMPTY = "Mail: nothing needs you today."
+GLANCE_EMPTY = "Mail digest: nothing needs a reply or an action."
 
 
 def _iso(epoch: float) -> str:
@@ -74,11 +75,7 @@ class MailDigest:
     def compose(self, header: str | None = None) -> str:
         """The mail digest now (also what the mail_digest tool returns); `header` replaces the dated first line."""
         now = self._clock()
-        last = float(self._store.get_state(LAST_DIGEST_KEY) or now - 86_400)
-        since = _iso(now - self._reply_days * 86_400)
-        needs = self._store.mail_needing_reply(since)
-        known = [m for m in self._store.unlabelled_from_known(since) if m.id not in {n.id for n in needs}]
-        actions = self._store.mail_actions(_iso(last), since)
+        needs, known, actions = self._pending(now)
         if not (needs or known or actions):
             return EMPTY
         local = datetime.fromtimestamp(now, self._tz)
@@ -90,6 +87,27 @@ class MailDigest:
             lines.append("Actions:")
             lines += self._block(actions, local)
         return "\n".join(lines)
+
+    def glance(self) -> str:
+        """The digest as numbers only, for the start of a call: no sender, subject or summary (outside text), and no
+        mail gets its number of the day."""
+        needs, known, found = self._pending(self._clock())
+        answer, actions = len(needs) + len(known), len(found)
+        if not (answer or actions):
+            return GLANCE_EMPTY
+        urgent = sum(1 for mail in needs if mail.label == "urgent_reply")
+        parts = [f"{answer} to answer" + (f" ({urgent} urgent)" if urgent else "")] if answer else []
+        parts += [f"{actions} action{'' if actions == 1 else 's'}"] if actions else []
+        return f"Mail digest: {', '.join(parts)}."
+
+    def _pending(self, now: float) -> tuple[list[MailHeader], list[MailHeader], list[MailHeader]]:
+        """What the digest shows now: mail that needs a reply (labelled, then unlabelled mail from people the user
+        writes to) and actions since the last digest."""
+        last = float(self._store.get_state(LAST_DIGEST_KEY) or now - 86_400)
+        since = _iso(now - self._reply_days * 86_400)
+        needs = self._store.mail_needing_reply(since)
+        known = [m for m in self._store.unlabelled_from_known(since) if m.id not in {n.id for n in needs}]
+        return needs, known, self._store.mail_actions(_iso(last), since)
 
     def _block(self, mails: list[MailHeader], local: datetime) -> list[str]:
         lines = [self._line(mail, local) for mail in mails[:BLOCK_LIMIT]]

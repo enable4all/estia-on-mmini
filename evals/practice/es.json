@@ -1,0 +1,594 @@
+{
+ "language": "es",
+ "items": [
+  {
+   "id": "es-01",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "No te preocupes, ya hemos resuelto la problema.",
+   "error_type": "article/gender",
+   "gold_said": "la problema",
+   "gold_better": "el problema",
+   "gold_full": "No te preocupes, ya hemos resuelto el problema.",
+   "why_en": "'Problema' is masculine even though it ends in -a, so it takes 'el'."
+  },
+  {
+   "id": "es-02",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Hoy mi hermana es enferma y no puede venir.",
+   "error_type": "ser/estar (temporary state)",
+   "gold_said": "es enferma",
+   "gold_better": "está enferma",
+   "gold_full": "Hoy mi hermana está enferma y no puede venir.",
+   "why_en": "Being ill today is a temporary state, so it takes 'estar', not 'ser'."
+  },
+  {
+   "id": "es-03",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Mi pueblo es en el norte de España.",
+   "error_type": "ser/estar (location)",
+   "gold_said": "es en",
+   "gold_better": "está en",
+   "gold_full": "Mi pueblo está en el norte de España.",
+   "why_en": "Where a place or thing is located takes 'estar'."
+  },
+  {
+   "id": "es-04",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Me gusta mucho los perros pequeños.",
+   "error_type": "verb agreement (gustar)",
+   "gold_said": "gusta",
+   "gold_better": "gustan",
+   "gold_full": "Me gustan mucho los perros pequeños.",
+   "why_en": "With 'gustar' the verb agrees with the thing liked; 'los perros' is plural, so 'gustan'."
+  },
+  {
+   "id": "es-05",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Yo gusto mucho el chocolate negro.",
+   "error_type": "gustar construction",
+   "gold_said": "Yo gusto",
+   "gold_better": "Me gusta",
+   "gold_full": "Me gusta mucho el chocolate negro.",
+   "why_en": "'Gustar' works like 'to please': the thing liked is the subject, so 'me gusta'."
+  },
+  {
+   "id": "es-06",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Quiero que vienes a cenar el sábado.",
+   "error_type": "subjunctive (querer que)",
+   "gold_said": "vienes",
+   "gold_better": "vengas",
+   "gold_full": "Quiero que vengas a cenar el sábado.",
+   "why_en": "After 'quiero que' with a different subject, the verb goes in the subjunctive."
+  },
+  {
+   "id": "es-07",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Cuando tendré más tiempo, aprenderé a tocar la guitarra.",
+   "error_type": "subjunctive (cuando + future)",
+   "gold_said": "Cuando tendré",
+   "gold_better": "Cuando tenga",
+   "gold_full": "Cuando tenga más tiempo, aprenderé a tocar la guitarra.",
+   "why_en": "After 'cuando' about the future, Spanish uses the present subjunctive, not the future."
+  },
+  {
+   "id": "es-08",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Mientras cociné la cena, me llamó mi hermano.",
+   "error_type": "tense (imperfect for an action in progress)",
+   "gold_said": "cociné",
+   "gold_better": "cocinaba",
+   "gold_full": "Mientras cocinaba la cena, me llamó mi hermano.",
+   "why_en": "An action in progress when something else happened takes the imperfect: 'cocinaba'."
+  },
+  {
+   "id": "es-09",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Ayer me levantaba a las siete, desayuné y salí de casa.",
+   "error_type": "tense (preterite for completed events)",
+   "gold_said": "me levantaba",
+   "gold_better": "me levanté",
+   "gold_full": "Ayer me levanté a las siete, desayuné y salí de casa.",
+   "why_en": "A single completed action in a sequence of events takes the preterite."
+  },
+  {
+   "id": "es-10",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "El domingo visité mi abuela en el hospital.",
+   "error_type": "personal a",
+   "gold_said": "visité mi abuela",
+   "gold_better": "visité a mi abuela",
+   "gold_full": "El domingo visité a mi abuela en el hospital.",
+   "why_en": "A specific person as direct object needs the personal 'a'."
+  },
+  {
+   "id": "es-11",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Siempre pienso de mi familia cuando viajo.",
+   "error_type": "preposition (pensar en)",
+   "gold_said": "pienso de",
+   "gold_better": "pienso en",
+   "gold_full": "Siempre pienso en mi familia cuando viajo.",
+   "why_en": "'To think about' someone is 'pensar en'."
+  },
+  {
+   "id": "es-12",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Mi prima se casó a un chico de Argentina.",
+   "error_type": "preposition (casarse con)",
+   "gold_said": "se casó a",
+   "gold_better": "se casó con",
+   "gold_full": "Mi prima se casó con un chico de Argentina.",
+   "why_en": "'To marry someone' is 'casarse con'."
+  },
+  {
+   "id": "es-13",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Estudio mucho por aprobar el examen.",
+   "error_type": "por/para (purpose)",
+   "gold_said": "por aprobar",
+   "gold_better": "para aprobar",
+   "gold_full": "Estudio mucho para aprobar el examen.",
+   "why_en": "Purpose ('in order to') is 'para' + infinitive."
+  },
+  {
+   "id": "es-14",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Muchas gracias para tu ayuda con la mudanza.",
+   "error_type": "por/para (gracias por)",
+   "gold_said": "para tu ayuda",
+   "gold_better": "por tu ayuda",
+   "gold_full": "Muchas gracias por tu ayuda con la mudanza.",
+   "why_en": "You thank someone 'por' something."
+  },
+  {
+   "id": "es-15",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "No conozco a alguien en esta ciudad.",
+   "error_type": "negation (nadie)",
+   "gold_said": "a alguien",
+   "gold_better": "a nadie",
+   "gold_full": "No conozco a nadie en esta ciudad.",
+   "why_en": "After 'no', Spanish uses 'nadie'; the double negative is standard."
+  },
+  {
+   "id": "es-16",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Mi hijo es diez años y le encanta el fútbol.",
+   "error_type": "verb choice (tener años)",
+   "gold_said": "es diez años",
+   "gold_better": "tiene diez años",
+   "gold_full": "Mi hijo tiene diez años y le encanta el fútbol.",
+   "why_en": "Age is expressed with 'tener': 'tiene diez años'."
+  },
+  {
+   "id": "es-17",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Estaba muy embarazada porque olvidé su nombre.",
+   "error_type": "false friend",
+   "gold_said": "embarazada",
+   "gold_better": "avergonzada",
+   "gold_full": "Estaba muy avergonzada porque olvidé su nombre.",
+   "why_en": "'Embarazada' means pregnant; 'embarrassed' is 'avergonzada'."
+  },
+  {
+   "id": "es-18",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Tengo que devolver los libros a la librería antes del viernes o pagaré una multa.",
+   "error_type": "false friend",
+   "gold_said": "librería",
+   "gold_better": "biblioteca",
+   "gold_full": "Tengo que devolver los libros a la biblioteca antes del viernes o pagaré una multa.",
+   "why_en": "A 'librería' is a bookshop; a place that lends books is a 'biblioteca'."
+  },
+  {
+   "id": "es-19",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "No sé a tu novio, ¿cómo se llama?",
+   "error_type": "verb choice (saber/conocer)",
+   "gold_said": "No sé",
+   "gold_better": "No conozco",
+   "gold_full": "No conozco a tu novio, ¿cómo se llama?",
+   "why_en": "Knowing a person is 'conocer'; 'saber' is for facts."
+  },
+  {
+   "id": "es-20",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Le pregunté a mi jefe un día libre para el viernes.",
+   "error_type": "verb choice (pedir/preguntar)",
+   "gold_said": "pregunté",
+   "gold_better": "pedí",
+   "gold_full": "Le pedí a mi jefe un día libre para el viernes.",
+   "why_en": "Asking for something is 'pedir'; 'preguntar' is asking a question."
+  },
+  {
+   "id": "es-21",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Normalmente levanto a las siete de la mañana.",
+   "error_type": "reflexive verb",
+   "gold_said": "levanto",
+   "gold_better": "me levanto",
+   "gold_full": "Normalmente me levanto a las siete de la mañana.",
+   "why_en": "'To get up' is reflexive: 'levantarse', so 'me levanto'."
+  },
+  {
+   "id": "es-22",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "El libro es muy caro, pero quiero lo comprar.",
+   "error_type": "pronoun placement",
+   "gold_said": "quiero lo comprar",
+   "gold_better": "quiero comprarlo",
+   "gold_full": "El libro es muy caro, pero quiero comprarlo.",
+   "why_en": "An object pronoun goes before the conjugated verb or is attached to the infinitive, never between them."
+  },
+  {
+   "id": "es-23",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Las playas de esta zona son muy bonitos.",
+   "error_type": "adjective agreement",
+   "gold_said": "bonitos",
+   "gold_better": "bonitas",
+   "gold_full": "Las playas de esta zona son muy bonitas.",
+   "why_en": "The adjective agrees with 'playas', which is feminine plural."
+  },
+  {
+   "id": "es-24",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Después del trabajo estoy mucho cansada.",
+   "error_type": "muy/mucho",
+   "gold_said": "mucho cansada",
+   "gold_better": "muy cansada",
+   "gold_full": "Después del trabajo estoy muy cansada.",
+   "why_en": "Before an adjective, use 'muy', not 'mucho'."
+  },
+  {
+   "id": "es-25",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Mis hijos no dormen bien cuando hace calor.",
+   "error_type": "verb form (stem change)",
+   "gold_said": "dormen",
+   "gold_better": "duermen",
+   "gold_full": "Mis hijos no duermen bien cuando hace calor.",
+   "why_en": "'Dormir' changes o to ue in stressed forms: 'duermen'."
+  },
+  {
+   "id": "es-26",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Ayer hací una tortilla para mis amigos.",
+   "error_type": "verb form (irregular preterite)",
+   "gold_said": "hací",
+   "gold_better": "hice",
+   "gold_full": "Ayer hice una tortilla para mis amigos.",
+   "why_en": "The preterite of 'hacer' is irregular: 'hice'."
+  },
+  {
+   "id": "es-27",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Este restaurante es más mejor que el otro.",
+   "error_type": "comparative",
+   "gold_said": "más mejor",
+   "gold_better": "mejor",
+   "gold_full": "Este restaurante es mejor que el otro.",
+   "why_en": "'Mejor' is already a comparative, so 'más' is not added."
+  },
+  {
+   "id": "es-28",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Mañana voy comprar un regalo para mi madre.",
+   "error_type": "periphrasis (ir a + infinitive)",
+   "gold_said": "voy comprar",
+   "gold_better": "voy a comprar",
+   "gold_full": "Mañana voy a comprar un regalo para mi madre.",
+   "why_en": "'Going to' do something is 'ir a' + infinitive."
+  },
+  {
+   "id": "es-30",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Estudio español desde dos años.",
+   "error_type": "time expression (desde hace)",
+   "gold_said": "desde dos años",
+   "gold_better": "desde hace dos años",
+   "gold_full": "Estudio español desde hace dos años.",
+   "why_en": "With a length of time up to now, use 'desde hace', not just 'desde'."
+  },
+  {
+   "id": "es-31",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "El agua del mar está muy fría hoy.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'el agua' is feminine (el before stressed a-); 'fría' is right"
+  },
+  {
+   "id": "es-32",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "A mí me encanta cocinar los domingos.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'a mí me' doubling is standard, not redundant"
+  },
+  {
+   "id": "es-33",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Los martes trabajo desde casa.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "fronted time phrase; no inversion needed"
+  },
+  {
+   "id": "es-34",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Si tengo tiempo, te llamo esta tarde.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "present in both clauses is correct and natural for near future"
+  },
+  {
+   "id": "es-35",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Mañana voy a ver a mis abuelos.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "personal 'a' after 'ver' is required here"
+  },
+  {
+   "id": "es-36",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Hace tres años que vivo en Valencia.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'hace ... que' + present is the standard form"
+  },
+  {
+   "id": "es-37",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Me duele la mano desde ayer.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'la mano' is feminine despite -o"
+  },
+  {
+   "id": "es-38",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Llevo dos años estudiando japonés.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'llevar' + time + gerund is correct"
+  },
+  {
+   "id": "es-39",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "No sé si podré ir a la fiesta.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'si' = whether, so the future is allowed"
+  },
+  {
+   "id": "es-40",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Ojalá haga buen tiempo el fin de semana.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'ojalá' without 'que' is correct"
+  },
+  {
+   "id": "es-41",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Mi novia y yo nos conocimos en un bar de Madrid.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  },
+  {
+   "id": "es-42",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "¿Te apetece tomar algo después del trabajo?",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "informal but correct"
+  },
+  {
+   "id": "es-45",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Me lo regaló mi madre por mi cumpleaños.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "clitic order 'me lo' and subject after the verb are correct"
+  }
+ ],
+ "conversations": [
+  {
+   "id": "es-conv-1",
+   "level": "B1",
+   "topic": "weekend",
+   "user_turns": [
+    "¡Hola! Este fin de semana fui a la montaña con unos amigos.",
+    "El sábado hacía mucho sol y caminamos durante cinco horas.",
+    "Por la noche éramos muy cansados, pero la cena estuvo muy rica.",
+    "El domingo visitamos un pueblo pequeño y comimos en un restaurante típico.",
+    "Me gusta mucho las montañas porque hay mucha tranquilidad.",
+    "El próximo mes quiero volver con mi novio, pero él no le gusta caminar."
+   ],
+   "planted": [
+    {
+     "said": "éramos",
+     "better": "estábamos"
+    },
+    {
+     "said": "Me gusta mucho las montañas",
+     "better": "Me gustan mucho las montañas"
+    },
+    {
+     "said": "pero él no le gusta",
+     "better": "pero a él no le gusta"
+    }
+   ]
+  },
+  {
+   "id": "es-conv-2",
+   "level": "B1",
+   "topic": "work",
+   "user_turns": [
+    "Trabajo en una empresa de software desde hace tres años.",
+    "Mi trabajo es interesante, pero a veces es muy estresante.",
+    "Esta semana tenemos un proyecto nuevo y mi jefe quiere que trabajamos el sábado.",
+    "Mis compañeros son muy simpáticos y siempre me ayudan.",
+    "Ayer le pregunté a mi jefe más tiempo para terminar el informe.",
+    "Él dijo que sí, pero tengo que lo terminar el lunes."
+   ],
+   "planted": [
+    {
+     "said": "trabajamos",
+     "better": "trabajemos"
+    },
+    {
+     "said": "pregunté",
+     "better": "pedí"
+    },
+    {
+     "said": "tengo que lo terminar",
+     "better": "tengo que terminarlo"
+    }
+   ]
+  },
+  {
+   "id": "es-conv-3",
+   "level": "B1",
+   "topic": "food",
+   "user_turns": [
+    "Me encanta cocinar, sobre todo comida italiana.",
+    "Ayer hice una pasta con tomate y albahaca para mis amigos.",
+    "Todos dijeron que la pasta estaba muy bueno.",
+    "Normalmente compro las verduras en el mercado los sábados.",
+    "Mi madre cocina más mejor que yo, pero estoy aprendiendo.",
+    "Cuando tendré una casa más grande, voy a tener un huerto con tomates."
+   ],
+   "planted": [
+    {
+     "said": "muy bueno",
+     "better": "muy buena"
+    },
+    {
+     "said": "más mejor",
+     "better": "mejor"
+    },
+    {
+     "said": "Cuando tendré",
+     "better": "Cuando tenga"
+    }
+   ]
+  },
+  {
+   "id": "es-conv-4",
+   "level": "B1",
+   "topic": "travel",
+   "user_turns": [
+    "El verano pasado viajé a México con mi hermana.",
+    "Estuvimos allí dos semanas y visitamos muchas ciudades.",
+    "En Guadalajara visitamos mis tíos y comimos con ellos.",
+    "La comida era increíble, pero un poco picante por mí.",
+    "En Oaxaca no conocíamos a alguien, pero la gente era muy amable.",
+    "Si tendría más vacaciones, volvería cada año."
+   ],
+   "planted": [
+    {
+     "said": "visitamos mis tíos",
+     "better": "visitamos a mis tíos"
+    },
+    {
+     "said": "picante por mí",
+     "better": "picante para mí"
+    },
+    {
+     "said": "a alguien",
+     "better": "a nadie"
+    },
+    {
+     "said": "Si tendría",
+     "better": "Si tuviera"
+    }
+   ]
+  }
+ ]
+}

@@ -10,6 +10,10 @@ file holds part names, times, reasons and HTTP status numbers only: never messag
 addresses or keys. A missing or unreadable file means nothing is known, and recording never raises into the caller.
 An unchanged state is written at most once a minute.
 
+Beside the parts, a "security" section keeps three facts as numbers and times only: since when a message from an allowed
+user could not be opened (a changed safety number), how many devices her own Signal account has (this Mac is one) and
+when that was checked, and since when answers are paused because the model no longer matches its pinned digest.
+
 `describe` turns a record into one of three states, the same words in doctor and /status: set up, not tested yet ·
 working, last read 14:05 · failing since 14:05: reason → the next step. A failure whose fix (a sign-in, key, address
 or helper) was saved again after its latest failure is not tested yet: set up again, not tested yet; the next failure
@@ -71,6 +75,20 @@ class Record:
 
 
 @dataclass(frozen=True)
+class Security:
+    """The security facts of status.json: times (epoch seconds) and a count, never an account, a number or a name."""
+
+    identity_changed: float | None = None  # since when messages from an allowed user cannot be opened
+    linked_devices: int | None = None  # devices on her own Signal account (this Mac is one)
+    devices_checked: float | None = None  # when they were counted
+    model_paused: float | None = None  # since when answers are paused: the model does not match its pinned digest
+    model_cloud: float | None = None  # since when answers are paused: Ollama lists the model as a cloud model
+
+
+DEVICES_WRITE_EVERY_SECONDS = 3_600.0  # an unchanged device count is written at most once an hour
+
+
+@dataclass(frozen=True)
 class PartLine:
     label: str  # "Mail (family)", "Calendar", "Calendar (work)"
     state: State
@@ -117,6 +135,58 @@ def read(path: Path) -> dict[str, Record]:
         if record is not None:
             records[part] = record
     return records
+
+
+def read_security(path: Path) -> Security:
+    """The security section of the file; whatever is missing, unreadable or odd is left out (nothing known)."""
+    try:
+        data: Any = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return Security()
+    section = data.get("security") if isinstance(data, dict) else None
+    if not isinstance(section, dict):
+        return Security()
+
+    def moment(key: str) -> float | None:
+        try:
+            return _time(section.get(key))
+        except ValueError:
+            return None
+
+    count = section.get("linked_devices")
+    devices = count if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else None
+    return Security(
+        identity_changed=moment("identity_changed"),
+        linked_devices=devices,
+        devices_checked=moment("devices_checked") if devices is not None else None,
+        model_paused=moment("model_paused"),
+        model_cloud=moment("model_cloud"),
+    )
+
+
+def security_lines(security: Security, now: float, tz: ZoneInfo, *, model: str) -> list[PartLine]:
+    """/status: the safety number when it changed, her Signal account's devices once counted, the model's pause."""
+    found: list[PartLine] = []
+    if security.identity_changed is not None:
+        when = local_when(security.identity_changed, now, tz)
+        text = "✗ " + prompts.SAFETY_NUMBER_CHANGED.format(when=when)
+        found.append(PartLine(prompts.SAFETY_NUMBER_LABEL, "failing", text, prompts.SAFETY_NUMBER_FIX))
+    if security.linked_devices is not None:
+        when = local_when(security.devices_checked or now, now, tz)
+        if security.linked_devices <= 1:
+            found.append(PartLine(prompts.LINKED_LABEL, "working", prompts.LINKED_ONE.format(when=when)))
+        else:
+            text = "✗ " + prompts.LINKED_MORE.format(count=security.linked_devices, when=when)
+            found.append(PartLine(prompts.LINKED_LABEL, "failing", text, prompts.LINKED_FIX))
+    if security.model_paused is not None:
+        when = local_when(security.model_paused, now, tz)
+        text = "✗ " + prompts.MODEL_PAUSED_LINE.format(when=when, model=model)
+        found.append(PartLine(prompts.MODEL_LABEL, "failing", text, prompts.MODEL_PAUSED_FIX))
+    if security.model_cloud is not None:
+        when = local_when(security.model_cloud, now, tz)
+        text = "✗ " + prompts.MODEL_CLOUD_LINE.format(when=when, model=model)
+        found.append(PartLine(prompts.MODEL_LABEL, "failing", text, prompts.model_cloud_fix(model)))
+    return found
 
 
 def _time(value: Any) -> float | None:
@@ -235,9 +305,55 @@ class PartStatus:
         self.path = path
         self._clock = clock
         self._records = read(path) if path is not None else {}
+        self._security = read_security(path) if path is not None else Security()
 
     def snapshot(self) -> dict[str, Record]:
         return dict(self._records)
+
+    def security(self) -> Security:
+        return self._security
+
+    def identity_changed(self) -> None:
+        """A message from an allowed user could not be opened: their safety number changed (kept from its first time)."""
+        if self._security.identity_changed is None:
+            self._keep_security(replace(self._security, identity_changed=self._clock()))
+
+    def identity_ok(self) -> None:
+        """A message from an allowed user opened fine: the safety number is trusted again."""
+        if self._security.identity_changed is not None:
+            self._keep_security(replace(self._security, identity_changed=None))
+
+    def linked_devices(self, count: int) -> None:
+        """The devices on her own Signal account, just counted (written when it changed, else once an hour)."""
+        now = self._clock()
+        old = self._security
+        recent = old.devices_checked is not None and 0 <= now - old.devices_checked < DEVICES_WRITE_EVERY_SECONDS
+        if old.linked_devices == count and recent:
+            return
+        self._keep_security(replace(old, linked_devices=count, devices_checked=now))
+
+    def model_paused(self, paused: bool) -> None:
+        """Answers paused (the model does not match its pinned digest), kept from its first time; or not any more."""
+        if paused and self._security.model_paused is None:
+            self._keep_security(replace(self._security, model_paused=self._clock()))
+        elif not paused and self._security.model_paused is not None:
+            self._keep_security(replace(self._security, model_paused=None))
+
+    def model_cloud(self, paused: bool) -> None:
+        """Answers paused (Ollama lists the model as a cloud model), kept from its first time; or not any more."""
+        if paused and self._security.model_cloud is None:
+            self._keep_security(replace(self._security, model_cloud=self._clock()))
+        elif not paused and self._security.model_cloud is not None:
+            self._keep_security(replace(self._security, model_cloud=None))
+
+    def _keep_security(self, security: Security) -> None:
+        self._security = security
+        if self.path is None:
+            return
+        try:
+            self._write(self.path)
+        except OSError as exc:
+            log.warning("part status: %s not written (%s)", self.path.name, type(exc).__name__)
 
     def ok(self, part: str) -> None:
         """A real read or call of the part worked."""
@@ -306,8 +422,20 @@ class PartStatus:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         fd, temp = tempfile.mkstemp(dir=path.parent, prefix=".status-", suffix=".tmp")  # 0600
         try:
+            facts = self._security
+            security = {
+                key: value
+                for key, value in (
+                    ("identity_changed", facts.identity_changed),
+                    ("linked_devices", facts.linked_devices),
+                    ("devices_checked", facts.devices_checked),
+                    ("model_paused", facts.model_paused),
+                    ("model_cloud", facts.model_cloud),
+                )
+                if value is not None
+            }
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump({"parts": parts}, handle)
+                json.dump({"parts": parts, **({"security": security} if security else {})}, handle)
             os.replace(temp, path)
         except BaseException:
             Path(temp).unlink(missing_ok=True)

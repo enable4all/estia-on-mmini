@@ -148,3 +148,23 @@ def test_numbers_stay_for_the_day_and_restart_the_next(tmp_path: Path, store: St
     assert numbers.mail_id(2) == b and numbers.mail_id(9) is None
     clock.now += 86_400
     assert numbers.number(b) == 1
+
+
+# a call's glance: the day's mail as numbers only, never a sender, subject or summary (no outside text on the call)
+
+
+def test_the_call_glance_counts_without_words_or_numbers_of_the_day(tmp_path: Path, store: Store) -> None:
+    digest = make(tmp_path, store, Clock(DIGEST_TIME))
+    assert digest.glance() == "Mail digest: nothing needs a reply or an action."
+    add(store, "g1", "reply", "Asks about November shipping.", "2026-10-06T07:00:00+00:00", sender="Bob Lee")
+    add(store, "g2", "urgent_reply", "Contract needs a signature today.", "2026-10-08T06:00:00+00:00")
+    add(store, "g3", "action", "Invoice to pay by Friday.", "2026-10-07T20:00:00+00:00", sender="Acme Billing")
+    add(store, "g4", "reply", "Too old.", "2026-09-28T07:00:00+00:00")
+    add(store, "g5", "noise", "Newsletter.", "2026-10-08T05:00:00+00:00")
+    glance = digest.glance()
+    assert glance == "Mail digest: 2 to answer (1 urgent), 1 action."
+    for words in ("Bob", "Anna", "Acme", "Contract", "Invoice", "shipping", "Subject"):
+        assert words not in glance
+    assert store.get_state("mail:numbers") is None  # counting gives no mail its number of the day
+    add(store, "g6", "reply", "One more.", "2026-10-08T07:00:00+00:00")
+    assert digest.glance() == "Mail digest: 3 to answer (1 urgent), 1 action."

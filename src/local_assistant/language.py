@@ -7,6 +7,7 @@ request (no detection) and Gemma answers in it. The language changes only by the
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from dataclasses import dataclass
 
@@ -55,6 +56,23 @@ _YES: dict[str, tuple[str, ...]] = {
 }
 YES_WORDS = frozenset(word for words in _YES.values() for word in words)
 
+
+def yes_form(text: str) -> str:
+    """A message as a yes is told: without the [voice] or [call] mark, casefolded, trailing punctuation and a leading
+    "¡" dropped, commas as spaces ("[call] Ja, graag." -> "ja graag"). An [audio file] keeps its mark: no yes."""
+    spoken = text.strip()
+    for mark in ("[voice]", "[call]"):
+        spoken = spoken.removeprefix(mark)
+    answer = re.sub(r"[\s.!,。！、]+$", "", spoken.strip().casefold()).lstrip("¡")
+    return re.sub(r"[\s,、]+", " ", answer)
+
+
+def is_yes(text: str, code: str) -> bool:
+    """A clear yes in the language `code` or in English (code's own language): the whole message is one of the yes
+    words ("Ja, graag!" on a Dutch call; "yes, and what about…" is no yes)."""
+    return yes_form(text) in {*_YES[ENGLISH], *_YES.get(code, ())}
+
+
 # on a call, one of these said alone over her is an interruption ("wait", "stop", "no"), like a yes word
 _INTERRUPT: dict[str, tuple[str, ...]] = {
     "en": ("stop", "wait", "no", "hold"),
@@ -71,11 +89,162 @@ _INTERRUPT: dict[str, tuple[str, ...]] = {
 }
 INTERRUPTIONS = frozenset(word for words in _INTERRUPT.values() for word in words)
 
+# On a call, her own voice from a loud speaker is told from the caller's words by her content words (calls.is_own_voice):
+# these short function words are left out of the count ("the dentist at three" is two words of hers, not four).
+# Japanese, written without spaces, is compared by characters instead.
+_FUNCTION: dict[str, tuple[str, ...]] = {
+    "en": (
+        "a", "an", "the", "i", "you", "he", "she", "it", "we", "they", "me", "him", "us", "them", "my", "your", "his",
+        "her", "its", "our", "their", "is", "are", "was", "were", "be", "am", "do", "does", "did", "have", "has", "had",
+        "will", "would", "can", "to", "of", "in", "on", "at", "for", "with", "from", "by", "as", "and", "or", "but",
+        "so", "if", "that", "this", "there", "it's", "i'm", "you're", "that's",
+    ),
+    "es": (
+        "el", "la", "los", "las", "un", "una", "unos", "unas", "de", "del", "a", "al", "en", "y", "o", "que", "es",
+        "son", "está", "hay", "por", "con", "se", "lo", "le", "les", "su", "sus", "mi", "tu", "me", "te", "nos",
+    ),
+    "it": (
+        "il", "lo", "la", "i", "gli", "le", "un", "una", "uno", "di", "a", "da", "in", "con", "su", "per", "e", "o",
+        "che", "è", "del", "della", "dei", "al", "alla", "nel", "nella", "mi", "ti", "si", "ci", "sono",
+    ),
+    "ko": ("이", "그", "저", "것", "수", "더", "좀", "잘", "또", "제", "내", "그리고"),
+    "pt": (
+        "o", "a", "os", "as", "um", "uma", "de", "do", "da", "dos", "das", "em", "no", "na", "nos", "nas", "e", "ou",
+        "que", "é", "por", "com", "se", "me", "te", "seu", "sua",
+    ),
+    "nl": (
+        "de", "het", "een", "en", "of", "van", "in", "op", "te", "aan", "met", "voor", "is", "zijn", "er", "dat", "die",
+        "dit", "ik", "je", "jij", "u", "hij", "zij", "ze", "we", "wij", "om", "ook", "maar", "als", "bij", "naar",
+    ),
+    "pl": (
+        "i", "w", "we", "z", "ze", "na", "do", "się", "to", "jest", "są", "że", "a", "o", "od", "po", "za", "jak",
+        "ten", "ta", "co", "u",
+    ),
+    "de": (
+        "der", "die", "das", "den", "dem", "des", "ein", "eine", "einen", "einem", "einer", "und", "oder", "in", "im",
+        "an", "am", "auf", "zu", "zum", "zur", "mit", "von", "vom", "für", "ist", "sind", "es", "ich", "du", "er",
+        "sie", "wir", "ihr", "dass", "so", "auch", "aber", "um",
+    ),
+    "ja": (),
+    "ru": (
+        "и", "в", "во", "на", "с", "со", "к", "по", "о", "об", "у", "за", "из", "от", "до", "а", "но", "что", "это",
+        "как", "я", "ты", "он", "она", "оно", "мы", "вы", "они", "же", "ли", "бы", "то", "так",
+    ),
+    "fr": (
+        "le", "la", "les", "l", "un", "une", "des", "de", "du", "d", "à", "au", "aux", "en", "et", "ou", "que", "qu",
+        "qui", "est", "sont", "c'est", "il", "elle", "je", "j", "tu", "nous", "vous", "ils", "elles", "on", "ce", "se",
+        "sa", "son", "ses", "mon", "ma", "mes", "pour", "par", "avec", "dans", "sur",
+    ),
+}  # fmt: skip
+FUNCTION_WORDS = frozenset(word for words in _FUNCTION.values() for word in words)
+
+# a "no" the caller says over her: in a transcript of what stopped her, one she did not say herself makes it the
+# caller's, however much of her sentence it repeats (Japanese: inside the characters)
+_NEGATION: dict[str, tuple[str, ...]] = {
+    "en": (
+        "no", "not", "never", "nope", "don't", "doesn't", "didn't", "isn't", "aren't", "wasn't", "weren't", "can't",
+        "cannot", "won't", "wouldn't", "shouldn't", "couldn't", "haven't", "hasn't",
+    ),
+    "es": ("no", "nunca", "tampoco", "ni"),
+    "it": ("non", "mai", "né"),
+    "ko": ("안", "못", "아니", "아니요", "아뇨", "아니야", "않아", "않아요"),
+    "pt": ("não", "nunca", "nem"),
+    "nl": ("niet", "nee", "geen", "nooit"),
+    "pl": ("nie", "nigdy", "ani"),
+    "de": ("nicht", "nein", "kein", "keine", "keinen", "keiner", "nie", "niemals"),
+    "ja": ("ない", "ません", "いいえ", "いや", "だめ", "違う"),
+    "ru": ("не", "нет", "никогда", "ни"),
+    "fr": ("non", "ne", "pas", "jamais"),
+}  # fmt: skip
+NEGATIONS = frozenset(word for words in _NEGATION.values() for word in words)
+# Japanese stop, yes and no words, matched inside a transcript's characters
+JAPANESE_CALLER_WORDS = tuple(word for word in _INTERRUPT["ja"] + _YES["ja"] + _NEGATION["ja"] if " " not in word)
+
+# Words that ask for a code or a password: a message she starts herself never holds one (initiative.check_text), in
+# any of the 11 languages whatever the language setting. Matched as whole words in any case; a "*" at the end takes
+# any ending ("hasł*": hasło, hasła, hasłem); Japanese and Korean (in SUBSTRING_CODES) are matched inside the text,
+# since their words carry no spaces or have particles attached ("비밀번호를").
+SECRET_WORDS: dict[str, tuple[str, ...]] = {
+    "en": (
+        "password", "passwords", "passcode", "passcodes", "passphrase", "passphrases", "pin", "pins", "pin code",
+        "pin codes", "login", "logins", "log-in", "log-ins", "credentials", "bank details", "bank account",
+        "bank accounts", "bank login", "bank logins", "bank app", "bank apps", "bank card", "bank cards",
+        "account number", "account numbers", "card number", "card numbers", "card details", "credit card",
+        "credit cards", "debit card", "debit cards", "cvv", "cvc", "iban", "verification code", "verification codes",
+        "security code", "security codes", "one-time code", "one-time codes", "sms code", "sms codes", "login code",
+        "login codes", "access code", "access codes", "confirmation code", "confirmation codes", "2fa", "otp",
+        "code from the sms", "code in the sms",
+    ),
+    "es": (
+        "contraseña*", "clave de acceso", "clave secreta", "clave bancaria", "pin", "código pin", "códigos pin",
+        "código de verificación", "código de seguridad", "código de acceso", "código de confirmación", "código sms",
+        "código de un solo uso", "credenciales", "datos bancarios", "número de cuenta", "número de tarjeta",
+        "tarjeta de crédito", "tarjeta de débito",
+    ),
+    "it": (
+        "password", "parola d'ordine", "parola chiave", "pin", "codice pin", "codice di verifica",
+        "codice di sicurezza", "codice di accesso", "codice di conferma", "codice sms", "codice otp", "credenziali",
+        "dati bancari", "numero di conto", "numero della carta", "numero di carta", "carta di credito",
+        "carta di debito",
+    ),
+    "ko": (
+        "비밀번호", "암호", "인증번호", "인증 번호", "인증코드", "인증 코드", "보안코드", "보안 코드", "확인코드",
+        "확인 코드", "핀 번호", "핀번호", "계좌번호", "계좌 번호", "카드번호", "카드 번호", "신용카드",
+        "로그인 정보", "일회용 비밀번호",
+    ),
+    "pt": (
+        "senha*", "palavra-passe", "palavras-passe", "pin", "código pin", "código de verificação",
+        "código de segurança", "código de acesso", "código de confirmação", "código sms", "credenciais",
+        "dados bancários", "número da conta", "número de conta", "número do cartão", "cartão de crédito",
+        "cartão de débito",
+    ),
+    "nl": (
+        "wachtwoord*", "pincode*", "pin", "toegangscode*", "verificatiecode*", "beveiligingscode*",
+        "bevestigingscode*", "inlogcode*", "sms-code*", "eenmalige code*", "inloggegevens", "bankgegevens",
+        "rekeningnummer*", "kaartnummer*", "creditcard*", "betaalpas*",
+    ),
+    "pl": (
+        "hasł*", "haseł", "pin", "kod pin", "kodu pin", "kod weryfikacyjn*", "kodu weryfikacyjn*",
+        "kod bezpieczeństwa", "kodu bezpieczeństwa", "kod dostępu", "kodu dostępu", "kod potwierdzając*",
+        "kodu potwierdzając*", "kod sms", "kodu sms", "kod jednorazow*", "kodu jednorazow*", "dane logowania",
+        "danych logowania", "dane do logowania", "dane bankowe", "danych bankowych", "numer konta", "numeru konta",
+        "numer karty", "numeru karty", "dane karty", "danych karty",
+    ),
+    "de": (
+        "passwort*", "passwört*", "kennwort*", "kennwört*", "pin", "pin-code*", "pincode*", "geheimzahl*",
+        "zugangsdaten", "anmeldedaten", "bestätigungscode*", "sicherheitscode*", "zugangscode*",
+        "verifizierungscode*", "einmalcode*", "sms-code*", "tan-nummer*", "mtan", "pushtan", "smstan", "sms-tan",
+        "bankdaten", "kontodaten", "kontonummer*", "kartennummer*", "kreditkarte*",
+    ),
+    "ja": (
+        "パスワード", "パスコード", "暗証番号", "認証コード", "確認コード", "セキュリティコード", "ワンタイム",
+        "ログイン情報", "口座番号", "カード番号", "クレジットカード",
+    ),
+    "ru": (
+        "парол*", "пин", "пин-код*", "пинкод*", "код подтверждени*", "кода подтверждени*", "код безопасности",
+        "кода безопасности", "код доступа", "кода доступа", "код из смс", "смс-код*", "одноразов* код*",
+        "проверочн* код*", "учётн* данн*", "учетн* данн*", "банковск* данн*", "номер счёта", "номер счета",
+        "номер карты", "данные карты", "кредитн* карт*",
+    ),
+    "fr": (
+        "mot de passe", "mots de passe", "pin", "code pin", "code de vérification", "code de sécurité",
+        "code d'accès", "code de confirmation", "code sms", "code à usage unique", "identifiants",
+        "coordonnées bancaires", "données bancaires", "numéro de compte", "numéro de carte", "carte bancaire",
+        "carte de crédit", "cryptogramme",
+    ),
+}  # fmt: skip
+SUBSTRING_CODES = frozenset({"ja", "ko"})
+
 
 def _plain(text: str) -> str:
     """Casefolded, without accents: "Français" and "francais" are the same name."""
     decomposed = unicodedata.normalize("NFKD", text.strip().casefold())
     return "".join(char for char in decomposed if not unicodedata.combining(char))
+
+
+def negations(code: str) -> tuple[str, ...]:
+    """A language's negation words (none for an unknown code): a practice recap point that drops one is refused."""
+    return _NEGATION.get(code, ())
 
 
 def find(name: str) -> Language | None:

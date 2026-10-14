@@ -26,7 +26,7 @@ from local_assistant.maps import Mapper, MapsError, Place, Route
 from local_assistant.music_tools import MUSIC_SCHEMAS, OWN_REQUEST, MusicTools
 from local_assistant.profile import ApplyResult, Profile
 from local_assistant.projects import ProjectError, Projects
-from local_assistant.reminders import ReminderError, Reminders, nearest_year
+from local_assistant.reminders import ReminderError, Reminders, nearest_year, own_words
 from local_assistant.store import Message, SourceKind, Store
 from local_assistant.timefmt import local_date, local_stamp
 from local_assistant.web_search import Searcher, WebResults, WebSearchError
@@ -66,13 +66,10 @@ def _function(name: str, description: str, properties: dict[str, Any], required:
     }
 
 
-def tool_schemas(
-    host_label: str = DEFAULT_HOST_LABEL, checks: Sequence[str] = (), projects_root: Path | None = None
-) -> list[dict[str, Any]]:
-    """The always-offered tools. Only two descriptions depend on the setup: which machine mini_status checks
-    (its label and the extra checks the config adds) and which folder the project tools read."""
+def tool_schemas(host_label: str = DEFAULT_HOST_LABEL, checks: Sequence[str] = ()) -> list[dict[str, Any]]:
+    """The always-offered tools. Only one description depends on the setup: which machine mini_status checks (its
+    label and the extra checks the config adds)."""
     extra = "".join(f", {label}" for label in checks)
-    root = _home_relative(projects_root or Path.home() / "dev")
     return [
         _function(
             "search_history",
@@ -134,40 +131,6 @@ def tool_schemas(
             [],
         ),
         _function(
-            "project_list",
-            f"List the user's projects on {host_label} (folders in {root}) with their access level and one line about "
-            "each.",
-            {},
-            [],
-        ),
-        _function(
-            "project_status",
-            "Overview of one project: the start of its README, its notes for coding agents, the open todo items, the "
-            "recent commits and uncommitted changes. Use for questions like 'what's next on X' or 'what changed in X'.",
-            {"project": {"type": "string", "description": "The project folder name, e.g. 'my-project'"}},
-            ["project"],
-        ),
-        _function(
-            "project_read",
-            "Read up to 200 lines of one doc of a project (README, todo, setup_ files, docs/*.md). Only for projects "
-            "at level docs.",
-            {
-                "project": {"type": "string", "description": "The project folder name"},
-                "file": {"type": "string", "description": "Path inside the project, e.g. 'docs/design.md'"},
-                "start_line": {"type": "integer", "description": "First line to read, default 1"},
-            },
-            ["project", "file"],
-        ),
-        _function(
-            "project_search",
-            "Search the docs of a project at level docs for lines that contain all the given words.",
-            {
-                "project": {"type": "string", "description": "The project folder name"},
-                "words": {"type": "string", "description": "Words to look for, e.g. 'retry limit'"},
-            },
-            ["project", "words"],
-        ),
-        _function(
             "mail_digest",
             "The user's mail now: what needs a reply and new actions, both mailboxes, with the day's numbers. Use for "
             "'what needs my reply?', 'anything important in my mail?'.",
@@ -194,7 +157,57 @@ def tool_schemas(
     ]
 
 
+def project_schemas(host_label: str = DEFAULT_HOST_LABEL, projects_root: Path | None = None) -> list[dict[str, Any]]:
+    """The project tools, offered only with [projects] (an extra, off by default). Two descriptions depend on the
+    setup: the machine's label and the folder the tools read."""
+    root = _home_relative(projects_root or Path.home() / "dev")
+    name = {
+        "type": "string",
+        "description": "The project folder name as the user said it, e.g. 'my-project' (a misheard or spoken name is "
+        "matched to the nearest project)",
+    }
+    return [
+        _function(
+            "project_list",
+            f"List the user's projects on {host_label} (folders in {root}) with their access level, one line about "
+            "each, and how the user changes the levels.",
+            {},
+            [],
+        ),
+        _function(
+            "project_status",
+            "Overview of one project: the start of its README, its notes for coding agents, the open todo items, the "
+            "recent commits and uncommitted changes. Use for questions like 'what's next on X' or 'what changed in X'.",
+            {"project": name},
+            ["project"],
+        ),
+        _function(
+            "project_read",
+            "Read up to 200 lines of one file of a project; start_line pages on. Its README at every level; at level "
+            "docs also its documents (todo, setup_ files, docs/*.md); at level code also its source code (any text "
+            "file git tracks).",
+            {
+                "project": name,
+                "file": {"type": "string", "description": "Path inside the project, e.g. 'docs/design.md'"},
+                "start_line": {"type": "integer", "description": "First line to read, default 1"},
+            },
+            ["project", "file"],
+        ),
+        _function(
+            "project_search",
+            "Search a project at level docs (its documents) or code (also its source code) for lines that contain all "
+            "the given words.",
+            {
+                "project": name,
+                "words": {"type": "string", "description": "Words to look for, e.g. 'retry limit'"},
+            },
+            ["project", "words"],
+        ),
+    ]
+
+
 TOOL_SCHEMAS = tool_schemas()  # the setup without extra checks: also what the tests compare with
+PROJECT_SCHEMAS = project_schemas()  # with [projects] only, in ~/dev on the Mac
 
 
 # offered only with [calendar]
@@ -382,11 +395,16 @@ class Turn:
     searches: int = 0  # web searches in this answer
     maps_calls: int = 0  # Google Maps questions in this answer
     read_mail: bool = False  # mail text was read: nothing goes to Google Maps in this answer
+    # a project tool ran (private files, perhaps a planted line): nothing goes to a search engine or Google Maps
+    read_project: bool = False
     links: list[tuple[str, str]] = field(default_factory=list)  # map links for the Sources note
     used_web: bool = False  # web text is data: nothing is saved to or removed from the profile in this answer
     web: list[WebResults] = field(default_factory=list)  # results Gemma saw, for the code-written Sources note
     # read outside text (mail, calendar, a page, a project file): device changes in this answer wait for a yes
     untrusted: bool = False
+    # her context still holds a reply or summary that followed outside text (an earlier turn): a reminder's words must
+    # come from the user's message (reminders.own_words), and links in her answer are defanged
+    after_outside: bool = False
     # reminders set or cancelled in this answer: code's notes to the user and its lines to say on a call
     reminder_tried: bool = False  # set_reminder was called (stored or not): nothing stored gets code's guard note
     reminder_set: bool = False
@@ -426,9 +444,11 @@ class Tools:
         maps: Mapper | None = None,
         reminders: Reminders | None = None,
         base_schemas: list[dict[str, Any]] | None = None,
+        project_schemas: list[dict[str, Any]] | None = None,
         name: str = DEFAULT_NAME,
     ) -> None:
         self._base_schemas = TOOL_SCHEMAS if base_schemas is None else base_schemas
+        self._project_schemas = PROJECT_SCHEMAS if project_schemas is None else project_schemas
         self._name = name  # hers, in search_history's results
         self._store = store
         self._status = status
@@ -455,6 +475,7 @@ class Tools:
         """The tools Gemma is offered with this setup."""
         return (
             self._base_schemas
+            + (self._project_schemas if self._projects else [])
             + (REMINDER_SCHEMAS if self._reminders else [])
             + (CALENDAR_SCHEMAS if self._calendar else [])
             + (WEB_SCHEMAS if self._web else [])
@@ -532,6 +553,7 @@ class Tools:
                 raise ValueError("the status report is not available.")
             return await self._status()
         if name.startswith("project_"):
+            turn.read_project = turn.read_project or self._projects is not None  # off: nothing was read
             return await self._project_tool(name, args)
         if name.startswith("mail_"):
             turn.read_mail_or_calendar = True
@@ -583,6 +605,10 @@ class Tools:
                 turn.reminder_attempts.append(why)
                 return prompts.REMINDER_OWN_WORDS
             return prompts.REMINDER_NOT_CANCELLED
+        if name == "set_reminder" and turn.after_outside and not own_words(text, turn.message.text):
+            refused = ReminderError("not_your_words")
+            turn.reminder_attempts.append(ReminderAttempt(text, refused.plain, refused.spoken))
+            return prompts.REMINDER_OWN_WORDS
         if name == "cancel_reminder":
             raw = str(args.get("number") or "").strip().lstrip("#").lower()
             try:
@@ -651,11 +677,17 @@ class Tools:
         raise ValueError(f"unknown tool {name!r}")
 
     async def _web_tool(self, turn: Turn, web: Searcher, args: dict[str, Any]) -> str:
-        """At most two searches; never after mail or calendar text (Gemma could put private text in a query)."""
+        """At most two searches; never after mail, calendar or project text (Gemma could put private text in a
+        query)."""
         if turn.read_mail_or_calendar:
             return (
                 "Not searched: an answer that read mail or the calendar cannot search the web (private text must not "
                 "go to a search engine). Tell the user to ask for the search in a new message."
+            )
+        if turn.read_project:
+            return (
+                "Not searched: an answer that read the user's projects cannot search the web (private text must not go "
+                "to a search engine). Tell the user to ask for the search in a new message."
             )
         on_call = turn.message.text.startswith(prompts.CALL_MARK)  # a call turn has 45 s in all: one search
         if turn.searches >= (1 if on_call else MAX_SEARCHES):
@@ -679,12 +711,17 @@ class Tools:
         return _web_text(query, found)
 
     async def _maps_tool(self, turn: Turn, maps: Mapper, name: str, args: dict[str, Any]) -> str:
-        """Google Places and Routes: never after mail (private text must not go to Google); after the calendar an
-        event's place may be used (the user's OK). At most two per answer, one on a call."""
+        """Google Places and Routes: never after mail or the user's projects (private text must not go to Google);
+        after the calendar an event's place may be used (the user's OK). At most two per answer, one on a call."""
         if turn.read_mail:
             return (
                 "Not looked up: an answer that read mail cannot ask Google Maps (private text must not go to Google). "
                 "Tell the user to ask again in a new message."
+            )
+        if turn.read_project:
+            return (
+                "Not looked up: an answer that read the user's projects cannot ask Google Maps (private text must not "
+                "go to Google). Tell the user to ask again in a new message."
             )
         on_call = turn.message.text.startswith(prompts.CALL_MARK)
         if turn.maps_calls >= (1 if on_call else MAPS_PER_ANSWER):
@@ -704,7 +741,8 @@ class Tools:
                 20,
             )
             turn.untrusted = turn.used_web = True
-            turn.links.append(("Directions", route.link))
+            if route.link:  # none for a route home whose area is not known
+                turn.links.append(("Directions", route.link))
             return _route_text(str(args.get("to") or ""), route)
         except ValueError:
             turn.maps_calls -= 1  # a bad argument cost nothing: Gemma may correct it
@@ -794,8 +832,8 @@ class Tools:
         raise ValueError(f"unknown tool {name!r}")
 
     async def _project_tool(self, name: str, args: dict[str, Any]) -> str:
-        if self._projects is None:
-            raise ValueError("the projects are not available.")
+        if self._projects is None:  # an extra, off without [projects]: she says how the owner turns it on
+            raise ValueError(prompts.PROJECTS_OFF_RESULT)
         project = str(args.get("project", ""))
         if name == "project_list":
             return await self._projects.list_text()

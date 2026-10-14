@@ -442,3 +442,73 @@ async def test_one_outlook_calendar_alone_says_why_in_its_own_words(tmp_path: Pa
     assert await many.tools.digest_block() == f"Calendar: {why}"
     assert await many.tools.agenda("today") == f"Error: the calendar can't be read: {why}."
     assert await many.tools.status_line() == f"Calendar: {why}"
+
+
+# a call's glance: today's calendar as counts and times only, never a title, place or calendar name (titles would make
+# the whole call outside text: reminders refused, no remember, devices waiting for a yes)
+
+
+async def test_the_call_glance_is_counts_and_times_only(tmp_path: Path) -> None:
+    home = Home(tmp_path)  # Friday 09:15
+    home.add("Maria's birthday", "2026-10-09", "2026-10-10")
+    home.add("Breakfast", "2026-10-09 08:00", "2026-10-09 09:00")  # over: not counted
+    home.add("Standup", "2026-10-09 09:00", "2026-10-09 09:30")  # going on now
+    home.add("Dentist", "2026-10-09 10:30", "2026-10-09 11:00", place="Prinsengracht 12")
+    home.add("Call with Anna", "2026-10-09 14:00", "2026-10-09 15:00", answer="needs-action")
+    home.add("Sales pitch", "2026-10-09 16:00", "2026-10-09 17:00", answer="declined")  # declined: left out
+    home.add("Dinner", "2026-10-09 19:00", "2026-10-09 21:30")
+    home.add("Flight AMS–LIS", "2026-10-10 08:15", "2026-10-10 11:30")  # tomorrow
+    glance = await home.tools.glance()
+    assert glance == (
+        "Calendar today: 4 events left (1 now, until 09:30), next 10:30–11:00 (in 1 h 15 min), last ends 21:30; "
+        "1 all-day item."
+    )
+    for words in ("Maria", "Standup", "Dentist", "Prinsengracht", "Anna", "Sales", "Dinner", "Flight", "Family"):
+        assert words not in glance
+    assert home.notes == []
+
+
+@pytest.mark.parametrize(
+    ("events", "expected"),
+    [
+        ([], "Calendar today: nothing more."),
+        ([("Holiday", "2026-10-09", "2026-10-10")], "Calendar today: no more events; 1 all-day item."),
+        (
+            [("Dentist", "2026-10-09 09:30", "2026-10-09 10:00")],
+            "Calendar today: 1 event left, next 09:30–10:00 (in 15 min).",
+        ),
+        (
+            [("Night train", "2026-10-09 22:00", "2026-10-10 06:00"), ("Call", "2026-10-09 12:00", "2026-10-09 12:30")],
+            "Calendar today: 2 events left, next 12:00–12:30 (in 2 h 45 min), last ends Sat 10, 06:00.",
+        ),
+        ([("Standup", "2026-10-09 09:00", "2026-10-09 09:30")], "Calendar today: 1 event left (1 now, until 09:30)."),
+    ],
+)
+async def test_the_call_glance_on_quiet_and_odd_days(
+    tmp_path: Path, events: list[tuple[str, str, str]], expected: str
+) -> None:
+    home = Home(tmp_path)
+    for title, start, end in events:
+        home.add(title, start, end)
+    assert await home.tools.glance() == expected
+
+
+async def test_the_call_glance_when_the_calendar_cannot_be_read(tmp_path: Path) -> None:
+    home = Home(tmp_path)
+    home.fail("unreachable")
+    assert await home.tools.glance() == "Calendar today: not read just now."
+    assert home.notes == []  # no note to the user from a glance
+
+
+async def test_the_call_glance_counts_every_calendar_and_names_none(tmp_path: Path) -> None:
+    many = Many(tmp_path)
+    many.calendars.add("Dinner", "2026-10-09 19:00", "2026-10-09 21:00")
+    many.calendars.data["calendars"]["school-days"] = {"error": "gone"}
+    many.calendars.save()
+    many.outlook.add("1:1 with Sam", day(2026, 10, 9, 10, 30), day(2026, 10, 9, 11))
+    glance = await many.tools.glance()
+    assert glance == (
+        "Calendar today: 2 events left, next 10:30–11:00 (in 1 h 15 min), last ends 21:00 (1 calendar not read)."
+    )
+    assert "School" not in glance and "Work" not in glance and "Family" not in glance
+    assert many.notes == []  # the digest and the tools say which calendar and why; a glance says nothing to the user

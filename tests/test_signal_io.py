@@ -217,15 +217,26 @@ def test_the_jvm_build_gets_no_java_argument() -> None:
     assert jvm == [native[0], *native[2:]]
 
 
+def test_signal_cli_is_told_its_data_folder(tmp_path: Path) -> None:
+    # live 13 Oct: under her own user macOS kept /var/empty as the account's home and Java (signal-cli) reads its home
+    # from there, not from $HOME: the folder is given explicitly
+    command = signal_cli_command("/x/signal-cli", "+306900000000", config_dir=tmp_path / "signal-cli")
+    assert command[command.index("--config") + 1] == str(tmp_path / "signal-cli")
+    assert command.index("--config") < command.index("-a")
+    assert "--config" not in signal_cli_command("/x/signal-cli", "+306900000000")
+
+
 def test_call_env_points_signal_cli_at_java_and_the_call_helper(tmp_path: Path) -> None:
-    env = call_env(java_home=Path("/opt/jdk"), tunnel=Path("/t/sct"), socket_dir=tmp_path)
+    env = call_env(java_home=Path("/opt/jdk"), tunnel=Path("/t/sct"), socket_dir=tmp_path, home=Path("/var/estia"))
     assert env == {
         "JAVA_HOME": "/opt/jdk",
-        "JAVA_OPTS": "-Djava.net.preferIPv4Stack=true",
+        "JAVA_OPTS": "-Djava.net.preferIPv4Stack=true -Duser.home=/var/estia",
         "SIGNAL_CALL_TUNNEL_BIN": "/t/sct",
         "SIGNAL_CALL_TUNNEL_AUDIO_MODE": "pipe",
         "SIGNAL_CALL_TUNNEL_SOCKET_DIR": str(tmp_path),
     }
+    spaced = call_env(java_home=None, tunnel=Path("/t/sct"), socket_dir=tmp_path, home=Path("/tmp/a b"))
+    assert spaced["JAVA_OPTS"] == "-Djava.net.preferIPv4Stack=true"  # JAVA_OPTS splits on spaces: such a home stays out
 
 
 async def test_the_child_gets_the_extra_environment_on_top_of_the_bridges(fake_dir: Path) -> None:
@@ -323,5 +334,112 @@ async def test_accept_and_hangup_only_for_allowed_callers(fake_dir: Path) -> Non
             await client.hangup_call(STRANGER, 6)
         calls = [(r["method"], r["params"]) for r in requests(fake_dir) if r["method"].endswith("Call")]
         assert calls == [("acceptCall", {"callId": -5}), ("hangupCall", {"callId": -5})]
+    finally:
+        await client.stop()
+
+
+# hardening: the identity check pinned, receive exceptions kept, linked devices listed
+
+
+@pytest.mark.parametrize("jvm", [False, True])
+def test_new_identities_are_trusted_only_on_first_use(jvm: bool) -> None:
+    """A changed safety number is never trusted by itself (a SIM swap of the user's number looks just like one): the
+    flag is pinned in the command, not left to signal-cli's default."""
+    command = signal_cli_command("/x/signal-cli", "+306900000000", jvm=jvm)
+    assert command.count("--trust-new-identities") == 1
+    assert command[command.index("--trust-new-identities") + 1] == "on-first-use"
+    assert "always" not in command
+    assert command.index("--trust-new-identities") < command.index("jsonRpc")  # a global option
+
+
+UNTRUSTED: dict[str, Any] = {
+    "exception": {"message": f"Untrusted identity: {ME}", "type": "UntrustedIdentityException"},
+    "envelope": {
+        "source": ME,
+        "sourceNumber": None,
+        "sourceUuid": ME,
+        "sourceName": None,
+        "sourceDevice": 1,
+        "timestamp": T0,
+        "serverReceivedTimestamp": T0 + 5,
+        "serverDeliveredTimestamp": T0 + 9,
+    },
+}
+
+
+async def test_a_receive_exception_is_kept_on_its_own_stream(fake_dir: Path) -> None:
+    """signal-cli 0.14.9 puts an `exception` (message, type) next to the envelope of a message it could not open,
+    such as one from a changed safety number: it reaches the bridge as a problem (type, sender, device; never the
+    exception's message, which names the account), instead of being dropped."""
+    client = make_client()
+    await client.start()
+    try:
+        deliver(fake_dir, UNTRUSTED)
+        deliver(fake_dir, {"exception": {"message": "Invalid message", "type": "InvalidMessageException"}})
+        problems = client.problems()
+        first = await asyncio.wait_for(anext(problems), 5)
+        assert (first.kind, first.sender, first.device) == ("UntrustedIdentityException", ME, 1)
+        assert first.untrusted_identity
+        second = await asyncio.wait_for(anext(problems), 5)  # no envelope at all: still reported
+        assert (second.kind, second.sender, second.device, second.untrusted_identity) == (
+            "InvalidMessageException",
+            None,
+            None,
+            False,
+        )
+        assert not hasattr(first, "message")  # the exception's text (it names the account) is not kept
+    finally:
+        await client.stop()
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected"),
+    [("Untrusted\nidentity <script>", "Untrustedidentityscript"), ("", "unknown"), (None, "unknown"), (7, "unknown")],
+)
+def test_a_problems_type_is_kept_as_a_plain_word(kind: object, expected: str) -> None:
+    client = make_client()
+    client._dispatch({"method": "receive", "params": {"result": {"exception": {"type": kind}}}})
+    assert client._problems.get_nowait().kind == expected
+
+
+async def test_linked_devices_are_listed_as_ids_and_creation_times_only(
+    fake_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    devices = [
+        {"id": 1, "name": None, "createdTimestamp": 1_700_000_000_000, "lastSeenTimestamp": 1_760_000_000_000},
+        {"id": 3, "name": "Example tablet", "createdTimestamp": 1_760_000_100_000, "lastSeenTimestamp": None},
+    ]
+    monkeypatch.setenv("FAKE_SIGNAL_DEVICES", json.dumps(devices))
+    client = make_client()
+    await client.start()
+    try:
+        listed = await client.list_devices()
+        assert [(device.id, device.created) for device in listed] == [(1, 1_700_000_000_000), (3, 1_760_000_100_000)]
+        assert "Example tablet" not in repr(listed)  # names are never kept
+        assert requests(fake_dir)[-1]["method"] == "listDevices"
+    finally:
+        await client.stop()
+
+
+async def test_odd_device_entries_are_left_out(fake_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    devices: list[object] = [{"id": 1}, {"id": "2"}, {"id": True}, "x", {"id": 0}, {"id": 4, "createdTimestamp": "?"}]
+    monkeypatch.setenv("FAKE_SIGNAL_DEVICES", json.dumps(devices))
+    client = make_client()
+    await client.start()
+    try:
+        assert [(device.id, device.created) for device in await client.list_devices()] == [(1, None), (4, None)]
+    finally:
+        await client.stop()
+
+
+async def test_the_fake_names_the_sending_device_as_signal_cli_does(fake_dir: Path) -> None:
+    client = make_client()
+    await client.start()
+    try:
+        deliver(fake_dir, {"sourceUuid": ME, "timestamp": T0, "dataMessage": {"message": "hi"}})
+        deliver(fake_dir, {"sourceUuid": ME, "sourceDevice": 2, "timestamp": T0 + 1, "dataMessage": {"message": "x"}})
+        stream = client.envelopes()
+        assert (await asyncio.wait_for(anext(stream), 5))["sourceDevice"] == 1
+        assert (await asyncio.wait_for(anext(stream), 5))["sourceDevice"] == 2
     finally:
         await client.stop()

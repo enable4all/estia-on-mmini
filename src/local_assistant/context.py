@@ -121,6 +121,17 @@ class ContextBuilder:
     def window(self, conversation: Conversation) -> list[Message]:
         return self._store.window_messages(conversation.id, after_seq=conversation.summary_upto_seq)
 
+    def after_outside(self, conversation: Conversation, message_id: int) -> bool:
+        """Whether her context for this message still holds a reply or summary that followed outside text: an earlier
+        message of the conversation in the window, or summarised, whose answer read outside text (or that was an audio
+        file or a photo). A new conversation (/new) starts without it."""
+        for found_id, seq in self._store.outside_seqs(conversation.id):
+            if found_id == message_id:
+                continue
+            if seq > conversation.summary_upto_seq or conversation.summary:
+                return True
+        return False
+
     def window_tokens_of(self, messages: list[Message]) -> int:
         return sum(self.estimate(message.text) + _MESSAGE_OVERHEAD for message in messages)
 
@@ -145,11 +156,14 @@ class ContextBuilder:
             return f"{prompts.SOUL_HEADER.format(name=self.name)}\n{soul.text}"
         return f"{prompts.DEFAULT_STYLE_HEADER.format(name=self.name)}\n{prompts.DEFAULT_STYLE}"
 
-    def system_prompt(self, conversation: Conversation) -> str:
-        """The rules, then the style (below the rules); then the profile and the summary."""
-        parts = [self._rules, self.style(), self.snapshot()]
+    def system_prompt(self, conversation: Conversation, rules: str | None = None, glance: str = "") -> str:
+        """The rules (or `rules`, for one answer: a practice turn), then the style (below the rules); then the profile
+        and the summary; on a call, last, the call's glance (code's counts at its start: `glance`)."""
+        parts = [self._rules if rules is None else rules, self.style(), self.snapshot()]
         if conversation.summary:
             parts.append(f"EARLIER IN THIS CONVERSATION (summary)\n{conversation.summary}")
+        if glance:  # last: the same for the whole call, so the prompt cache keeps everything above it
+            parts.append(glance)
         return "\n\n".join(parts)
 
     def to_chat(self, message: Message, images: Sequence[str] = (), *, newest: bool = False) -> dict[str, Any]:
@@ -168,13 +182,20 @@ class ContextBuilder:
         return {"role": "assistant", "content": without_fake_notices(message.text)}
 
     def build(
-        self, conversation: Conversation, images: Mapping[int, Sequence[str]] | None = None
+        self,
+        conversation: Conversation,
+        images: Mapping[int, Sequence[str]] | None = None,
+        *,
+        rules: str | None = None,
+        glance: str = "",
     ) -> list[dict[str, Any]]:
         """System prompt, then the conversation. Earlier tool calls are replayed after the message that caused
         them: without them Gemma saw "remember X" → "Noted: X" and learned it could skip the remember call.
         Photos (data URIs per message id) are only given for the message being answered (Hermes: images are
-        turn-scoped); in history a photo message is its "[photo] caption" text."""
-        built: list[dict[str, Any]] = [{"role": "system", "content": self.system_prompt(conversation)}]
+        turn-scoped); in history a photo message is its "[photo] caption" text. `rules`: other rules for this answer
+        only (a practice turn); the style and the profile stay below them. `glance`: a call's counts at its start."""
+        system = self.system_prompt(conversation, rules, glance)
+        built: list[dict[str, Any]] = [{"role": "system", "content": system}]
         window = self.window(conversation)
         newest = max((message.id for message in window if message.direction == "in"), default=None)
         for message in window:

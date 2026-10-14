@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Health check: service, signal-cli child, last messages, profile, database, recent errors. Exit 1 if not running.
 set -uo pipefail
+source "$(dirname "$0")/own-user.sh"  # moved, and her commands' fixed paths ($estia, $estia_deploy)
+if moved && [[ "$(id -un)" != _estia ]]; then
+  echo "She runs as her own user _estia: her data is readable only by that user. Run: /usr/bin/sudo /usr/local/estia/bin/estia check"
+  exit 1
+fi
 db="$HOME/Library/Application Support/local-assistant/assistant.db"
 logs="$HOME/Library/Logs/local-assistant"
 label=com.local-assistant.bridge

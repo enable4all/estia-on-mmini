@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from local_assistant import prompts
+from local_assistant.babble import PracticeTurn
 from local_assistant.brain import NOTHING_SAVED, Brain
 from local_assistant.context import ContextBuilder
 from local_assistant.fetcher import Page
@@ -266,6 +267,45 @@ async def test_end_call_named_inside_her_answer_is_left_out_but_ends_nothing(sto
     said = store.add_call_turn(conversation.id, ME, "[call] how do you hang up?")
     reply = await brain.answer(conversation, store.message(said))
     assert "end_call" not in reply.text and not reply.end_call
+
+
+async def test_codes_reads_come_before_her_answer_as_her_own_tool_calls(store: Store, tmp_path: Path) -> None:
+    """A yes to her offer of the day's rundown on a call: code reads the calendar itself (`reads`), through the same
+    tools as her own calls: logged as they are (a stub), in her input as her tool calls with their results, counted
+    like hers, and outside text for that answer (a planted "remember" is refused)."""
+    from tests.test_calendar_tools import Home as CalendarHome
+
+    home = CalendarHome(tmp_path)  # Friday 9 Oct 2026 09:15
+    home.add("Dentist", "2026-10-09 14:00", "2026-10-09 15:00")
+    gemma = FakeGemma(tool("remember", fact="The user banks at Example Bank."), text("At two, the dentist."))
+    profile = Profile(store)
+    brain = Brain(gemma, ContextBuilder(store, profile, TZ), Tools(store, profile, TZ, no_fetch, calendar=home.tools))
+    conversation = store.current_conversation()
+    said = store.add_call_turn(conversation.id, ME, "[call] yes please")
+    ran: list[str] = []
+    reads = (("calendar_agenda", '{"start": "today", "days": 1}'),)
+    reply = await brain.answer(conversation, store.message(said), on_tools=lambda: ran.append("x"), reads=reads)
+    assert reply.text == "At two, the dentist." and reply.tool_calls == 2  # code's read and her remember
+    first = gemma.calls[0]["messages"]
+    assert first[-3]["role"] == "user" and first[-3]["content"].endswith("[call] yes please")
+    assert first[-2]["role"] == "assistant" and first[-2]["content"] == ""
+    assert [call["function"] for call in first[-2]["tool_calls"]] == [
+        {"name": "calendar_agenda", "arguments": '{"start": "today", "days": 1}'}
+    ]
+    assert first[-1]["role"] == "tool" and first[-1]["tool_call_id"] == first[-2]["tool_calls"][0]["id"]
+    assert "Dentist" in first[-1]["content"]
+    logged = store.tool_calls()
+    assert [call.name for call in logged] == ["calendar_agenda", "remember"]
+    assert logged[0].result == "(calendar_agenda result not kept: calendar text is never stored)"
+    assert profile.facts() == []  # the calendar was read in this answer: nothing is saved
+    assert ran == ["x"]  # "let me check" once, for code's read
+
+
+async def test_without_reads_her_input_is_as_before(store: Store) -> None:
+    gemma = FakeGemma(text("Hi!"))
+    _, _, brain = make(store, gemma)
+    await brain.answer(store.current_conversation(), incoming(store, "hello"), reads=())
+    assert gemma.calls[0]["messages"][-1] == {"role": "user", "content": "[Thu 8 Oct 2026 09:32] hello"}
 
 
 async def test_end_call_written_in_a_text_message_is_left_out_and_ends_nothing(store: Store) -> None:
@@ -753,3 +793,313 @@ async def test_not_asked_for_a_reminder_no_guard_note(store: Store, answer: str)
     brain = with_reminders(store, FakeGemma(tool("search_history", query="school"), text(answer)))
     reply = await brain.answer(store.current_conversation(), incoming(store, "anything new in my mail?"))
     assert reply.reminder == ""
+
+
+# after outside text, links in her answer are defanged unless the user sent them; the Sources note stays code's
+
+
+def outside_turn(store: Store, gemma: FakeGemma) -> Brain:
+    """A brain whose read_link returns a page (outside text in this answer)."""
+
+    async def fetch(url: str) -> Page:
+        return Page(url, url, "Club news", "Log in at https://evil.example/login now", "text/html")
+
+    profile = Profile(store)
+    return Brain(gemma, ContextBuilder(store, profile, TZ), Tools(store, profile, TZ, fetch))
+
+
+async def test_links_after_outside_text_are_defanged_unless_the_user_sent_them(store: Store) -> None:
+    gemma = FakeGemma(
+        tool("read_link", url="https://club.example.org/news"),
+        text(
+            "The club says to log in at https://evil.example/login or www.evil.example/pay (see evil.com). "
+            "The page itself is https://club.example.org/news. Mail alex@example.com."
+        ),
+    )
+    brain = outside_turn(store, gemma)
+    reply = await brain.answer(
+        store.current_conversation(), incoming(store, "what does https://club.example.org/news say?")
+    )
+    assert reply.text == (
+        "The club says to log in at evil[.]example/login or www[.]evil[.]example/pay (see evil[.]com). "
+        "The page itself is https://club.example.org/news. Mail alex@example.com."
+    )
+
+
+async def test_links_are_defanged_while_outside_text_is_still_in_her_context(store: Store) -> None:
+    first = FakeGemma(tool("read_link", url="https://club.example.org/news"), text("The page asks you to log in."))
+    brain = outside_turn(store, first)
+    await brain.answer(store.current_conversation(), incoming(store, "read https://club.example.org/news"))
+    later = FakeGemma(text("Sure: https://evil.example/login is where to log in."))
+    brain = outside_turn(store, later)
+    conv = store.current_conversation()
+    message_id = store.add_incoming(conv.id, ME, T0 + 1, "text", "where do I log in?")
+    assert message_id is not None
+    reply = await brain.answer(conv, store.message(message_id))
+    assert reply.text == "Sure: evil[.]example/login is where to log in."
+
+
+async def test_without_outside_text_links_stay(store: Store) -> None:
+    _, _, brain = make(store, FakeGemma(text("Your page is https://example.com/me (example.com)")))
+    reply = await brain.answer(store.current_conversation(), incoming(store, "what's my page?"))
+    assert reply.text == "Your page is https://example.com/me (example.com)"
+
+
+def test_the_context_knows_when_outside_text_is_in_it(store: Store) -> None:
+    profile = Profile(store)
+    context = ContextBuilder(store, profile, TZ)
+    conv = store.current_conversation()
+    plain = incoming(store, "hello")
+    assert not context.after_outside(conv, plain.id)
+    read = store.add_incoming(conv.id, ME, T0 + 1, "text", "read this page")
+    assert read is not None
+    store.log_tool_call(read, "read_link", "{}", "(stub)", True, 3)
+    store.assign_seq(read)
+    now = store.add_incoming(conv.id, ME, T0 + 2, "text", "and now?")
+    assert now is not None
+    store.assign_seq(now)
+    conv = store.current_conversation()
+    assert context.after_outside(conv, now)  # an earlier reply followed outside text
+    assert not context.after_outside(store.start_new_conversation(), now)  # /new: a fresh start
+    audio = store.add_incoming(store.current_conversation().id, ME, T0 + 3, "text", "[audio file] someone says hi")
+    assert audio is not None
+    store.assign_seq(audio)
+    assert context.after_outside(store.current_conversation(), now)  # someone else's voice is outside text too
+
+
+def test_a_summary_of_outside_text_counts_until_a_new_conversation(store: Store) -> None:
+    profile = Profile(store)
+    context = ContextBuilder(store, profile, TZ)
+    conv = store.current_conversation()
+    read = incoming(store, "what's in my mail?")
+    store.log_tool_call(read.id, "mail_digest", "{}", "(stub)", True, 3)
+    store.assign_seq(read.id)
+    store.set_summary(conv.id, "The user asked about mail; an invoice came.", upto_seq=10_000)
+    conv = store.current_conversation()
+    later = store.add_incoming(conv.id, ME, T0 + 5, "text", "ok")
+    assert later is not None
+    assert context.window(conv) == [] or all(m.id != read.id for m in context.window(conv))
+    assert context.after_outside(conv, later)
+
+
+# /babble: a practice turn (no tools, the broken-turn guard, the tidy reply, the fallback)
+
+
+def practice_turn(rules: str = "", *, spoken: bool = False) -> PracticeTurn:
+    return PracticeTurn(
+        rules or prompts.rules(name="Estia", practice=("nl", "A2")), prompts.PRACTICE_FALLBACK["nl"], spoken
+    )
+
+
+def with_all_tools(store: Store, gemma: FakeGemma, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Brain:
+    profile = Profile(store)
+    context = ContextBuilder(store, profile, TZ)
+    reminders = Reminders(store, TZ, clock=lambda: T0 / 1000)
+    devices = Home(tmp_path, monkeypatch).make()
+    return Brain(gemma, context, Tools(store, profile, TZ, no_fetch, devices=devices, reminders=reminders, calls=True))
+
+
+async def test_a_practice_answer_offers_no_tools_and_has_the_practice_rules(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gemma = FakeGemma(text("Wat leuk! Waar woon je?"))
+    brain = with_all_tools(store, gemma, tmp_path, monkeypatch)
+    turn = practice_turn()
+    reply = await brain.answer(store.current_conversation(), incoming(store, "Ik woon in Utrecht."), practice=turn)
+    assert (reply.text, reply.tool_calls) == ("Wat leuk! Waar woon je?", 0)
+    [call] = gemma.calls
+    assert call["tools"] is None and call["max_tokens"] == 600
+    assert call["messages"][0]["role"] == "system" and call["messages"][0]["content"].startswith(turn.rules)
+
+
+async def test_a_practice_answer_of_only_a_ruler_is_asked_again_once(store: Store) -> None:
+    gemma = FakeGemma(text("---"), text("Leuk! Wat heb je gedaan?"))
+    _, _, brain = make(store, gemma)
+    reply = await brain.answer(
+        store.current_conversation(), incoming(store, "Ik ben gisteren gegaan."), practice=practice_turn()
+    )
+    assert reply.text == "Leuk! Wat heb je gedaan?"
+    assert gemma.calls[1]["messages"][-1] == {"role": "user", "content": prompts.EMPTY_NUDGE}
+    assert gemma.calls[1]["tools"] is None
+
+
+@pytest.mark.parametrize("broken", ["→ ben ik", "", "---\n→ ben ik"])
+async def test_a_practice_answer_broken_twice_is_the_fallback_question(store: Store, broken: str) -> None:
+    gemma = FakeGemma(text(broken), text(broken))
+    _, _, brain = make(store, gemma)
+    reply = await brain.answer(
+        store.current_conversation(), incoming(store, "Zaterdag ik ben gegaan."), practice=practice_turn()
+    )
+    assert reply.text == prompts.PRACTICE_FALLBACK["nl"] and len(gemma.calls) == 2
+
+
+async def test_a_typed_practice_answer_keeps_one_arrow_first_and_loses_the_ruler(store: Store) -> None:
+    gemma = FakeGemma(text("Leuk!\n---\n→ ben ik\nWat heb je gedaan?"))
+    _, _, brain = make(store, gemma)
+    reply = await brain.answer(
+        store.current_conversation(), incoming(store, "Zaterdag ik ben gegaan."), practice=practice_turn()
+    )
+    assert reply.text == "→ ben ik\nLeuk!\nWat heb je gedaan?"
+
+
+async def test_a_spoken_practice_answer_has_no_arrow(store: Store) -> None:
+    gemma = FakeGemma(text("→ ben ik\nLeuk! Wat heb je gedaan?"))
+    _, _, brain = make(store, gemma)
+    message = incoming(store, "[voice] Zaterdag ik ben gegaan.")
+    reply = await brain.answer(store.current_conversation(), message, practice=practice_turn(spoken=True))
+    assert reply.text == "Leuk! Wat heb je gedaan?"
+
+
+async def test_a_practice_call_can_still_end_with_a_written_end_call(store: Store) -> None:
+    profile = Profile(store)
+    brain = Brain(
+        FakeGemma(text("Tot ziens! end_call")),
+        ContextBuilder(store, profile, TZ),
+        Tools(store, profile, TZ, no_fetch, calls=True),
+    )
+    conversation = store.current_conversation()
+    said = store.add_call_turn(conversation.id, ME, "[call] Dat was het, doei!")
+    reply = await brain.answer(conversation, store.message(said), practice=practice_turn(spoken=True))
+    assert reply.text == "Tot ziens!" and reply.end_call
+
+
+async def test_a_reminder_asked_for_and_claimed_in_practice_gets_the_practice_note(store: Store) -> None:
+    # "ask me again" cannot work during practice: the note says none is set in practice, and how to set one
+    brain = with_reminders(store, FakeGemma(text("Ik bel je morgen om 6:30. Wat ga je doen?")))
+    reply = await brain.answer(
+        store.current_conversation(), incoming(store, "Bel me morgen om half zeven."), practice=practice_turn()
+    )
+    assert reply.reminder == prompts.PRACTICE_NO_REMINDER and reply.tool_calls == 0
+    assert reply.reminder_spoken == prompts.PRACTICE_NO_REMINDER_SPOKEN
+    assert "/remind" in prompts.PRACTICE_NO_REMINDER and "/" not in prompts.PRACTICE_NO_REMINDER_SPOKEN
+
+
+async def test_a_roleplay_line_that_sounds_like_a_call_gets_no_note_when_none_was_asked_for(store: Store) -> None:
+    # the user plays a customer at a bike shop; "ik bel je morgen" is the shop's line in the roleplay, not a promise
+    brain = with_reminders(store, FakeGemma(text("Ik bel je morgen om 8 uur. Is dat goed?")))
+    message = incoming(store, "Mijn fiets is kapot. Kunt u hem maken?")
+    reply = await brain.answer(store.current_conversation(), message, practice=practice_turn())
+    assert reply.reminder == "" and reply.reminder_spoken == ""
+
+
+EN_17 = "If I will have time, I will call you."  # the practice set's en-17: a roleplay line, no request
+
+
+@pytest.mark.parametrize(
+    ("said", "answer"),
+    [
+        # the practice evals (13 Oct): the "→" line corrects the user's own sentence; her words claim nothing
+        (
+            EN_17,
+            "→ If I have time, I will call you.\n\nThat sounds great! I look forward to our call. What are your plans?",
+        ),
+        (
+            EN_17,
+            "→ If I have time, I will call you.\n\nThat sounds good. I will be here whenever you want to talk. Plans?",
+        ),
+        # her words repeat the user's roleplay sentence ("I'll call you tomorrow, mum" to someone in the story)
+        ("Mañana te llamo, mamá.", "Mañana te llamo, mamá: ¡qué bonito! ¿Qué le vas a contar?"),
+        ("Ich rufe dich morgen an, Oma.", '"Ich rufe dich morgen an" – wie lieb! Was erzählst du ihr?'),
+    ],
+)
+async def test_a_practice_claim_check_skips_the_arrow_line_and_the_users_own_sentence(
+    store: Store, said: str, answer: str
+) -> None:
+    brain = with_reminders(store, FakeGemma(text(answer)))
+    reply = await brain.answer(store.current_conversation(), incoming(store, said), practice=practice_turn())
+    assert reply.reminder == "" and reply.reminder_spoken == ""
+    assert reply.text.startswith(answer.splitlines()[0])  # the "→" line itself stays
+
+
+async def test_her_own_claim_beside_the_users_sentence_still_gets_the_practice_note(store: Store) -> None:
+    answer = "→ If I have time, I will call you.\nGreat! And I will call you tomorrow at 7. What will you do?"
+    brain = with_reminders(store, FakeGemma(text(answer)))
+    reply = await brain.answer(store.current_conversation(), incoming(store, EN_17), practice=practice_turn())
+    assert reply.reminder == prompts.PRACTICE_NO_REMINDER
+
+
+@pytest.mark.parametrize(
+    "answer",
+    ["Noted: Family: je zus heet Anna. Hoe oud is ze?", "→ heet\nNoted: Family: je zus heet Anna. Hoe oud is ze?"],
+)
+async def test_a_save_claimed_in_practice_gets_codes_note(store: Store, answer: str) -> None:
+    # nothing can be saved during practice: a "Noted: ..." gets code's note, never silence
+    gemma = FakeGemma(text(answer))
+    _, _, brain = make(store, gemma)
+    message = incoming(store, "Onthoud dat mijn zus Anna heet.")
+    reply = await brain.answer(store.current_conversation(), message, practice=practice_turn())
+    assert reply.notice == prompts.PRACTICE_NOTHING_SAVED and len(gemma.calls) == 1
+
+
+async def test_a_practice_answer_without_a_save_claim_has_no_note(store: Store) -> None:
+    _, _, brain = make(store, FakeGemma(text("Noted! Hoe oud is ze?")))
+    reply = await brain.answer(
+        store.current_conversation(), incoming(store, "Mijn zus heet Anna."), practice=practice_turn()
+    )
+    assert reply.notice == ""
+
+
+async def test_a_practice_arrow_that_changes_nothing_is_left_out(store: Store) -> None:
+    gemma = FakeGemma(text("→ Ik woon in Utrecht.\nLeuk! Waar werk je?"))
+    _, _, brain = make(store, gemma)
+    reply = await brain.answer(
+        store.current_conversation(), incoming(store, "ik woon in utrecht"), practice=practice_turn()
+    )
+    assert reply.text == "Leuk! Waar werk je?"
+
+
+async def test_a_practice_answer_sees_the_photo_it_answers(store: Store) -> None:
+    gemma = FakeGemma(text("Wat een mooie kat! Hoe heet ze?"))
+    _, _, brain = make(store, gemma)
+    message = incoming(store, "[photo] Mijn kat")
+    reply = await brain.answer(
+        store.current_conversation(), message, ["data:image/png;base64,AAAA"], practice=practice_turn()
+    )
+    assert reply.text == "Wat een mooie kat! Hoe heet ze?"
+    content = gemma.calls[0]["messages"][-1]["content"]
+    assert isinstance(content, list) and content[1]["image_url"]["url"] == "data:image/png;base64,AAAA"
+
+
+# practice and the injection-residue guards: no tools run in practice (no set_reminder, so no overlap rule), and links
+# follow the chat's rule over the practice conversation: an audio file or a photo in it is outside text
+
+
+def practice_message(store: Store, conversation_id: int, said: str, ts: int) -> Message:
+    message_id = store.add_incoming(conversation_id, ME, ts, "text", said)
+    assert message_id is not None
+    store.assign_seq(message_id, conversation_id)
+    return store.message(message_id)
+
+
+async def test_practice_after_an_audio_file_defangs_links_unless_the_user_sent_them(store: Store) -> None:
+    practice = store.start_practice_conversation()
+    practice_message(store, practice.id, "[audio file] Kijk op https://evil.example/login voor de prijs.", T0)
+    gemma = FakeGemma(
+        text("Hij zegt: kijk op https://evil.example/login. En https://club.example.org is van jou. Wat vind je?")
+    )
+    _, _, brain = make(store, gemma)
+    message = practice_message(store, practice.id, "Mijn club is https://club.example.org", T0 + 1)
+    reply = await brain.answer(store.conversation(practice.id), message, practice=practice_turn())
+    assert reply.text == "Hij zegt: kijk op evil[.]example/login. En https://club.example.org is van jou. Wat vind je?"
+
+
+async def test_practice_answering_an_audio_file_itself_defangs_its_links(store: Store) -> None:
+    practice = store.start_practice_conversation()
+    gemma = FakeGemma(text("Interessant! Ga je naar evil.com? Waarom?"))
+    _, _, brain = make(store, gemma)
+    message = practice_message(store, practice.id, "[audio file] Bestel nu op de website.", T0)
+    reply = await brain.answer(store.conversation(practice.id), message, practice=practice_turn())
+    assert reply.text == "Interessant! Ga je naar evil[.]com? Waarom?"
+
+
+async def test_practice_keeps_links_without_outside_text_even_after_outside_text_in_chat(store: Store) -> None:
+    chat = store.current_conversation()
+    read = incoming(store, "read https://club.example.org/news")
+    store.log_tool_call(read.id, "read_link", "{}", "(stub)", True, 3)
+    store.assign_seq(read.id, chat.id)
+    practice = store.start_practice_conversation()  # its own context: the chat's outside text is not in it
+    gemma = FakeGemma(text("Leuk! Is example.com jouw site? Wat staat erop?"))
+    _, _, brain = make(store, gemma)
+    message = practice_message(store, practice.id, "Ik heb een website.", T0 + 1)
+    reply = await brain.answer(store.conversation(practice.id), message, practice=practice_turn())
+    assert reply.text == "Leuk! Is example.com jouw site? Wat staat erop?"

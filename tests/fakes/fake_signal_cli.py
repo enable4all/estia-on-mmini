@@ -11,9 +11,18 @@ Environment:
   FAKE_SIGNAL_AVATAR_ERROR answer an updateProfile with an avatar with an error
   FAKE_SIGNAL_CALL_END     after startCall (call id 42, its ringing event before the reply, as signal-cli 0.14.9
                            does): end the call with this reason (e.g. ring_timeout); unset, it rings until hung up
+  FAKE_SIGNAL_DEVICES      JSON list listDevices answers with (default: this device only, id 1)
+  FAKE_SIGNAL_CAPTCHA      register needs this captcha token (unset: none needed)
+  FAKE_SIGNAL_CODE         the SMS code verify takes (default 111111)
+  FAKE_SIGNAL_PIN          verify needs this registration-lock PIN too (unset: none)
 
-An inbox line with a top-level "method" (e.g. a callEvent) is written as it is: a notification, in order.
-launch.json records argv and the call-related environment of the latest start.
+register and verify work as in signal-cli 0.14.9: only in multi-account mode (started without -a), with the number in
+an "account" param.
+
+An inbox line with a top-level "method" (e.g. a callEvent) is written as it is: a notification, in order. A line with
+a top-level "exception" is a message signal-cli could not open (0.14.9's shape: {"exception": {"message", "type"},
+"envelope": {...}}). An envelope from an account without "sourceDevice" gets device 1, as signal-cli always names it.
+launch.json records argv and the call-related environment of the latest start; launches.jsonl every start's argv.
 """
 
 from __future__ import annotations
@@ -29,6 +38,25 @@ from pathlib import Path
 from typing import Any
 
 
+def registration(method: str, params: dict[str, Any]) -> dict[str, Any]:
+    """signal-cli 0.14.9's register and verify: multi-account mode only, the number in the "account" param."""
+    if "-a" in sys.argv[1:]:
+        return {"error": {"code": -32601, "message": "Method not implemented"}}
+    if not params.get("account"):
+        return {"error": {"code": -32602, "message": "Method requires account parameter"}}
+    if method == "register":
+        wanted = os.environ.get("FAKE_SIGNAL_CAPTCHA")
+        if wanted and params.get("captcha") != wanted:
+            return {"error": {"code": -1, "message": "Captcha required for verification, use --captcha CAPTCHA"}}
+        return {"result": {}}
+    if params.get("verificationCode") != os.environ.get("FAKE_SIGNAL_CODE", "111111"):
+        return {"error": {"code": -1, "message": "Verify error: Invalid verification code"}}
+    pin = os.environ.get("FAKE_SIGNAL_PIN")
+    if pin and params.get("pin") != pin:
+        return {"error": {"code": -1, "message": "Verification failed! This number is locked with a pin."}}
+    return {"result": {}}
+
+
 def main() -> None:
     folder = Path(os.environ["FAKE_SIGNAL_DIR"])
     inbox = folder / "inbox.jsonl"
@@ -42,6 +70,8 @@ def main() -> None:
     keys = ("JAVA_HOME", "JAVA_OPTS", "SIGNAL_CALL_TUNNEL_BIN", "SIGNAL_CALL_TUNNEL_AUDIO_MODE")
     launch = {"argv": sys.argv[1:], "env": {k: os.environ[k] for k in keys if k in os.environ}}
     (folder / "launch.json").write_text(json.dumps(launch))
+    with (folder / "launches.jsonl").open("a") as handle:
+        handle.write(json.dumps(sys.argv[1:]) + "\n")
 
     def write(obj: dict[str, Any]) -> None:
         with lock:
@@ -58,7 +88,13 @@ def main() -> None:
                 item = json.loads(lines[index])
                 if "method" in item:
                     write({"jsonrpc": "2.0", **item})
+                elif "exception" in item:
+                    result = {key: item[key] for key in ("exception", "envelope") if key in item}
+                    params = {"subscription": 0, "result": {**result, "account": "+306900000000"}}
+                    write({"jsonrpc": "2.0", "method": "receive", "params": params})
                 else:
+                    if item.get("sourceUuid") and "sourceDevice" not in item:
+                        item["sourceDevice"] = 1
                     write(
                         {
                             "jsonrpc": "2.0",
@@ -116,6 +152,11 @@ def main() -> None:
                     "isOutgoing": True,
                 }
                 write({"jsonrpc": "2.0", "method": "callEvent", "params": {"subscription": 1, "result": ended}})
+        elif method == "listDevices":
+            now = int(time.time() * 1000)
+            default = [{"id": 1, "name": None, "createdTimestamp": now - 86_400_000, "lastSeenTimestamp": now}]
+            devices = json.loads(os.environ.get("FAKE_SIGNAL_DEVICES") or json.dumps(default))
+            write({"jsonrpc": "2.0", "result": devices, "id": request_id})
         elif method == "acceptCall":
             call_id = request.get("params", {}).get("callId")
             result = {"callId": call_id, "state": "CONNECTING", "codec": "opus", "sampleRate": 48000}
@@ -123,6 +164,8 @@ def main() -> None:
         elif method == "updateProfile" and os.environ.get("FAKE_SIGNAL_AVATAR_ERROR") and "avatar" in request["params"]:
             error = {"code": -1, "message": "fake failure"}
             write({"jsonrpc": "2.0", "error": error, "id": request_id})
+        elif method in ("register", "verify"):
+            write({"jsonrpc": "2.0", **registration(method, request.get("params") or {}), "id": request_id})
         elif method in ("sendTyping", "sendReceipt", "updateProfile", "hangupCall"):
             write({"jsonrpc": "2.0", "result": {}, "id": request_id})
         else:

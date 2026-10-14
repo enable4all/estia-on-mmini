@@ -3,6 +3,7 @@
 # always on, then the extras you pick. Safe to run again: done steps are skipped. --dry-run prints without doing.
 # No key or password passes through this script; Signal's one-time captcha link and SMS code are typed hidden.
 set -euo pipefail
+export HOMEBREW_NO_ANALYTICS=1  # Homebrew sends usage data unless told not to: never from this setup
 cd "$(dirname "$0")/.."
 [[ "$(uname -s)/$(uname -m)" == "Darwin/arm64" ]] || { echo "Estia needs a Mac with Apple silicon (M1 or later)." >&2; exit 1; }
 dry=""; for a in "$@"; do [[ "$a" == "--dry-run" ]] && dry=1; done
@@ -26,7 +27,8 @@ if [[ -n "$dry" ]]; then
   run uv sync --frozen
   if [[ -x .venv/bin/python ]]; then exec .venv/bin/python -m local_assistant.setup "$@"; fi
   echo "Then: the model for this Mac's memory, her Signal number (captcha link and SMS code typed hidden),"
-  echo "your account (a one-time word you send her), the config, always on (asks for your password), and the extras."
+  echo "your account (a one-time word you send her), the config, always on in her own user (asks for your password),"
+  echo "the security step (each change on your yes), and the extras."
   exit 0
 fi
 echo "✓ Tools: signal-cli, ollama, uv"

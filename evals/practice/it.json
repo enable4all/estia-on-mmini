@@ -1,0 +1,579 @@
+{
+ "language": "it",
+ "items": [
+  {
+   "id": "it-01",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Il studente nuovo viene dalla Germania.",
+   "error_type": "article (lo before s+consonant)",
+   "gold_said": "Il studente",
+   "gold_better": "Lo studente",
+   "gold_full": "Lo studente nuovo viene dalla Germania.",
+   "why_en": "Before s + consonant, the masculine article is 'lo', not 'il'."
+  },
+  {
+   "id": "it-02",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Ieri ho andato al cinema con Luca.",
+   "error_type": "auxiliary (essere/avere)",
+   "gold_said": "ho andato",
+   "gold_better": "sono andato",
+   "gold_full": "Ieri sono andato al cinema con Luca.",
+   "why_en": "'Andare' forms the passato prossimo with 'essere'."
+  },
+  {
+   "id": "it-03",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Mia sorella è arrivato tardi alla festa.",
+   "error_type": "participle agreement",
+   "gold_said": "arrivato",
+   "gold_better": "arrivata",
+   "gold_full": "Mia sorella è arrivata tardi alla festa.",
+   "why_en": "With 'essere' the past participle agrees with the subject: 'arrivata'."
+  },
+  {
+   "id": "it-04",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Stamattina mi ho svegliato tardi.",
+   "error_type": "auxiliary (reflexive verbs)",
+   "gold_said": "mi ho svegliato",
+   "gold_better": "mi sono svegliato",
+   "gold_full": "Stamattina mi sono svegliato tardi.",
+   "why_en": "Reflexive verbs always take 'essere' in the passato prossimo."
+  },
+  {
+   "id": "it-05",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Mi piace molto i film italiani.",
+   "error_type": "verb agreement (piacere)",
+   "gold_said": "piace",
+   "gold_better": "piacciono",
+   "gold_full": "Mi piacciono molto i film italiani.",
+   "why_en": "With 'piacere' the verb agrees with what is liked; 'i film' is plural, so 'piacciono'."
+  },
+  {
+   "id": "it-06",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Io manco molto la mia famiglia.",
+   "error_type": "mancare construction",
+   "gold_said": "Io manco",
+   "gold_better": "Mi manca",
+   "gold_full": "Mi manca molto la mia famiglia.",
+   "why_en": "'Mancare' works like 'piacere': what you miss is the subject, so 'mi manca'."
+  },
+  {
+   "id": "it-07",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Voglio che tu vieni alla mia festa sabato.",
+   "error_type": "subjunctive (volere che)",
+   "gold_said": "vieni",
+   "gold_better": "venga",
+   "gold_full": "Voglio che tu venga alla mia festa sabato.",
+   "why_en": "After 'voglio che' the verb goes in the subjunctive."
+  },
+  {
+   "id": "it-10",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Mentre ho preparato la cena, mi ha telefonato mia madre.",
+   "error_type": "tense (imperfetto for an action in progress)",
+   "gold_said": "ho preparato",
+   "gold_better": "preparavo",
+   "gold_full": "Mentre preparavo la cena, mi ha telefonato mia madre.",
+   "why_en": "An action in progress when something else happened takes the imperfetto: 'preparavo'."
+  },
+  {
+   "id": "it-11",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Ieri mi alzavo alle sette, ho fatto colazione e sono uscito.",
+   "error_type": "tense (passato prossimo for completed events)",
+   "gold_said": "mi alzavo",
+   "gold_better": "mi sono alzato",
+   "gold_full": "Ieri mi sono alzato alle sette, ho fatto colazione e sono uscito.",
+   "why_en": "A single completed action in a sequence takes the passato prossimo."
+  },
+  {
+   "id": "it-12",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Le mele sono buone, mangio due ogni giorno.",
+   "error_type": "pronoun ne",
+   "gold_said": "mangio due",
+   "gold_better": "ne mangio due",
+   "gold_full": "Le mele sono buone, ne mangio due ogni giorno.",
+   "why_en": "When a quantity is given without repeating the noun, Italian needs 'ne'."
+  },
+  {
+   "id": "it-13",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Non ho visto qualcuno alla stazione.",
+   "error_type": "negation (nessuno)",
+   "gold_said": "qualcuno",
+   "gold_better": "nessuno",
+   "gold_full": "Non ho visto nessuno alla stazione.",
+   "why_en": "After 'non', Italian uses 'nessuno'; the double negative is standard."
+  },
+  {
+   "id": "it-14",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Mio figlio è dieci anni e gioca a calcio.",
+   "error_type": "verb choice (avere anni)",
+   "gold_said": "è dieci anni",
+   "gold_better": "ha dieci anni",
+   "gold_full": "Mio figlio ha dieci anni e gioca a calcio.",
+   "why_en": "Age is expressed with 'avere': 'ha dieci anni'."
+  },
+  {
+   "id": "it-15",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Vivo ancora con i miei parenti, mio padre e mia madre.",
+   "error_type": "false friend",
+   "gold_said": "parenti",
+   "gold_better": "genitori",
+   "gold_full": "Vivo ancora con i miei genitori, mio padre e mia madre.",
+   "why_en": "'Parenti' means relatives; mother and father are 'genitori'."
+  },
+  {
+   "id": "it-16",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Ho preso in prestito tre libri dalla libreria comunale.",
+   "error_type": "false friend",
+   "gold_said": "libreria",
+   "gold_better": "biblioteca",
+   "gold_full": "Ho preso in prestito tre libri dalla biblioteca comunale.",
+   "why_en": "A 'libreria' is a bookshop; the lending library is a 'biblioteca'."
+  },
+  {
+   "id": "it-17",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "L'anno prossimo voglio andare a Spagna.",
+   "error_type": "preposition (in + country)",
+   "gold_said": "a Spagna",
+   "gold_better": "in Spagna",
+   "gold_full": "L'anno prossimo voglio andare in Spagna.",
+   "why_en": "Countries take 'in'; 'a' is for cities."
+  },
+  {
+   "id": "it-18",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Domani vado a mia nonna a pranzo.",
+   "error_type": "preposition (da + person)",
+   "gold_said": "vado a mia nonna",
+   "gold_better": "vado da mia nonna",
+   "gold_full": "Domani vado da mia nonna a pranzo.",
+   "why_en": "Going to someone's home is 'da' + the person."
+  },
+  {
+   "id": "it-19",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Ieri ho telefonato Marco per il suo compleanno.",
+   "error_type": "preposition (telefonare a)",
+   "gold_said": "telefonato Marco",
+   "gold_better": "telefonato a Marco",
+   "gold_full": "Ieri ho telefonato a Marco per il suo compleanno.",
+   "why_en": "'Telefonare' takes 'a' before the person called."
+  },
+  {
+   "id": "it-20",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Non ti preoccupare, abbiamo già risolto la problema.",
+   "error_type": "article/gender",
+   "gold_said": "la problema",
+   "gold_better": "il problema",
+   "gold_full": "Non ti preoccupare, abbiamo già risolto il problema.",
+   "why_en": "'Problema' is masculine even though it ends in -a, so it takes 'il'."
+  },
+  {
+   "id": "it-21",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Per la torta servono sei uovi.",
+   "error_type": "plural (irregular)",
+   "gold_said": "uovi",
+   "gold_better": "uova",
+   "gold_full": "Per la torta servono sei uova.",
+   "why_en": "'Uovo' has an irregular plural: 'le uova'."
+  },
+  {
+   "id": "it-22",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Le spiagge in Sardegna sono molto belli.",
+   "error_type": "adjective agreement",
+   "gold_said": "belli",
+   "gold_better": "belle",
+   "gold_full": "Le spiagge in Sardegna sono molto belle.",
+   "why_en": "The adjective agrees with 'spiagge', which is feminine plural."
+  },
+  {
+   "id": "it-23",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "I miei genitori abita in un paese vicino a Bari.",
+   "error_type": "verb agreement",
+   "gold_said": "abita",
+   "gold_better": "abitano",
+   "gold_full": "I miei genitori abitano in un paese vicino a Bari.",
+   "why_en": "The subject 'i miei genitori' is plural, so the verb is 'abitano'."
+  },
+  {
+   "id": "it-24",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Ho prenduto il treno delle otto per andare al lavoro.",
+   "error_type": "verb form (irregular participle)",
+   "gold_said": "prenduto",
+   "gold_better": "preso",
+   "gold_full": "Ho preso il treno delle otto per andare al lavoro.",
+   "why_en": "'Prendere' has an irregular past participle: 'preso'."
+  },
+  {
+   "id": "it-25",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Il vestito è caro, ma voglio lo comprare.",
+   "error_type": "pronoun placement",
+   "gold_said": "voglio lo comprare",
+   "gold_better": "voglio comprarlo",
+   "gold_full": "Il vestito è caro, ma voglio comprarlo.",
+   "why_en": "An object pronoun goes before 'voglio' or is attached to the infinitive, never between them."
+  },
+  {
+   "id": "it-26",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Le chiavi sono in il cassetto.",
+   "error_type": "articulated preposition",
+   "gold_said": "in il",
+   "gold_better": "nel",
+   "gold_full": "Le chiavi sono nel cassetto.",
+   "why_en": "'In' + 'il' always contracts to 'nel'."
+  },
+  {
+   "id": "it-27",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Studio italiano per due anni, ma parlo ancora poco.",
+   "error_type": "time expression (da)",
+   "gold_said": "per due anni",
+   "gold_better": "da due anni",
+   "gold_full": "Studio italiano da due anni, ma parlo ancora poco.",
+   "why_en": "For something that started in the past and is still going on, use the present + 'da'."
+  },
+  {
+   "id": "it-28",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "La mia madre lavora in un ospedale.",
+   "error_type": "possessive with family nouns",
+   "gold_said": "La mia madre",
+   "gold_better": "Mia madre",
+   "gold_full": "Mia madre lavora in un ospedale.",
+   "why_en": "A singular family noun with a possessive takes no article: 'mia madre'."
+  },
+  {
+   "id": "it-29",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Sei ragione, è troppo tardi per uscire.",
+   "error_type": "verb choice (avere ragione)",
+   "gold_said": "Sei ragione",
+   "gold_better": "Hai ragione",
+   "gold_full": "Hai ragione, è troppo tardi per uscire.",
+   "why_en": "'To be right' is 'avere ragione' in Italian."
+  },
+  {
+   "id": "it-30",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Questa pizza è più migliore di quella di ieri.",
+   "error_type": "comparative",
+   "gold_said": "più migliore",
+   "gold_better": "migliore",
+   "gold_full": "Questa pizza è migliore di quella di ieri.",
+   "why_en": "'Migliore' is already a comparative, so 'più' is not added."
+  },
+  {
+   "id": "it-31",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "La mia mamma fa la pizza più buona del mondo.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'mamma' (affectionate form) may take the article"
+  },
+  {
+   "id": "it-32",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Quando avrò tempo, ti chiamerò.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "Italian uses the future after 'quando' (unlike Spanish)"
+  },
+  {
+   "id": "it-33",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Mi sono mangiato una pizza intera.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "informal reflexive 'mangiarsi' is correct"
+  },
+  {
+   "id": "it-34",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Ieri sera siamo usciti con i nostri amici.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  },
+  {
+   "id": "it-35",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Mi fanno male le mani dopo la palestra.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'le mani' is feminine plural of 'la mano'"
+  },
+  {
+   "id": "it-36",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Il caffè lo prendo senza zucchero.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "left dislocation with resumptive 'lo' is correct"
+  },
+  {
+   "id": "it-37",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Penso che sia una buona idea.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  },
+  {
+   "id": "it-38",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Domani vado da Marco a vedere la partita.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  },
+  {
+   "id": "it-39",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Mio fratello e io abbiamo vissuto a Torino per tre anni.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'per' is right for a finished period"
+  },
+  {
+   "id": "it-40",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Oggi non c'è nessuno in ufficio.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "double negative is standard"
+  },
+  {
+   "id": "it-42",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Mi è piaciuto molto il film di ieri sera.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'piacere' takes 'essere'; participle agrees with 'il film'"
+  },
+  {
+   "id": "it-44",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "I miei amici sono venuti a cena e gli è piaciuto tutto.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'gli' for 'a loro' is accepted standard"
+  },
+  {
+   "id": "it-45",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "In frigo ci sono due uova e un po' di latte.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'uova' is the correct irregular plural"
+  }
+ ],
+ "conversations": [
+  {
+   "id": "it-conv-1",
+   "level": "B1",
+   "topic": "weekend",
+   "user_turns": [
+    "Ciao! Questo fine settimana sono andato in montagna con degli amici.",
+    "Sabato faceva bel tempo e abbiamo camminato per sei ore.",
+    "La sera eravamo stanchissimi, ma la cena era buonissima.",
+    "Domenica ho andato a vedere un lago vicino al paese.",
+    "Mi piace molto le montagne perché c'è tanta pace.",
+    "Il mese prossimo voglio tornarci con la mia ragazza, ma lei non piace camminare."
+   ],
+   "planted": [
+    {
+     "said": "ho andato",
+     "better": "sono andato"
+    },
+    {
+     "said": "Mi piace molto le montagne",
+     "better": "Mi piacciono molto le montagne"
+    },
+    {
+     "said": "lei non piace",
+     "better": "a lei non piace"
+    }
+   ]
+  },
+  {
+   "id": "it-conv-2",
+   "level": "B1",
+   "topic": "work",
+   "user_turns": [
+    "Lavoro in un'azienda di software da tre anni.",
+    "Il mio lavoro è interessante, ma a volte è molto stressante.",
+    "Questa settimana abbiamo un progetto nuovo e il mio capo vuole che io lavoro sabato.",
+    "I miei colleghi sono molto simpatici e mi aiutano sempre.",
+    "Ieri ho chiesto il mio capo più tempo per finire la relazione.",
+    "Ha detto di sì, ma devo la finire entro lunedì."
+   ],
+   "planted": [
+    {
+     "said": "che io lavoro",
+     "better": "che io lavori"
+    },
+    {
+     "said": "chiesto il mio capo",
+     "better": "chiesto al mio capo"
+    },
+    {
+     "said": "devo la finire",
+     "better": "devo finirla"
+    }
+   ]
+  },
+  {
+   "id": "it-conv-3",
+   "level": "B1",
+   "topic": "food",
+   "user_turns": [
+    "Adoro cucinare, soprattutto piatti giapponesi.",
+    "Ieri ho preparato il ramen per i miei amici e gli è piaciuto tanto.",
+    "Per il ramen ho usato sei uovi e tante verdure.",
+    "Di solito faccio la spesa al mercato il sabato mattina.",
+    "Al mercato c'è molti banchi di frutta e verdura.",
+    "Mia nonna cucina più meglio di me, ma io sto imparando."
+   ],
+   "planted": [
+    {
+     "said": "uovi",
+     "better": "uova"
+    },
+    {
+     "said": "c'è molti",
+     "better": "ci sono molti"
+    },
+    {
+     "said": "più meglio",
+     "better": "meglio"
+    }
+   ]
+  },
+  {
+   "id": "it-conv-4",
+   "level": "B1",
+   "topic": "travel",
+   "user_turns": [
+    "L'estate scorsa sono andata in Giappone con mia sorella.",
+    "Siamo state lì due settimane e abbiamo visitato tante città.",
+    "Il cibo era buonissimo, ma il primo giorno mia sorella è stato male.",
+    "Non conoscevamo qualcuno, ma la gente era molto gentile.",
+    "A Kyoto abbiamo conosciuto una ragazza che ci ha invitate a cena.",
+    "Se avrei più ferie, andrei anche in Corea."
+   ],
+   "planted": [
+    {
+     "said": "è stato male",
+     "better": "è stata male"
+    },
+    {
+     "said": "qualcuno",
+     "better": "nessuno"
+    },
+    {
+     "said": "Se avrei",
+     "better": "Se avessi"
+    }
+   ]
+  }
+ ]
+}

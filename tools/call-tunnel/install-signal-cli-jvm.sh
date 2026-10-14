@@ -2,14 +2,20 @@
 # SPDX-License-Identifier: AGPL-3.0-only (this folder modifies AGPL-3.0 code, see LICENSE and LICENSE-NOTICE.md here)
 # Install the JVM build of signal-cli (Homebrew's native build cannot place calls: it lacks reflection metadata for
 # TurnServerInfo). The version must match the Homebrew one (same account data). The release signature is checked
-# against the maintainer's key from GitHub. Needs: brew install openjdk gnupg; gh (logged in).
+# against the maintainer's key from GitHub, and both that key and the signature's signer must have the fingerprint
+# pinned below, or nothing is unpacked. Needs: brew install openjdk gnupg; gh (logged in).
 # Usage: tools/call-tunnel/install-signal-cli-jvm.sh [version] [target dir]
 #   default target: $LOCAL_ASSISTANT_VENDOR/signal-cli-<version>-jvm, with LOCAL_ASSISTANT_VENDOR defaulting to
-#   ~/Library/Application Support/local-assistant/vendor
+#   this checkout's vendor/ (gitignored; estia-deploy copies it into her release)
 set -eu
 
+# AsamK's signal-cli release key (signal-cli's README and the keyservers name it); a key GitHub serves with any other
+# fingerprint, or a signature by any other key, stops the install before anything is unpacked
+FINGERPRINT=FA10826A74907F9EC6BBB7FC2BA2CD21B5B09570
+
 VERSION=${1:-0.14.9}
-VENDOR="${LOCAL_ASSISTANT_VENDOR:-$HOME/Library/Application Support/local-assistant/vendor}"
+REPO=$(cd "$(dirname "$0")/../.." && pwd)
+VENDOR="${LOCAL_ASSISTANT_VENDOR:-$REPO/vendor}"
 DEST=${2:-$VENDOR/signal-cli-$VERSION-jvm}
 BREW=$(brew --prefix 2>/dev/null || echo /opt/homebrew)  # Apple silicon default when brew is not on PATH
 GPG=$(command -v gpg || echo "$BREW/bin/gpg")
@@ -22,7 +28,14 @@ export GNUPGHOME
 trap 'rm -rf "$GNUPGHOME"' EXIT
 gh api users/AsamK/gpg_keys -q '.[].raw_key' > maintainer.asc
 "$GPG" --quiet --import maintainer.asc
-"$GPG" --verify "signal-cli-$VERSION.tar.gz.asc" "signal-cli-$VERSION.tar.gz"
+# the imported primary keys' fingerprints (pub, then its fpr line): the pinned one must be among them
+"$GPG" --with-colons --fingerprint | awk -F: '$1 == "pub" { want = 1; next } $1 == "fpr" && want { print $10; want = 0 }' \
+  | grep -qx "$FINGERPRINT" || { echo "the maintainer's key does not have the pinned fingerprint $FINGERPRINT" >&2; exit 1; }
+# the signature must be good (exit status) and made by the pinned key: VALIDSIG names the signing key and, last, its
+# primary key (a subkey's signature counts by its primary key)
+"$GPG" --status-fd 1 --verify "signal-cli-$VERSION.tar.gz.asc" "signal-cli-$VERSION.tar.gz" > verify.status
+awk '$2 == "VALIDSIG" { print $3; if (NF >= 12) print $NF }' verify.status | grep -qx "$FINGERPRINT" \
+  || { echo "the signature is not by the key with the pinned fingerprint $FINGERPRINT" >&2; exit 1; }
 cd "$DEST"
 tar -xzf "dl/signal-cli-$VERSION.tar.gz"
 JAVA_HOME="${JAVA_HOME:-$BREW/opt/openjdk}" "$DEST/signal-cli-$VERSION/bin/signal-cli" --version

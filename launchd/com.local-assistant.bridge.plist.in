@@ -4,28 +4,31 @@
 <dict>
   <key>Label</key>
   <string>com.local-assistant.bridge</string>
-  <!-- LaunchDaemon: starts at boot without a login, runs as @USER@ (signal-cli data and the database are in its home) -->
+  <!-- LaunchDaemon: starts at boot without a login. Runs as her own hidden user @RUN_USER@ (her data is in its home,
+       readable only by it), from the root-owned release @CODE@ (estia-deploy switches it; never a checkout) -->
   <key>UserName</key>
-  <string>@USER@</string>
+  <string>@RUN_USER@</string>
   <key>GroupName</key>
-  <string>staff</string>
+  <string>@RUN_GROUP@</string>
   <key>ProgramArguments</key>
   <array>
-    <string>@REPO@/.venv/bin/local-assistant</string>
+    <string>@CODE@/.venv/bin/local-assistant</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key>
-    <string>@HOME@</string>
+    <string>@RUN_HOME@</string>
+    <key>CFFIXED_USER_HOME</key>
+    <string>@RUN_HOME@</string>
     <key>PATH</key>
-    <string>@BREW_PREFIX@/bin:/usr/bin:/bin</string>
+    <string>@CODE@/.venv/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>LANG</key>
     <string>en_US.UTF-8</string>
     <key>PYTHONUNBUFFERED</key>
     <string>1</string>
   </dict>
   <key>WorkingDirectory</key>
-  <string>@REPO@</string>
+  <string>@CODE@</string>
   <key>Umask</key>
   <integer>63</integer>
   <key>RunAtLoad</key>
@@ -35,8 +38,8 @@
   <key>ThrottleInterval</key>
   <integer>30</integer>
   <key>StandardOutPath</key>
-  <string>@HOME@/Library/Logs/local-assistant/launchd.log</string>
+  <string>@RUN_HOME@/Library/Logs/local-assistant/launchd.log</string>
   <key>StandardErrorPath</key>
-  <string>@HOME@/Library/Logs/local-assistant/launchd.log</string>
+  <string>@RUN_HOME@/Library/Logs/local-assistant/launchd.log</string>
 </dict>
 </plist>

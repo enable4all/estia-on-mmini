@@ -4,25 +4,29 @@
 <dict>
   <key>Label</key>
   <string>com.local-assistant.voice</string>
-  <!-- LaunchDaemon: the voice service (tools/voice) on 127.0.0.1:8150, runs as @USER@ like the bridge;
-       its models and Neural Engine cache are in that home -->
+  <!-- LaunchDaemon: the voice service (tools/voice) on 127.0.0.1:8150. Runs as @RUN_USER@ like the bridge, from the
+       root-owned release @CODE@; its models and Neural Engine cache are in that user's home -->
   <key>UserName</key>
-  <string>@USER@</string>
+  <string>@RUN_USER@</string>
   <key>GroupName</key>
-  <string>staff</string>
+  <string>@RUN_GROUP@</string>
   <key>ProgramArguments</key>
   <array>
-    <string>@REPO@/tools/voice/.build/release/voice-service</string>
+    <string>@CODE@/tools/voice/.build/release/voice-service</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key>
-    <string>@HOME@</string>
+    <string>@RUN_HOME@</string>
+    <key>CFFIXED_USER_HOME</key>
+    <string>@RUN_HOME@</string>
+    <key>PATH</key>
+    <string>/usr/bin:/bin</string>
     <key>LANG</key>
     <string>en_US.UTF-8</string>
   </dict>
   <key>WorkingDirectory</key>
-  <string>@REPO@/tools/voice</string>
+  <string>@CODE@/tools/voice</string>
   <key>Umask</key>
   <integer>63</integer>
   <key>RunAtLoad</key>
@@ -32,8 +36,8 @@
   <key>ThrottleInterval</key>
   <integer>30</integer>
   <key>StandardOutPath</key>
-  <string>@HOME@/Library/Logs/local-assistant/voice.log</string>
+  <string>@RUN_HOME@/Library/Logs/local-assistant/voice.log</string>
   <key>StandardErrorPath</key>
-  <string>@HOME@/Library/Logs/local-assistant/voice.log</string>
+  <string>@RUN_HOME@/Library/Logs/local-assistant/voice.log</string>
 </dict>
 </plist>

@@ -1,7 +1,8 @@
-// voice-service: local-assistant's ears and voice. WhisperKit (large-v3 turbo) listens in the language the
-// bridge names (one of eleven, never detected); FluidAudio speaks it: Kokoro English, Supertonic-3 the other
-// ten. All on the Neural Engine, served on 127.0.0.1:8150 for the bridge only. Logs hold metadata (sizes,
-// durations, language, timings), never audio, transcripts or text.
+// voice-service: local-assistant's ears and voice. WhisperKit (large-v3 turbo; its files pinned and checked at start,
+// see Whisper.swift) listens in the language the bridge names (one of eleven, never detected); FluidAudio speaks it:
+// Kokoro English, Supertonic-3 the other ten, both on the Neural Engine; and FluidAudio's Silero VAD tells speech in a
+// call's audio (`/vad`, for barge-in), on the CPU only. Served on 127.0.0.1:8150 for the bridge only. Logs hold
+// metadata (sizes, durations, language, timings), never audio, transcripts or text.
 import AVFoundation
 import FluidAudio
 import Foundation
@@ -9,10 +10,9 @@ import Network
 import VoiceCore
 import WhisperKit
 
-let whisperModel = "openai_whisper-large-v3-v20240930_turbo"
-
 func log(_ message: String) {
     let stamp = ISO8601DateFormatter().string(from: Date())
+    LogCap.trim(fd: STDERR_FILENO)  // voice.log stays under 10 MB, in-process
     FileHandle.standardError.write(Data("\(stamp) voice-service: \(message)\n".utf8))
 }
 
@@ -42,15 +42,19 @@ actor Serial {
     }
 }
 
-/// Whisper and Kokoro, loaded and warmed once at start, then kept in memory; Supertonic-3 on first use.
+/// Whisper and Kokoro, loaded and warmed once at start, then kept in memory; Supertonic-3 on first use; the
+/// speech detector at start too, on its own.
 actor Engines {
     enum State: String { case loading, ready, failed }
 
     private(set) var stt = State.loading
     private(set) var tts = State.loading
+    /// Listening failed because Whisper's files are not the pinned ones: a restart would find the same files.
+    private var sttRefused = false
     private var whisper: WhisperKit?
     private var kokoro: KokoroAneManager?
     private let supertonic = Supertonic()
+    let detector: SpeechDetector
     private let models: URL
     private let temp: URL
     private let serial = Serial()
@@ -58,21 +62,62 @@ actor Engines {
     init(models: URL, temp: URL) {
         self.models = models
         self.temp = temp
+        detector = SpeechDetector(models: models)
     }
 
-    /// Loads both engines; when one fails the process exits, so launchd starts it again (KeepAlive).
+    /// Loads both engines; when one fails the process exits, so launchd starts it again (KeepAlive), except when
+    /// Whisper's files are not the pinned ones: listening stays "failed" and the service stays up (speaking too). The
+    /// speech detector loads beside them, without waiting for Whisper's compile; when it fails it is only
+    /// "unavailable" (the bridge keeps its loudness rule), and the service stays up.
     func load() async {
+        let detector = self.detector
+        Task { await detector.load() }
         await loadEngines()
-        if stt == .failed || tts == .failed {
+        if (stt == .failed && !sttRefused) || tts == .failed {
             log("a model failed to load; exiting so launchd tries again")
             exit(1)
         }
     }
 
-    private func loadEngines() async {
-        var start = Date()
+    /// Whisper's pinned files, downloaded at their commits when missing: true when every one is the pinned one. A
+    /// failed download throws, and files still missing after it (offline) return false: launchd tries again. Changed
+    /// files are set aside (never loaded) and downloaded again once; changed again, they return false with listening
+    /// refused.
+    private func whisperFiles() async throws -> Bool {
+        let start = Date()
+        let models = self.models
+        var downloaded = false
+        for pin in whisperPins {
+            let files = try await prepareModel(pin, in: models, setAside: { aside in
+                log("listening: model files changed, not the pinned ones (\(pin.path)): set aside as \(aside.lastPathComponent), never loaded; downloading the pinned ones again")
+            }) {
+                downloaded = true
+                try await downloadPinned($0, models: models)
+            }
+            switch files {
+            case .ok:
+                continue
+            case .missing:
+                log("listening failed to load: model files still missing after the download (\(pin.path))")
+                return false
+            case .changed:
+                sttRefused = true
+                log("listening unavailable: model files are not the pinned ones even after a fresh download, or could not be set aside (\(pin.path) in voice-models; never loaded)")
+                return false
+            }
+        }
+        log("listening: pinned model files \(downloaded ? "downloaded and checked" : "checked") in \(seconds(since: start))")
+        return true
+    }
+
+    private func loadWhisper() async {
+        let start = Date()
         do {
-            let whisper = try await WhisperKit(WhisperKitConfig(model: whisperModel, downloadBase: models))
+            guard try await whisperFiles() else {
+                stt = .failed
+                return
+            }
+            let whisper = try await WhisperKit(whisperConfig(models: models))
             // warm-up: the first transcription compiles the model for the Neural Engine (cached per macOS build)
             let silence = temp.appendingPathComponent("warm-up.wav")
             try silentWAV(seconds: 1).write(to: silence)
@@ -85,7 +130,11 @@ actor Engines {
             stt = .failed
             log("listening failed to load: \(type(of: error))")
         }
-        start = Date()
+    }
+
+    private func loadEngines() async {
+        await loadWhisper()
+        let start = Date()
         do {
             let kokoro = KokoroAneManager(variant: .english)
             try await kokoro.initialize()
@@ -99,7 +148,9 @@ actor Engines {
         }
     }
 
-    func health() -> [String: Any] { healthBody(stt: stt.rawValue, tts: tts.rawValue) }
+    func health() async -> [String: Any] {
+        healthBody(stt: stt.rawValue, tts: tts.rawValue, vad: await detector.state.rawValue)
+    }
 
     /// Transcribes audio bytes of a sniffed kind in the given language; the file lives only for the call.
     func transcribe(_ audio: Data, kind: String, language: String) async throws -> (text: String, duration: Double) {
@@ -218,6 +269,8 @@ final class Server {
             Task { self.send(nw, await Self.transcribe(request.body, target: request.path, engines)) }
         case .speak:
             Task { self.send(nw, await Self.speak(request.body, engines)) }
+        case .vad:
+            Task { self.send(nw, await Self.vad(request.body, target: request.path, engines.detector)) }
         case .methodNotAllowed:
             send(nw, HTTP.json(405, ["error": "method_not_allowed"]))
         case .notFound:
@@ -271,6 +324,27 @@ final class Server {
         }
     }
 
+    /// One chunk's speech probability; refusals are logged (the bridge's mistakes), not "loading" or "unavailable",
+    /// which the bridge reads from `/health` and answers with its loudness rule.
+    static func vad(_ body: Data, target: String, _ detector: SpeechDetector) async -> Data {
+        let chunk: SpeechChunk
+        do {
+            chunk = try SpeechChunk(target: target, body: body)
+        } catch {
+            log("speech detector refused: \(error.code), \(body.count) bytes")
+            return error.response
+        }
+        do {
+            return HTTP.json(200, try speechBody(try await detector.probability(of: chunk)))
+        } catch let error as VoiceError {
+            if error == .failed { log("speech detector failed: not a probability") }
+            return error.response
+        } catch {
+            log("speech detector failed: \(type(of: error))")
+            return VoiceError.failed.response
+        }
+    }
+
     private func send(_ nw: NWConnection, _ response: Data) {
         nw.send(content: response, completion: .contentProcessed { _ in nw.cancel() })
     }
@@ -278,6 +352,8 @@ final class Server {
 
 // MARK: - Start
 
+LogCap.trim(fd: STDOUT_FILENO)
+LogCap.trim(fd: STDERR_FILENO)
 let support = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support/local-assistant")
 let models = support.appendingPathComponent("voice-models")
 let temp = support.appendingPathComponent("voice-tmp")
@@ -292,6 +368,7 @@ do {
     log("cannot prepare \(support.path): \(error)")
     exit(1)
 }
+pinSpeechModel()
 let port = CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--port" ? UInt16(CommandLine.arguments[2]) ?? 8150 : 8150
 let engines = Engines(models: models, temp: temp)
 let server = Server(engines: engines)

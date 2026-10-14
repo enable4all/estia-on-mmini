@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from local_assistant.store import SCHEMA_V1, Store
+from local_assistant.store import SCHEMA_V1, SCHEMA_VERSION, Store
 from tests.conftest import ME, T0
 
 
@@ -284,16 +284,19 @@ def test_upgrade_from_version_6_keeps_messages_and_adds_the_new_tables(tmp_path:
     kept = old.add_incoming(conv.id, ME, T0, "text", "hello")
     old.close()
     conn = sqlite3.connect(path)
-    for table in ("reminders", "followups", "initiative_log"):  # back to a real V6 database
+    for table in ("reminders", "followups", "initiative_log", "known_devices"):  # back to a real V6 database
         conn.execute(f"DROP TABLE IF EXISTS {table}")
     columns = [row[1] for row in conn.execute("PRAGMA table_info(messages)")]
-    if "footer" in columns:
-        conn.execute("ALTER TABLE messages DROP COLUMN footer")
+    for column in ("footer", "source_device"):  # added by v7 and v9
+        if column in columns:
+            conn.execute(f"ALTER TABLE messages DROP COLUMN {column}")
+    if "kind" in [row[1] for row in conn.execute("PRAGMA table_info(conversations)")]:
+        conn.execute("ALTER TABLE conversations DROP COLUMN kind")  # added by v8
     conn.execute("PRAGMA user_version = 6")
     conn.commit()
     conn.close()
     store = Store.open(path)
-    assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 7
+    assert store._conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     assert kept is not None and store.message(kept).text == "hello"
     assert store._conn.execute("SELECT footer FROM messages WHERE id = ?", (kept,)).fetchone()[0] is None
     tables = {row[0] for row in store._conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
@@ -407,3 +410,144 @@ def test_whether_the_user_wrote_after_a_message(store: Store) -> None:
     assert not store.wrote_after(ME, note)
     store.add_incoming(conv.id, ME, T0 + 1, "text", "I'm up")
     assert store.wrote_after(ME, note)
+
+
+# V8: practice conversations (/babble): their own conversation kind, never the current chat
+
+
+def _v7_database(path: Path) -> None:
+    """A database as an install before practice left it: the v1-v7 scripts, user_version 7."""
+    from local_assistant import store as store_module
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    for script in (
+        store_module.SCHEMA_V1,
+        store_module.MIGRATION_V2,
+        store_module.MIGRATION_V3,
+        store_module.MIGRATION_V4,
+        store_module.MIGRATION_V5,
+        store_module.MIGRATION_V6,
+        store_module.MIGRATION_V7,
+    ):
+        conn.executescript(script)
+    now = "2026-10-12T10:00:00+00:00"
+    conn.execute(
+        "INSERT INTO conversations (id, started_at, ended_at, created_at, updated_at) VALUES (1, ?, ?, ?, ?)",
+        (now, now, now, now),
+    )
+    conn.execute(
+        "INSERT INTO conversations (id, started_at, created_at, updated_at) VALUES (2, ?, ?, ?)", (now, now, now)
+    )
+    conn.execute(
+        "INSERT INTO messages (conversation_id, direction, peer_aci, signal_ts, kind, text, status, seq, created_at,"
+        " updated_at) VALUES (2, 'in', ?, ?, 'text', 'hello', 'answered', 1, ?, ?)",
+        (ME, T0, now, now),
+    )
+    conn.execute("PRAGMA user_version = 7")
+    conn.commit()
+    conn.close()
+
+
+def test_upgrade_from_version_7_marks_every_conversation_a_chat(tmp_path: Path) -> None:
+    path = tmp_path / "data" / "assistant.db"
+    _v7_database(path)
+    store = Store.open(path)
+    assert store._conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION  # v8, then v9 (the devices)
+    assert store.devices(ME) == [] and store.message(1).source_device is None
+    kinds = store._conn.execute("SELECT id, kind FROM conversations ORDER BY id").fetchall()
+    assert [(row["id"], row["kind"]) for row in kinds] == [(1, "chat"), (2, "chat")]
+    current = store.current_conversation()
+    assert (current.id, current.kind) == (2, "chat")
+    assert [m.text for m in store.window_messages(2, 0)] == ["hello"]
+    with pytest.raises(sqlite3.IntegrityError):  # only the two kinds
+        store._conn.execute("UPDATE conversations SET kind = 'other' WHERE id = 1")
+    store.close()
+
+
+def test_a_practice_conversation_never_becomes_the_current_one(store: Store) -> None:
+    chat = store.current_conversation()
+    practice = store.start_practice_conversation()
+    assert practice.kind == "practice" and practice.id != chat.id
+    assert store.conversation(practice.id).kind == "practice"
+    assert store.current_conversation().id == chat.id  # the chat stays open and current
+    assert store.current_conversation().kind == "chat"
+
+
+def test_new_leaves_a_running_practice_open(store: Store) -> None:
+    store.current_conversation()
+    practice = store.start_practice_conversation()
+    new = store.start_new_conversation()
+    assert new.kind == "chat" and store.current_conversation().id == new.id
+    ended = store._conn.execute("SELECT ended_at FROM conversations WHERE id = ?", (practice.id,)).fetchone()[0]
+    assert ended is None  # /new never touches a running practice
+
+
+def test_ending_a_conversation_sets_its_end(store: Store) -> None:
+    practice = store.start_practice_conversation()
+    store.end_conversation(practice.id)
+    ended = store._conn.execute("SELECT ended_at FROM conversations WHERE id = ?", (practice.id,)).fetchone()[0]
+    assert ended is not None
+
+
+def test_the_users_practice_words_and_the_idle_clock(store: Store) -> None:
+    chat = store.current_conversation()
+    practice = store.start_practice_conversation()
+    assert store.user_texts(practice.id) == [] and store.last_user_ts(practice.id) is None
+    store.add_incoming(chat.id, ME, T0, "text", "a chat line")
+    first = store.add_incoming(practice.id, ME, T0 + 1, "text", "Ik ben gisteren naar huis gegaan.", defer_seq=True)
+    assert first is not None
+    store.assign_seq(first, practice.id)
+    reply = store.add_outgoing(practice.id, ME, "text", "Wat leuk!", first)
+    store.mark_sent(reply, T0 + 2)
+    store.add_outgoing(practice.id, ME, "note", "a code note", first)
+    store.add_incoming(practice.id, ME, T0 + 3, "command", "/babble")
+    ignored = store.add_incoming(practice.id, ME, T0 + 4, "text", "never answered")
+    assert ignored is not None
+    store.set_status(ignored, "ignored")
+    store.add_call_turn(practice.id, ME, "[call] Ik woon in Utrecht.")
+    assert [m.text for m in store.user_texts(practice.id)] == [
+        "Ik ben gisteren naar huis gegaan.",
+        "[call] Ik woon in Utrecht.",
+    ]
+    newest = store.user_texts(practice.id)[-1].signal_ts
+    assert store.last_user_ts(practice.id) == newest
+
+
+def practice_turn(store: Store, words: str, ts: int) -> int:
+    """A message the user sent during a practice session: stored in the chat, then moved into the practice one."""
+    practice = store.start_practice_conversation()
+    message_id = store.add_incoming(store.current_conversation().id, ME, ts, "text", words, defer_seq=True)
+    assert message_id is not None
+    store.assign_seq(message_id, practice.id)
+    return message_id
+
+
+def test_learning_and_check_ins_never_read_a_practice_turn(store: Store) -> None:
+    practice_turn(store, "Ik heb een hond gekoopt.", T0)
+    assert store.user_messages_after(0, 10) == []
+    chat = store.add_incoming(store.current_conversation().id, ME, T0 + 1, "text", "I bought a dog.")
+    assert [m.id for m in store.user_messages_after(0, 10)] == [chat]
+
+
+def test_the_look_back_never_reads_a_practice_turn(store: Store) -> None:
+    practice_turn(store, "Ik heb een hond gekoopt.", T0)
+    chat = store.add_incoming(store.current_conversation().id, ME, T0 + 1, "text", "I bought a dog.")
+    assert [m.id for m in store.user_messages_since(ME, T0 - 1)] == [chat]
+
+
+def test_the_history_search_never_finds_a_practice_turn(store: Store) -> None:
+    practice_turn(store, "Mijn hond heet Bello.", T0)
+    assert store.search("Bello") == []
+    chat = store.add_incoming(store.current_conversation().id, ME, T0 + 1, "text", "My dog Bello is ill.")
+    hits = store.search("Bello")
+    assert [m.id for hit in hits for m in hit.context] == [chat]
+
+
+def test_a_practice_message_still_counts_as_the_user_writing(store: Store) -> None:
+    turn = practice_turn(store, "Hallo!", T0)
+    assert store.last_incoming_ts() == T0  # busy gates
+    assert store.count_user_texts(ME) == 1 and store.first_user_text_ts(ME) == T0
+    note = store.add_outgoing(store.current_conversation().id, ME, "note", "Reminder: call mum", None)
+    assert not store.wrote_after(ME, note)
+    assert turn < note

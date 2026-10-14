@@ -353,6 +353,29 @@ def test_the_maps_rules_come_only_with_maps() -> None:
     )
 
 
+def test_the_project_rules_come_only_with_projects() -> None:
+    """Projects are an extra: off, the rules name no project tool and she says how the owner turns them on; on, the
+    levels (the README at every level, documents at docs, source code at code) and a misheard name's question."""
+    off = prompts.rules(name=NAME, web=True, maps=True)
+    for word in ("project_list", "project_status", "project_read", "look at the user's projects"):
+        assert word not in off, word
+    assert prompts.PROJECTS_OFF_RULE in off and "[projects]" in off
+    assert "scripts/setup.sh --extras" in prompts.PROJECTS_OFF_RULE  # the way that asks the folder and the level
+    assert "scripts/setup.sh --extras" in prompts.PROJECTS_OFF_RESULT
+    for off_text in (prompts.PROJECTS_OFF_RULE, prompts.PROJECTS_OFF_RESULT):  # her config is hers: setup prints lines
+        assert "adds [projects] to the config (in her own user it prints the lines to add)" in off_text
+    assert "You can check the Mac's health, find places and routes, search the web, read their mail" in off
+    on = prompts.rules(name=NAME, projects=True, web=True, maps=True)
+    assert "You can check the Mac's health, look at the user's projects, find places and routes, search the web" in on
+    assert prompts.PROJECTS_OFF_RULE not in on
+    assert "README at every level" in on and "at level docs also its documents" in on
+    assert "at level code also its source code" in on
+    assert '"Do you mean' in on and "misheard" in on
+    # a name taken as another project ("Otto" as authe) is named in her answer, so the user hears which one it was
+    assert "When a project tool says a name was taken as another project, name that project in your answer." in on
+    assert "how the user changes" in on
+
+
 def test_the_rules_name_the_machine_by_its_label() -> None:
     assert "You run locally on the user's own Mac (" in prompts.rules(name=NAME)
     assert "You can check the Mac's health" in prompts.rules(name=NAME) and "Mini" not in prompts.rules(name=NAME)
@@ -394,3 +417,44 @@ def test_the_style_block_is_the_same_for_chat_and_her_own_messages(store: Store)
     style = context.style()
     assert style.startswith("STYLE (built in") and "Tiffany" in style
     assert f"\n\n{style}\n\n" in context.system_prompt(store.current_conversation())
+
+
+def test_rules_for_one_answer_keep_the_style_and_profile_below_them(store: Store) -> None:
+    profile, context = make(store)
+    profile.add("The user likes tea.", source_kind="chat")
+    conv = store.current_conversation()
+    practice = prompts.rules(name=NAME, practice=("nl", "A2"))
+    system = context.build(conv, rules=practice)[0]["content"]
+    assert system.startswith(practice)
+    assert prompts.DEFAULT_STYLE in system and "#1 The user likes tea." in system
+    assert system.index(prompts.DEFAULT_STYLE) > len(practice)
+    assert context.system_prompt(conv).startswith(prompts.rules(name=NAME))  # the next answer: her own rules again
+    assert context.system_prompt(conv, rules=practice).startswith(practice)
+
+
+# a call's glance: code's counts and times at the start of a call, below the profile and the summary
+
+
+def test_the_call_glance_is_numbers_with_the_rule_to_offer_and_never_name() -> None:
+    lines = [
+        "Calendar today: 3 events left, next 14:00–15:00 (in 50 min), last ends 21:30.",
+        "Mail digest: 2 to answer.",
+    ]
+    glance = prompts.call_glance(lines, at="13:10", calendar=True, mail=True)
+    assert glance.startswith("AT THE START OF THIS CALL (code's counts at 13:10: numbers and times only")
+    assert "\n".join(lines) in glance
+    assert "offer the rundown, once, in the language of the call" in glance and "never name or guess" in glance
+    assert "call calendar_agenda for today or mail_digest" in glance
+    calendar_only = prompts.call_glance(lines[:1], at="13:10", calendar=True, mail=False)
+    assert "mail_digest" not in calendar_only and "call calendar_agenda for today," in calendar_only
+    assert prompts.call_glance([], at="13:10", calendar=False, mail=False) == ""
+
+
+def test_the_call_glance_comes_last_in_the_system_prompt(store: Store) -> None:
+    profile, context = make(store)
+    profile.add("The user likes tea.", source_kind="chat")
+    conv = store.current_conversation()
+    glance = prompts.call_glance(["Mail digest: 1 to answer."], at="08:05", calendar=False, mail=True)
+    system = context.build(conv, glance=glance)[0]["content"]
+    assert system.endswith(f"\n\n{glance}") and system.index("#1 The user likes tea.") < system.index(glance)
+    assert context.system_prompt(conv) == system.removesuffix(f"\n\n{glance}")  # without it: as before

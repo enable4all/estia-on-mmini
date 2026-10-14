@@ -1,0 +1,579 @@
+{
+ "language": "nl",
+ "items": [
+  {
+   "id": "nl-01",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Ik woon in een klein appartement vlak bij de station.",
+   "error_type": "article/gender (de/het)",
+   "gold_said": "de station",
+   "gold_better": "het station",
+   "gold_full": "Ik woon in een klein appartement vlak bij het station.",
+   "why_en": "'Station' is a het-word, so it takes 'het', not 'de'."
+  },
+  {
+   "id": "nl-02",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "We hebben vorig jaar een grote huis met een tuin gekocht.",
+   "error_type": "adjective inflection (een + het-word)",
+   "gold_said": "een grote huis",
+   "gold_better": "een groot huis",
+   "gold_full": "We hebben vorig jaar een groot huis met een tuin gekocht.",
+   "why_en": "After 'een' with a het-word, the adjective gets no -e."
+  },
+  {
+   "id": "nl-03",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Morgen ik ga naar mijn ouders in Utrecht.",
+   "error_type": "word order (V2 inversion)",
+   "gold_said": "Morgen ik ga",
+   "gold_better": "Morgen ga ik",
+   "gold_full": "Morgen ga ik naar mijn ouders in Utrecht.",
+   "why_en": "The verb comes second; when a sentence starts with a time word, the subject moves after the verb."
+  },
+  {
+   "id": "nl-04",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Ik blijf vandaag thuis omdat ik ben ziek.",
+   "error_type": "word order (verb-final in subordinate clause)",
+   "gold_said": "omdat ik ben ziek",
+   "gold_better": "omdat ik ziek ben",
+   "gold_full": "Ik blijf vandaag thuis omdat ik ziek ben.",
+   "why_en": "After 'omdat', the verb goes to the end of the clause."
+  },
+  {
+   "id": "nl-05",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Gisteren heb ik naar de bioscoop gegaan.",
+   "error_type": "auxiliary (hebben/zijn)",
+   "gold_said": "Gisteren heb ik",
+   "gold_better": "Gisteren ben ik",
+   "gold_full": "Gisteren ben ik naar de bioscoop gegaan.",
+   "why_en": "'Gaan' forms its perfect with 'zijn', not 'hebben'."
+  },
+  {
+   "id": "nl-06",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Ik heb mijn zus naar het vliegveld gebrengt.",
+   "error_type": "past participle (irregular verb)",
+   "gold_said": "gebrengt",
+   "gold_better": "gebracht",
+   "gold_full": "Ik heb mijn zus naar het vliegveld gebracht.",
+   "why_en": "'Brengen' is irregular: the past participle is 'gebracht'."
+  },
+  {
+   "id": "nl-07",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Ik probeer elke dag om zes uur te opstaan.",
+   "error_type": "separable verb (te placement)",
+   "gold_said": "te opstaan",
+   "gold_better": "op te staan",
+   "gold_full": "Ik probeer elke dag om zes uur op te staan.",
+   "why_en": "With a separable verb, 'te' goes between the prefix and the verb: 'op te staan'."
+  },
+  {
+   "id": "nl-08",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Het is moeilijk om Nederlands spreken.",
+   "error_type": "infinitive (missing te after om)",
+   "gold_said": "om Nederlands spreken",
+   "gold_better": "om Nederlands te spreken",
+   "gold_full": "Het is moeilijk om Nederlands te spreken.",
+   "why_en": "'Om' needs 'te' before the infinitive."
+  },
+  {
+   "id": "nl-09",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Ik ken niet waar het museum is.",
+   "error_type": "verb choice (kennen/weten)",
+   "gold_said": "Ik ken niet",
+   "gold_better": "Ik weet niet",
+   "gold_full": "Ik weet niet waar het museum is.",
+   "why_en": "For knowing a fact or a 'where/what' answer, Dutch uses 'weten'; 'kennen' is for people, places and things you are familiar with."
+  },
+  {
+   "id": "nl-10",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Als ik klein was, woonde ik in Rotterdam.",
+   "error_type": "conjunction (toen/als)",
+   "gold_said": "Als ik klein was",
+   "gold_better": "Toen ik klein was",
+   "gold_full": "Toen ik klein was, woonde ik in Rotterdam.",
+   "why_en": "For a single period in the past, Dutch uses 'toen', not 'als'."
+  },
+  {
+   "id": "nl-11",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Het boek die ik nu lees is erg spannend.",
+   "error_type": "relative pronoun (die/dat)",
+   "gold_said": "boek die",
+   "gold_better": "boek dat",
+   "gold_full": "Het boek dat ik nu lees is erg spannend.",
+   "why_en": "A het-word takes the relative pronoun 'dat', not 'die'."
+  },
+  {
+   "id": "nl-12",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Ik heb vandaag niet tijd om te koken.",
+   "error_type": "negation (geen/niet)",
+   "gold_said": "niet tijd",
+   "gold_better": "geen tijd",
+   "gold_full": "Ik heb vandaag geen tijd om te koken.",
+   "why_en": "A noun without a definite article is negated with 'geen', not 'niet'."
+  },
+  {
+   "id": "nl-13",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Er staan drie oude huisen in onze straat.",
+   "error_type": "plural form",
+   "gold_said": "huisen",
+   "gold_better": "huizen",
+   "gold_full": "Er staan drie oude huizen in onze straat.",
+   "why_en": "The plural of 'huis' is 'huizen': the s becomes z."
+  },
+  {
+   "id": "nl-14",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Ik heb twee broers, maar mijn vriend heeft vier.",
+   "error_type": "pronoun er (with numbers)",
+   "gold_said": "heeft vier",
+   "gold_better": "heeft er vier",
+   "gold_full": "Ik heb twee broers, maar mijn vriend heeft er vier.",
+   "why_en": "When a number stands without its noun, Dutch adds 'er'."
+  },
+  {
+   "id": "nl-15",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Ik ben erg geïnteresseerd voor moderne kunst.",
+   "error_type": "preposition (fixed)",
+   "gold_said": "geïnteresseerd voor",
+   "gold_better": "geïnteresseerd in",
+   "gold_full": "Ik ben erg geïnteresseerd in moderne kunst.",
+   "why_en": "The fixed combination is 'geïnteresseerd in'."
+  },
+  {
+   "id": "nl-16",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Ik ben heel trots over mijn dochter.",
+   "error_type": "preposition (fixed)",
+   "gold_said": "trots over",
+   "gold_better": "trots op",
+   "gold_full": "Ik ben heel trots op mijn dochter.",
+   "why_en": "Dutch says 'trots op', not 'trots over'."
+  },
+  {
+   "id": "nl-17",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Woont jij ook in Leiden?",
+   "error_type": "verb agreement (jij after verb)",
+   "gold_said": "Woont jij",
+   "gold_better": "Woon jij",
+   "gold_full": "Woon jij ook in Leiden?",
+   "why_en": "When 'jij' comes after the verb, the verb drops its -t."
+  },
+  {
+   "id": "nl-18",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Vandaag voel ik goed, dus ik ga sporten.",
+   "error_type": "reflexive verb",
+   "gold_said": "voel ik goed",
+   "gold_better": "voel ik me goed",
+   "gold_full": "Vandaag voel ik me goed, dus ik ga sporten.",
+   "why_en": "'Zich voelen' is reflexive: 'ik voel me goed'."
+  },
+  {
+   "id": "nl-19",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Vorige week heb ik gekocht een nieuwe fiets.",
+   "error_type": "word order (participle at end)",
+   "gold_said": "gekocht een nieuwe fiets",
+   "gold_better": "een nieuwe fiets gekocht",
+   "gold_full": "Vorige week heb ik een nieuwe fiets gekocht.",
+   "why_en": "The past participle goes at the end, after the object."
+  },
+  {
+   "id": "nl-20",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "De nieuw collega is heel aardig.",
+   "error_type": "adjective inflection (de + adjective)",
+   "gold_said": "De nieuw collega",
+   "gold_better": "De nieuwe collega",
+   "gold_full": "De nieuwe collega is heel aardig.",
+   "why_en": "After 'de', the adjective before the noun gets -e."
+  },
+  {
+   "id": "nl-21",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Dat jas is te duur voor mij.",
+   "error_type": "demonstrative (die/dat)",
+   "gold_said": "Dat jas",
+   "gold_better": "Die jas",
+   "gold_full": "Die jas is te duur voor mij.",
+   "why_en": "'Jas' is a de-word, so it takes 'die', not 'dat'."
+  },
+  {
+   "id": "nl-22",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Ik heb dertig jaar en ik werk als verpleegkundige.",
+   "error_type": "verb choice (age with zijn)",
+   "gold_said": "Ik heb dertig jaar",
+   "gold_better": "Ik ben dertig jaar",
+   "gold_full": "Ik ben dertig jaar en ik werk als verpleegkundige.",
+   "why_en": "Dutch gives age with 'zijn': 'ik ben dertig'."
+  },
+  {
+   "id": "nl-23",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Wij heeft een hond en twee katten.",
+   "error_type": "verb agreement",
+   "gold_said": "Wij heeft",
+   "gold_better": "Wij hebben",
+   "gold_full": "Wij hebben een hond en twee katten.",
+   "why_en": "With 'wij', the verb is plural: 'hebben'."
+  },
+  {
+   "id": "nl-25",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Ik ga vroeg naar bed, want ik moe ben.",
+   "error_type": "word order (want + main clause)",
+   "gold_said": "want ik moe ben",
+   "gold_better": "want ik ben moe",
+   "gold_full": "Ik ga vroeg naar bed, want ik ben moe.",
+   "why_en": "'Want' is followed by normal main-clause order; only 'omdat' sends the verb to the end."
+  },
+  {
+   "id": "nl-26",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Ik ga naar de supermarkt voor brood te kopen.",
+   "error_type": "purpose clause (om ... te)",
+   "gold_said": "voor brood te kopen",
+   "gold_better": "om brood te kopen",
+   "gold_full": "Ik ga naar de supermarkt om brood te kopen.",
+   "why_en": "Purpose is expressed with 'om ... te', not 'voor ... te'."
+  },
+  {
+   "id": "nl-27",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Ik ben op 1995 in Gent geboren.",
+   "error_type": "preposition (time: in + year)",
+   "gold_said": "op 1995",
+   "gold_better": "in 1995",
+   "gold_full": "Ik ben in 1995 in Gent geboren.",
+   "why_en": "Years take 'in'; 'op' is for dates and days."
+  },
+  {
+   "id": "nl-29",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Amsterdam is meer groot dan Utrecht.",
+   "error_type": "comparative",
+   "gold_said": "meer groot",
+   "gold_better": "groter",
+   "gold_full": "Amsterdam is groter dan Utrecht.",
+   "why_en": "Short adjectives form the comparative with -er: 'groter'."
+  },
+  {
+   "id": "nl-30",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Ik heb zij gisteren in de supermarkt gezien.",
+   "error_type": "pronoun case (object form)",
+   "gold_said": "heb zij",
+   "gold_better": "heb haar",
+   "gold_full": "Ik heb haar gisteren in de supermarkt gezien.",
+   "why_en": "As an object, 'zij' becomes 'haar'."
+  },
+  {
+   "id": "nl-31",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Morgen ga ik met de trein naar Gent.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "Correct V2 inversion."
+  },
+  {
+   "id": "nl-32",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Ik heb lang gewacht op de bus.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "A prepositional phrase may follow the participle (extraposition); 'lang op de bus gewacht' is also fine."
+  },
+  {
+   "id": "nl-33",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Ik denk dat ik die film al gezien heb.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'gezien heb' and 'heb gezien' are both correct verb-cluster orders."
+  },
+  {
+   "id": "nl-34",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Ik vind het een leuke stad.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'het' here is the predicate 'het', not a reference to the de-word 'stad'."
+  },
+  {
+   "id": "nl-36",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Gisteren ben ik gaan zwemmen.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "Infinitive instead of participle ('gaan', not 'gegaan') is required here."
+  },
+  {
+   "id": "nl-37",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Dat weet ik niet.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "Object first, then verb, then subject: correct V2."
+  },
+  {
+   "id": "nl-38",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Het is al laat, dus ik ga naar huis.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "After 'dus', both 'ik ga' and 'ga ik' are correct."
+  },
+  {
+   "id": "nl-39",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Hij is twee jaar ouder dan ik.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  },
+  {
+   "id": "nl-40",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Doe maar een cappuccino.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "Informal but standard way to order."
+  },
+  {
+   "id": "nl-41",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Heb je zin om vanavond samen te koken?",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  },
+  {
+   "id": "nl-43",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Zullen we zaterdag naar de markt gaan?",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  },
+  {
+   "id": "nl-44",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Ik weet niet of hij vandaag komt.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  },
+  {
+   "id": "nl-45",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Er zijn veel mensen die op de fiets naar hun werk gaan.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  }
+ ],
+ "conversations": [
+  {
+   "id": "nl-conv-1",
+   "level": "B1",
+   "topic": "weekend",
+   "user_turns": [
+    "Hoi! Mijn weekend was heel gezellig.",
+    "Zaterdag ik ben met vrienden naar het strand gegaan.",
+    "Het was mooi weer, dus we hebben de hele middag in de zon gezeten.",
+    "'s Avonds hebben we in een klein restaurant gegeten, omdat we hadden veel honger.",
+    "Zondag heb ik de hele dag thuisgebleven, want ik was moe.",
+    "Wat heb jij dit weekend gedaan?"
+   ],
+   "planted": [
+    {
+     "said": "Zaterdag ik ben",
+     "better": "Zaterdag ben ik"
+    },
+    {
+     "said": "omdat we hadden veel honger",
+     "better": "omdat we veel honger hadden"
+    },
+    {
+     "said": "Zondag heb ik",
+     "better": "Zondag ben ik"
+    }
+   ]
+  },
+  {
+   "id": "nl-conv-2",
+   "level": "B1",
+   "topic": "work",
+   "user_turns": [
+    "Ik werk sinds januari bij een klein bedrijf in Utrecht.",
+    "Mijn collega's zijn heel aardig en we lunchen vaak samen.",
+    "Ik werk op de marketingafdeling, maar de werk is soms een beetje saai.",
+    "Volgende week heb ik een belangrijke vergadering met de directeur.",
+    "Ik ben een beetje zenuwachtig, want ik moet een presentatie te geven.",
+    "Gelukkig mijn baas helpt me met de voorbereiding."
+   ],
+   "planted": [
+    {
+     "said": "de werk",
+     "better": "het werk"
+    },
+    {
+     "said": "een presentatie te geven",
+     "better": "een presentatie geven"
+    },
+    {
+     "said": "Gelukkig mijn baas helpt me",
+     "better": "Gelukkig helpt mijn baas me"
+    }
+   ]
+  },
+  {
+   "id": "nl-conv-3",
+   "level": "B1",
+   "topic": "food",
+   "user_turns": [
+    "Ik kook graag, vooral Indonesische gerechten.",
+    "Gisteren heb ik voor mijn vriend nasi goreng gemaakt.",
+    "Ik heb alle ingrediënten op de markt gekoopt.",
+    "Het was een beetje te pittig, maar hij vond het toch lekker.",
+    "Morgen wil ik een appeltaart bakken, maar ik heb niet een goed recept.",
+    "Ken jij een lekkere recept voor appeltaart?"
+   ],
+   "planted": [
+    {
+     "said": "gekoopt",
+     "better": "gekocht"
+    },
+    {
+     "said": "niet een goed recept",
+     "better": "geen goed recept"
+    },
+    {
+     "said": "een lekkere recept",
+     "better": "een lekker recept"
+    }
+   ]
+  },
+  {
+   "id": "nl-conv-4",
+   "level": "B1",
+   "topic": "travel",
+   "user_turns": [
+    "Volgende maand ga ik twee weken naar Italië.",
+    "Ik heb nog nooit in Rome geweest, dus ik ben heel benieuwd.",
+    "Ik heb al een hotel geboekt die dicht bij het centrum ligt.",
+    "Ik wil veel musea bezoeken en natuurlijk veel pasta eten.",
+    "Weet jij of het daar in mei al warm is?",
+    "Als ik vorig jaar in Spanje was, was het elke dag dertig graden."
+   ],
+   "planted": [
+    {
+     "said": "Ik heb nog nooit",
+     "better": "Ik ben nog nooit"
+    },
+    {
+     "said": "geboekt die",
+     "better": "geboekt dat"
+    },
+    {
+     "said": "Als ik vorig jaar",
+     "better": "Toen ik vorig jaar"
+    }
+   ]
+  }
+ ]
+}

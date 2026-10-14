@@ -71,6 +71,45 @@ _SPAN = re.compile(r"^([0-9]{1,4})([mhd])$")
 _SPAN_MINUTES = {"m": 1, "h": 60, "d": 1440}
 
 
+_WORDS = re.compile(r"\w+")
+_LINKISH = re.compile(r"(?:https?://|www\.)\S+|\b[\w-]+(?:\.[\w-]+)+/\S*", re.IGNORECASE)
+OWN_SHARE = 0.5  # the overlap rule: at least half a reminder's words are the user's
+
+
+def _spaceless(char: str) -> bool:
+    """A character of a script written without spaces (Japanese kana, Chinese and Japanese characters)."""
+    return "\u3040" <= char <= "\u30ff" or "\u3400" <= char <= "\u9fff"
+
+
+def _tokens(text: str) -> list[str]:
+    """Words for the overlap rule: lowercase; a script without spaces counts per character; a word of one or two
+    letters is left out (a, to, je) unless it holds a digit."""
+    tokens: list[str] = []
+    for word in _WORDS.findall(text.casefold()):
+        spaceless = [char for char in word if _spaceless(char)]
+        if spaceless:
+            tokens += spaceless
+            word = "".join(char for char in word if not _spaceless(char))
+        if len(word) >= 3 or any(char.isdigit() for char in word):
+            tokens.append(word)
+    return tokens
+
+
+def own_words(text: str, message: str) -> bool:
+    """The overlap rule, used while her context still holds a reply or summary that followed outside text: a
+    reminder's text must come from the user's own message: every number and link in it is in the message, and at
+    least half its words are. Nothing to compare (an empty text) passes: the usual checks say why."""
+    words = _tokens(text)
+    if not words:
+        return True
+    said = set(_tokens(message))
+    if any(any(char.isdigit() for char in word) and word not in said for word in words):
+        return False
+    if any(link.casefold().rstrip(".,;:!?") not in message.casefold() for link in _LINKISH.findall(text)):
+        return False
+    return sum(1 for word in words if word in said) >= OWN_SHARE * len(words)
+
+
 class ReminderError(ValueError):
     """A reminder was refused: the message says why, in the tool's words for Gemma and /remind
     (prompts.REMINDER_ERRORS); `plain` in plain words for the user, `spoken` to say on a call ("" when the same)."""
@@ -495,7 +534,7 @@ class CallPlacer(Protocol):
     """What the scheduler needs of the calls part (calls.CallManager)."""
 
     async def can_place(self, aci: str) -> str:
-        """ "" when a call can be placed now, else a reason word: in_call or not_ready."""
+        """ "" when a call can be placed now, else a reason word: locked, in_call or not_ready."""
 
     async def place(self, aci: str, *, wake: bool, time: str, text: str) -> str:
         """Dial and wait until it is picked up or ends: answered, no_answer, declined, busy or call_failed."""
@@ -519,6 +558,7 @@ class ReminderScheduler:
         *,
         calls: CallPlacer | None = None,
         in_call: Callable[[], bool] = lambda: False,
+        locked: Callable[[], bool] = lambda: False,
         clock: Callable[[], float] = time.time,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
@@ -527,12 +567,14 @@ class ReminderScheduler:
         self._send = send  # the bridge's send: marks the stored note sent or failed
         self._calls = calls  # None: calls are off ("call me" reminders are texts)
         self._in_call = in_call
+        self._locked = locked  # /lock: nothing goes out until /unlock; a call reminder then never calls
         self._clock = clock
         self._sleep = sleep
         self._tz = reminders._tz
         self._wake = asyncio.Event()
         self._retries: dict[int, _Retry] = {}
         self._held: set[int] = set()  # call reminders that came due while she was on a call
+        self._held_locked: set[int] = set()  # call reminders that came due while she was locked
         self._tasks: set[asyncio.Task[None]] = set()  # call reminders being placed (a retry waits 2 minutes)
         self._pruned_day = ""
         reminders.on_change(self.notify)
@@ -559,7 +601,7 @@ class ReminderScheduler:
     async def _nap(self, failed: bool) -> None:
         now = self._clock()
         wait = POLL_S
-        if not self._in_call():
+        if not self._in_call() and not self._locked():
             for at in (self._store.next_reminder_due(), *(r.next for r in self._retries.values())):
                 if at is not None:
                     wait = min(wait, max(0.0, at - now))
@@ -578,6 +620,9 @@ class ReminderScheduler:
         now = self._clock()
         self._prune(now)
         due = self._store.due_reminders(now)
+        if self._locked():  # /lock: everything waits (retries too), and a call reminder will be a text without a call
+            self._held_locked.update(r.id for r in due if r.call)
+            return
         if self._in_call():  # texts wait while she is on a call with the user, like every text
             self._held.update(r.id for r in due if r.call)
             return
@@ -667,6 +712,8 @@ class ReminderScheduler:
     async def _why_no_call(self, reminder: Reminder, now: float) -> str:
         if self._calls is None:
             return "calls_off"
+        if reminder.id in self._held_locked:
+            return "locked"
         if reminder.id in self._held:
             return "in_call"
         if now - reminder.due_at > CALL_LATE_S:
@@ -698,6 +745,7 @@ class ReminderScheduler:
                 self._complete(current, "call_failed")
         finally:
             self._held.discard(reminder.id)
+            self._held_locked.discard(reminder.id)
 
     async def _place(self, reminder: Reminder) -> None:
         now = self._clock()
@@ -713,7 +761,7 @@ class ReminderScheduler:
             self._store.set_status(out_id, "ignored")
         if why or self._calls is None:
             log.info("reminder %d: no call (%s)", reminder.id, why)
-            if why not in ("in_call", "late"):  # still asleep, maybe: one more text unless the user wrote
+            if why not in ("in_call", "late", "locked"):  # still asleep, maybe: one more text unless the user wrote
                 await self._second_text(reminder, out_id)
             self._finish_call(reminder.id, "sent" if sent else "send_failed")
             return

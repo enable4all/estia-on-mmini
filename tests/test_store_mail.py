@@ -150,7 +150,8 @@ def test_upgrade_to_v6_keeps_sorting_records_finds_correspondents_and_reads_sent
     store.set_mail_delta_link("family", INBOX, "https://graph.example/inbox-delta")
     store._conn.executescript(  # back to version 5 as it was first built
         "BEGIN; DROP TABLE reminders; DROP TABLE followups; DROP TABLE initiative_log;"  # nor any later version
-        " ALTER TABLE messages DROP COLUMN footer;"
+        " DROP TABLE known_devices; ALTER TABLE messages DROP COLUMN source_device;"
+        " ALTER TABLE messages DROP COLUMN footer; ALTER TABLE conversations DROP COLUMN kind;"
         f" DROP TABLE mail_correspondents; DROP INDEX mail_triage_created; ALTER TABLE mail_triage RENAME TO t;"
         f" {MIGRATION_V5}"
         " INSERT INTO mail_triage SELECT * FROM t; DROP TABLE t; PRAGMA user_version = 5; COMMIT;"

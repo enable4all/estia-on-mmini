@@ -1,3 +1,0 @@
-# Rotate local-assistant logs: keep 5 × 10MB, bzip2, glob, no signal (bridge.log handler reopens; launchd reopens on write)
-# logfilename                                         [owner:group]  mode count size(KB) when flags
-@HOME@/Library/Logs/local-assistant/*.log     @USER@:staff  600  5     10240    *    GJN

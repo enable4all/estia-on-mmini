@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from local_assistant.config import Config, DeviceSpec
-from local_assistant.language import YES_WORDS
+from local_assistant.language import YES_WORDS, yes_form
 from local_assistant.part_status import PartStatus, Reason
 
 log = logging.getLogger(__name__)
@@ -132,11 +132,7 @@ def _key(name: str) -> str:
 def _is_yes(text: str) -> bool:
     """A clear yes, typed, in a voice note ([voice]) or said on a call ([call]): the same words everywhere, in any of
     the languages ("Ja, graag.", "¡Sí!", "はい。"). The whole message must be the yes."""
-    spoken = text.strip()
-    for mark in ("[voice]", "[call]"):
-        spoken = spoken.removeprefix(mark)
-    answer = re.sub(r"[\s.!,。！、]+$", "", spoken.strip().casefold()).lstrip("¡")
-    return re.sub(r"[\s,、]+", " ", answer) in _YES
+    return yes_form(text) in _YES
 
 
 def _helper_env() -> dict[str, str]:

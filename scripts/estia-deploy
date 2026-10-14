@@ -1,0 +1,21 @@
+#!/bin/bash
+# Put a checkout's commit live, installed root-owned as /usr/local/estia/bin/estia-deploy:
+#   sudo /usr/local/estia/bin/estia-deploy [checkout] [--voice] [--keep N] [--dry-run]
+#   sudo /usr/local/estia/bin/estia-deploy --update-tools [--dry-run]
+# It shows the new commits and the files they change, and asks first. The build runs as you; root only copies,
+# switches `current` and restarts both services, then checks them within 120 s and switches back on failure.
+# Root runs only the root-owned tools (/usr/local/estia/tools: their own Python, the deploy code, the service
+# templates), never a release or your checkout; --update-tools shows their diff with the live release and asks
+# before it changes them. Default checkout: the one the current release came from. --voice also installs and starts
+# the voice service. --dry-run prints every step and changes nothing (no root needed).
+set -euo pipefail
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+dry=""
+for arg in "$@"; do [[ "$arg" == --dry-run ]] && dry=1; done
+root=""
+if [[ $EUID -ne 0 ]]; then root="${ESTIA_ROOT:-}"; root="${root%/}"; fi  # root never takes its targets from the env
+tools="$root/usr/local/estia/tools"
+python="$tools/python3"
+[[ -n "$dry" || $EUID -eq 0 ]] || { echo "run it with sudo: /usr/bin/sudo /usr/local/estia/bin/estia-deploy [checkout]" >&2; exit 2; }
+[[ -x "$python" ]] || { echo "no root-run tools in /usr/local/estia yet: scripts/migrate-to-own-user.sh installs them" >&2; exit 1; }
+exec "$python" -I -c 'import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); runpy.run_module("local_assistant.deploy", run_name="__main__", alter_sys=True)' "$tools/src" "$@"

@@ -1,0 +1,567 @@
+{
+ "language": "en",
+ "items": [
+  {
+   "id": "en-01",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "My sister work in a hospital near the station.",
+   "error_type": "verb agreement (3rd person -s)",
+   "gold_said": "sister work",
+   "gold_better": "sister works",
+   "gold_full": "My sister works in a hospital near the station.",
+   "why_en": "With he/she/it in the present simple, the verb takes -s."
+  },
+  {
+   "id": "en-02",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "I am engineer at a small software company.",
+   "error_type": "article (missing a/an with job)",
+   "gold_said": "am engineer",
+   "gold_better": "am an engineer",
+   "gold_full": "I am an engineer at a small software company.",
+   "why_en": "English needs a/an before a job after 'be'."
+  },
+  {
+   "id": "en-03",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "I have seen that film last week with my brother.",
+   "error_type": "tense (present perfect with finished time)",
+   "gold_said": "have seen",
+   "gold_better": "saw",
+   "gold_full": "I saw that film last week with my brother.",
+   "why_en": "With a finished time like 'last week', use the past simple, not the present perfect."
+  },
+  {
+   "id": "en-04",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "I live in London since 2019.",
+   "error_type": "tense (present with since)",
+   "gold_said": "I live",
+   "gold_better": "I have lived",
+   "gold_full": "I have lived in London since 2019.",
+   "why_en": "For something that started in the past and continues, 'since' needs the present perfect."
+  },
+  {
+   "id": "en-05",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Can you give me some informations about the course?",
+   "error_type": "countability (uncountable noun)",
+   "gold_said": "informations",
+   "gold_better": "information",
+   "gold_full": "Can you give me some information about the course?",
+   "why_en": "'Information' is uncountable and has no plural."
+  },
+  {
+   "id": "en-06",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "I am agree with you about the price.",
+   "error_type": "verb form (be + agree)",
+   "gold_said": "I am agree",
+   "gold_better": "I agree",
+   "gold_full": "I agree with you about the price.",
+   "why_en": "'Agree' is a verb, so no 'am' before it."
+  },
+  {
+   "id": "en-07",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "It depends of the weather tomorrow.",
+   "error_type": "preposition (dependent preposition)",
+   "gold_said": "depends of",
+   "gold_better": "depends on",
+   "gold_full": "It depends on the weather tomorrow.",
+   "why_en": "The verb is 'depend on', not 'depend of'."
+  },
+  {
+   "id": "en-08",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "Where you live now?",
+   "error_type": "question word order (do-support)",
+   "gold_said": "Where you live",
+   "gold_better": "Where do you live",
+   "gold_full": "Where do you live now?",
+   "why_en": "Questions in the present simple need 'do/does' before the subject."
+  },
+  {
+   "id": "en-09",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "I am looking forward to see you on Friday.",
+   "error_type": "gerund/infinitive",
+   "gold_said": "forward to see",
+   "gold_better": "forward to seeing",
+   "gold_full": "I am looking forward to seeing you on Friday.",
+   "why_en": "In 'look forward to', 'to' is a preposition, so the verb takes -ing."
+  },
+  {
+   "id": "en-10",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "My skin is very sensible to the sun.",
+   "error_type": "false friend (sensible/sensitive)",
+   "gold_said": "sensible",
+   "gold_better": "sensitive",
+   "gold_full": "My skin is very sensitive to the sun.",
+   "why_en": "'Sensible' means reasonable; for reacting easily, the word is 'sensitive'."
+  },
+  {
+   "id": "en-12",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "I didn't went to work yesterday because I was sick.",
+   "error_type": "tense (past negative with did)",
+   "gold_said": "didn't went",
+   "gold_better": "didn't go",
+   "gold_full": "I didn't go to work yesterday because I was sick.",
+   "why_en": "After 'didn't', the verb stays in the base form."
+  },
+  {
+   "id": "en-13",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "This phone is more cheaper than my old one.",
+   "error_type": "comparative (double comparative)",
+   "gold_said": "more cheaper",
+   "gold_better": "cheaper",
+   "gold_full": "This phone is cheaper than my old one.",
+   "why_en": "Short adjectives take -er alone; 'more' is not added."
+  },
+  {
+   "id": "en-14",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "I need to make my homework before dinner.",
+   "error_type": "collocation (make/do)",
+   "gold_said": "make my homework",
+   "gold_better": "do my homework",
+   "gold_full": "I need to do my homework before dinner.",
+   "why_en": "English says 'do homework', not 'make homework'."
+  },
+  {
+   "id": "en-15",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "We stayed there for three night.",
+   "error_type": "plural noun",
+   "gold_said": "three night",
+   "gold_better": "three nights",
+   "gold_full": "We stayed there for three nights.",
+   "why_en": "After a number above one, the noun is plural."
+  },
+  {
+   "id": "en-16",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "There were much people at the concert.",
+   "error_type": "quantifier (much/many)",
+   "gold_said": "much people",
+   "gold_better": "many people",
+   "gold_full": "There were many people at the concert.",
+   "why_en": "'People' is countable, so it takes 'many', not 'much'."
+  },
+  {
+   "id": "en-17",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "If I will have time, I will call you.",
+   "error_type": "conditional (will in if-clause)",
+   "gold_said": "If I will have",
+   "gold_better": "If I have",
+   "gold_full": "If I have time, I will call you.",
+   "why_en": "In a first conditional, the if-clause uses the present, not 'will'."
+  },
+  {
+   "id": "en-18",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "He said me that the meeting was cancelled.",
+   "error_type": "verb choice (say/tell)",
+   "gold_said": "said me",
+   "gold_better": "told me",
+   "gold_full": "He told me that the meeting was cancelled.",
+   "why_en": "'Say' takes no person directly; use 'tell me' (or 'said to me')."
+  },
+  {
+   "id": "en-19",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "The man which lives next door is a pilot.",
+   "error_type": "relative pronoun (which/who)",
+   "gold_said": "man which",
+   "gold_better": "man who",
+   "gold_full": "The man who lives next door is a pilot.",
+   "why_en": "For people, the relative pronoun is 'who' (or 'that'), not 'which'."
+  },
+  {
+   "id": "en-20",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "We discussed about the new project for an hour.",
+   "error_type": "verb pattern (no preposition after discuss)",
+   "gold_said": "discussed about",
+   "gold_better": "discussed",
+   "gold_full": "We discussed the new project for an hour.",
+   "why_en": "'Discuss' takes a direct object, with no 'about'."
+  },
+  {
+   "id": "en-21",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "I love the nature, so I go hiking every weekend.",
+   "error_type": "article (generic noun)",
+   "gold_said": "love the nature",
+   "gold_better": "love nature",
+   "gold_full": "I love nature, so I go hiking every weekend.",
+   "why_en": "When 'nature' means nature in general, it has no 'the'."
+  },
+  {
+   "id": "en-22",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "I wish I can speak French better.",
+   "error_type": "modal after wish",
+   "gold_said": "I wish I can",
+   "gold_better": "I wish I could",
+   "gold_full": "I wish I could speak French better.",
+   "why_en": "After 'wish' about the present, the verb moves back: 'could', not 'can'."
+  },
+  {
+   "id": "en-23",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "I have worked here since three years.",
+   "error_type": "preposition (for/since)",
+   "gold_said": "since three years",
+   "gold_better": "for three years",
+   "gold_full": "I have worked here for three years.",
+   "why_en": "'For' goes with a length of time; 'since' goes with a starting point."
+  },
+  {
+   "id": "en-24",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "They bought a red big car last month.",
+   "error_type": "word order (adjective order)",
+   "gold_said": "red big car",
+   "gold_better": "big red car",
+   "gold_full": "They bought a big red car last month.",
+   "why_en": "Size comes before colour in English adjective order."
+  },
+  {
+   "id": "en-25",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "I like very much this song.",
+   "error_type": "word order (adverb between verb and object)",
+   "gold_said": "like very much this song",
+   "gold_better": "like this song very much",
+   "gold_full": "I like this song very much.",
+   "why_en": "English does not put 'very much' between the verb and its object."
+  },
+  {
+   "id": "en-26",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "We have a meeting in Monday morning.",
+   "error_type": "preposition (time: on + day)",
+   "gold_said": "in Monday morning",
+   "gold_better": "on Monday morning",
+   "gold_full": "We have a meeting on Monday morning.",
+   "why_en": "Days, including 'Monday morning', take 'on'."
+  },
+  {
+   "id": "en-27",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "She is married with a doctor from Canada.",
+   "error_type": "preposition (married to)",
+   "gold_said": "married with",
+   "gold_better": "married to",
+   "gold_full": "She is married to a doctor from Canada.",
+   "why_en": "In English, you are 'married to' someone."
+  },
+  {
+   "id": "en-28",
+   "kind": "error",
+   "level": "B1",
+   "sentence": "Can you control the report before I send it?",
+   "error_type": "false friend (control/check)",
+   "gold_said": "control the report",
+   "gold_better": "check the report",
+   "gold_full": "Can you check the report before I send it?",
+   "why_en": "'Control' means direct or limit; looking for mistakes is 'check'."
+  },
+  {
+   "id": "en-30",
+   "kind": "error",
+   "level": "A2",
+   "sentence": "I go to the gym every days after work.",
+   "error_type": "determiner + noun number (every)",
+   "gold_said": "every days",
+   "gold_better": "every day",
+   "gold_full": "I go to the gym every day after work.",
+   "why_en": "'Every' is followed by a singular noun."
+  },
+  {
+   "id": "en-31",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Who did you go to the cinema with?",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "Preposition at the end is normal English; 'With whom' would be overly formal."
+  },
+  {
+   "id": "en-32",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Everyone brought their own lunch to the picnic.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "Singular 'their' after 'everyone' is standard."
+  },
+  {
+   "id": "en-33",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "I just ate, so I'm not hungry right now.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "American English uses past simple with 'just'; do not force 'I've just eaten'."
+  },
+  {
+   "id": "en-37",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "If I were you, I'd take the earlier train.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  },
+  {
+   "id": "en-38",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "We've got two kids and a dog.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'Have got' and 'kids' are informal but correct."
+  },
+  {
+   "id": "en-39",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "My flight got cancelled, so I stayed another night in Rome.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "'Got cancelled' (get-passive) and the British spelling 'cancelled' are both correct."
+  },
+  {
+   "id": "en-40",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "Can I get a coffee to go, please?",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "Informal but standard way to order."
+  },
+  {
+   "id": "en-41",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "Hopefully the weather will be better tomorrow.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "Sentence adverb 'hopefully' is standard."
+  },
+  {
+   "id": "en-42",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "It's the first time I've been to Japan.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  },
+  {
+   "id": "en-43",
+   "kind": "correct",
+   "level": "A2",
+   "sentence": "What are you up to this weekend?",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  },
+  {
+   "id": "en-44",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "She's been working there for about five years.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": ""
+  },
+  {
+   "id": "en-45",
+   "kind": "correct",
+   "level": "B1",
+   "sentence": "I didn't do much this weekend, just relaxed at home.",
+   "error_type": "none",
+   "gold_said": "",
+   "gold_better": "",
+   "gold_full": "",
+   "why_en": "",
+   "note": "Casual ellipsis after the comma is fine in chat."
+  }
+ ],
+ "conversations": [
+  {
+   "id": "en-conv-1",
+   "level": "B1",
+   "topic": "weekend",
+   "user_turns": [
+    "Hi! My weekend was really nice, thanks.",
+    "On Saturday I have gone to the mountains with two friends.",
+    "The weather was perfect and we saw a lot of birds.",
+    "In the evening we were very tired, so we eated pizza at a small restaurant.",
+    "On Sunday I stayed at home and read a book about the history of Japan.",
+    "I'm very interesting in Japanese culture, so I want to go there one day."
+   ],
+   "planted": [
+    {
+     "said": "I have gone",
+     "better": "I went"
+    },
+    {
+     "said": "eated",
+     "better": "ate"
+    },
+    {
+     "said": "interesting in",
+     "better": "interested in"
+    }
+   ]
+  },
+  {
+   "id": "en-conv-2",
+   "level": "B1",
+   "topic": "work",
+   "user_turns": [
+    "I work in the marketing department of a big company.",
+    "My boss is very nice, but she give us too much work.",
+    "Every day I have a lot of meetings, so I don't have much time for my real tasks.",
+    "Last month I asked for a pay rise, and they said they would think about it.",
+    "I hope I will get an answer until the end of the month.",
+    "If not, maybe I will look for an other job."
+   ],
+   "planted": [
+    {
+     "said": "she give",
+     "better": "she gives"
+    },
+    {
+     "said": "until the end",
+     "better": "by the end"
+    },
+    {
+     "said": "an other",
+     "better": "another"
+    }
+   ]
+  },
+  {
+   "id": "en-conv-3",
+   "level": "B1",
+   "topic": "food",
+   "user_turns": [
+    "I really love cooking, especially Italian food.",
+    "Yesterday I have cooked a risotto with mushrooms for my parents.",
+    "My parents said it was delicious, but I think it needed more salt.",
+    "My mother gave me a lot of advices about cooking rice.",
+    "Do you know a good recipe for a dessert? I don't know what to make for tomorrow.",
+    "My friends are coming at my house on Saturday."
+   ],
+   "planted": [
+    {
+     "said": "I have cooked",
+     "better": "I cooked"
+    },
+    {
+     "said": "advices",
+     "better": "advice"
+    },
+    {
+     "said": "coming at my house",
+     "better": "coming to my house"
+    }
+   ]
+  },
+  {
+   "id": "en-conv-4",
+   "level": "B1",
+   "topic": "travel",
+   "user_turns": [
+    "Next month I'm going to Portugal for ten days.",
+    "I've never been there, but my friends say it's beautiful.",
+    "I want to visit Lisbon and Porto, and maybe the south too.",
+    "I need to buy a new luggage before I go.",
+    "Do you know if is it expensive to rent a car there?",
+    "My friend told me that the people there is very friendly."
+   ],
+   "planted": [
+    {
+     "said": "a new luggage",
+     "better": "new luggage"
+    },
+    {
+     "said": "if is it",
+     "better": "if it is"
+    },
+    {
+     "said": "people there is",
+     "better": "people there are"
+    }
+   ]
+  }
+ ]
+}

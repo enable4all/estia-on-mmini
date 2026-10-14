@@ -2,8 +2,9 @@
 then the extras you pick.
 
 Safe to run again: every step checks first and skips what is done. Keys and passwords never pass through here (each
-extra has its own hidden-prompt script); the only codes typed here are Signal's one-time captcha link and SMS code,
-read with a hidden prompt. Nothing is sent anywhere except what signal-cli and Ollama do for the step you are on.
+extra has its own hidden-prompt script); the only codes typed here are Signal's one-time captcha link and SMS code
+and a registration-lock PIN, read with a hidden prompt and given to signal-cli on stdin (never as an argument, which
+other users of the Mac can see). Nothing is sent anywhere except what signal-cli and Ollama do for the step you are on.
 """
 
 from __future__ import annotations
@@ -18,12 +19,23 @@ import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Iterable
+import tomllib
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from local_assistant import doctor, prompts
-from local_assistant.config import DEFAULT_CONFIG_PATH, DEFAULT_NAME, Config, ConfigError, check_name, load_config
+from local_assistant import doctor, harden, hostsec, ownuser, prompts
+from local_assistant.config import (
+    DEFAULT_CONFIG_PATH,
+    DEFAULT_NAME,
+    PROJECT_LEVELS,
+    Config,
+    ConfigError,
+    check_name,
+    load_config,
+    parse_config,
+)
+from local_assistant.hostsec import SUDO, estia_root
 from local_assistant.language import CODES, ENGLISH, find
 
 REPO = Path(__file__).resolve().parents[2]
@@ -34,6 +46,7 @@ PLACEHOLDER_ACI = "00000000-0000-0000-0000-000000000000"
 _NUMBER = re.compile(r"^\+[0-9]{8,15}$")
 _ACI = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 RECEIVE_SECONDS = 20  # how long one look for the one-time word waits
+REGISTER_SECONDS = 120.0  # one register or verify request to Signal's servers
 # the name question's suggestions (owner's picks), and the English (Kokoro) voice each brings; the other ten
 # languages speak with Supertonic's voice F1 whatever the name (the voice service has one style for now)
 FEMALE_NAMES = ("Tiffany", "Maya", "Melina")
@@ -41,6 +54,13 @@ MALE_NAMES = ("Socrates", "Perikles", "Plato")
 FEMALE_VOICE = "af_heart"
 MALE_VOICE = "am_michael"
 _VOICE_LINE = re.compile(r'^#voice = "af_heart"', re.MULTILINE)
+_DIGEST_LINE = re.compile(r'^#model_digest = "sha256:0{64}"', re.MULTILINE)
+# the example's [projects] block, commented out (projects are an extra, off by default)
+_PROJECTS_LINES = (
+    re.compile(r"^#\[projects\]$", re.MULTILINE),
+    re.compile(r'^#root = "~/dev"', re.MULTILINE),
+    re.compile(r'^#default = "summary"', re.MULTILINE),
+)
 
 
 @dataclass(frozen=True)
@@ -120,10 +140,13 @@ def render_config(
     *,
     name: str = DEFAULT_NAME,
     voice: str = FEMALE_VOICE,
+    model_digest: str = "",
+    projects: tuple[str, str] | None = None,
 ) -> str:
     """config.example.toml with the bot's number, the owner's account ID, the language, her name and her voice filled
-    in; everything else stays as the example has it (the extras commented out: the voice goes into the commented
-    [voice] block's voice line, used once [voice] is turned on)."""
+    in, the model's pin when its digest is given, and [projects] with its folder and level when `projects` names them;
+    everything else stays as the example has it (the extras commented out: the voice goes into the commented [voice]
+    block's voice line, used once [voice] is turned on)."""
     if not _NUMBER.match(bot_number):
         raise ValueError("the bot's number must be + and the country code and digits, like +306900000000")
     if not _ACI.match(aci):
@@ -148,7 +171,49 @@ def render_config(
         raise ValueError(f'config.example.toml no longer has its name = "{DEFAULT_NAME}" and #voice lines')
     text = example.replace(number_line, f'bot_number = "{bot_number}"').replace(aci_line, f'allowed_acis = ["{aci}"]')
     text = name_line.sub(f'name = "{name}"', language_line.sub(f'language = "{language}"', text))
+    if model_digest:
+        if not re.fullmatch(r"[0-9a-f]{64}", model_digest) or len(_DIGEST_LINE.findall(text)) != 1:
+            raise ValueError(
+                "the model's digest must be 64 hex digits, and the example must have its #model_digest line"
+            )
+        text = _DIGEST_LINE.sub(f'model_digest = "sha256:{model_digest}"', text)
+    if projects is not None:
+        if any(len(line.findall(text)) != 1 for line in _PROJECTS_LINES):
+            raise ValueError("config.example.toml no longer has its commented [projects], root and default lines")
+        text = with_projects(text, *projects)
     return _VOICE_LINE.sub(f'#voice = "{voice}"', text)
+
+
+def with_projects(text: str, folder: str, level: str) -> str:
+    """A config with [projects] on: its folder (as typed: ~ is the home of whoever runs her) and level. The example's
+    commented block is filled in where it stands; a config without it gets the section at its end."""
+    if level not in PROJECT_LEVELS:
+        raise ValueError(f"the projects level must be one of {', '.join(PROJECT_LEVELS)}")
+    root_line = f"root = {json.dumps(folder, ensure_ascii=False)}"
+    if all(len(line.findall(text)) == 1 for line in _PROJECTS_LINES):
+        header, root, default = _PROJECTS_LINES
+        text = header.sub("[projects]", text)
+        text = root.sub(lambda _: root_line, text)
+        return default.sub(f'default = "{level}"', text)
+    return f'{text.rstrip(chr(10))}\n\n[projects]\n{root_line}\ndefault = "{level}"\n'
+
+
+def _config_problem(text: str) -> str:
+    """Why a config's text would not load ("" when it loads)."""
+    try:
+        parse_config(tomllib.loads(text))
+    except (tomllib.TOMLDecodeError, ConfigError) as exc:
+        return str(exc)
+    return ""
+
+
+@dataclass(frozen=True)
+class _Where:
+    """The projects folder as typed (~ kept), as an absolute path, and the level."""
+
+    typed: str
+    folder: Path
+    level: str
 
 
 @dataclass(frozen=True)
@@ -195,6 +260,11 @@ EXTRAS: dict[str, Extra] = {
         "play and pause commands, to Spotify",
         "Create a Spotify app, add [spotify], then scripts/spotify-login.sh (setup_assistant.md, 3, Spotify).",
     ),
+    "projects": Extra(
+        "Your git projects in one folder of this Mac, read-only: summary, docs or code",
+        "nothing (the files are read on the Mac)",
+        "Nothing to install: setup asks the folder and the level now (setup_assistant.md, 3, Projects).",
+    ),
 }
 
 
@@ -216,6 +286,13 @@ def parse_extras(answer: str) -> tuple[list[str], list[str]]:
     return sorted(picked, key=names.index), unknown
 
 
+def registration_argv(signal_cli: str) -> list[str]:
+    """signal-cli's JSON-RPC in multi-account mode (no -a): only there does 0.14.9 offer register and verify, so the
+    captcha, the SMS code and a PIN go on stdin. It opens every account signal-cli keeps here; setup registers only
+    when no config is set up yet, so no bridge holds one of them."""
+    return [signal_cli, IPV4, *harden.TRUST, "jsonRpc", "--receive-mode", "manual"]
+
+
 # ------------------------------------------------------------------ the steps (interactive; each checks first)
 
 
@@ -226,17 +303,22 @@ class Wizard:
         self.name = name  # hers: the config's, once there is one, or the one chosen at the name question
         self.voice = FEMALE_VOICE  # the English voice that goes with the name chosen here
         self.signal_cli = shutil.which("signal-cli") or "signal-cli"
+        self.clock: Callable[[], float] = time.monotonic  # the wait for her voice at the end
+        self.sleep: Callable[[float], None] = time.sleep
 
     def say(self, text: str) -> None:
         print(text, flush=True)
 
-    def ask(self, question: str, default: str = "") -> str:
+    def typed(self, question: str) -> str | None:
+        """The answer as typed; None without a terminal (a pipe, or Ctrl-D)."""
         try:
-            answer = input(f"{question} ").strip()
-        except EOFError:  # no terminal (a pipe, or Ctrl-D): take the default
+            return input(f"{question} ").strip()
+        except EOFError:
             print()
-            answer = ""
-        return answer or default
+            return None
+
+    def ask(self, question: str, default: str = "") -> str:
+        return self.typed(question) or default  # no terminal: take the default
 
     def yes(self, question: str) -> bool:
         return self.ask(f"{question} [y/N]").lower().startswith("y")
@@ -266,6 +348,17 @@ class Wizard:
         if self.dry_run:
             return subprocess.CompletedProcess(command, 0, "", "")
         return subprocess.run(command, text=True, check=False, **kwargs)  # type: ignore[call-overload,no-any-return]
+
+    def registration(
+        self, method: str, params: dict[str, object], shown: str, secrets: dict[str, str]
+    ) -> tuple[bool, str]:
+        """register or verify: one JSON-RPC request on signal-cli's stdin, printed first with `shown` (placeholders
+        for the secrets). (done, why not); a secret signal-cli's error repeats shows as its placeholder."""
+        argv = registration_argv(self.signal_cli)
+        self.say("  $ " + " ".join(argv) + f"   ({shown} on stdin)")
+        if self.dry_run:
+            return True, ""
+        return harden.json_rpc(argv, method, params, secrets=secrets, timeout=REGISTER_SECONDS)
 
     # 1. the model
     def installed_models(self) -> set[str]:
@@ -312,10 +405,14 @@ class Wizard:
 
     def signal_number(self) -> str:
         if self.dry_run:
+            rpc = " ".join(registration_argv("signal-cli"))
             self.say(
                 f"Signal number: asks for {self.name}'s number (+ and country code), then runs\n"
-                f"  $ signal-cli {IPV4} -a <number> register   (and --captcha <link> if Signal asks; the link is typed hidden)\n"
-                f"  $ signal-cli {IPV4} -a <number> verify <SMS code>   (the code is typed hidden)"
+                f"  $ {rpc}   (register <number> on stdin; with <captcha link> if Signal asks, typed hidden)\n"
+                f"  $ {rpc}   (verify <number> with <SMS code> on stdin; the code is typed hidden)\n"
+                "Then Registration Lock, if you say yes: a PIN typed hidden twice, set with\n"
+                f"  $ {' '.join(harden.set_pin_argv('signal-cli', '<number>'))}   (setPin with <PIN> on stdin)\n"
+                f"  ({harden.LOCK_NOTE})"
             )
             return PLACEHOLDER_NUMBER
         numbers = self.registered_numbers()
@@ -328,9 +425,8 @@ class Wizard:
         number = self.ask("The number, with + and the country code (like +306900000000):")
         if not _NUMBER.match(number):
             raise SystemExit("That does not look like +<country code><number>. Run setup again.")
-        base = [self.signal_cli, IPV4, "-a", number]
-        first = self.run([*base, "register"], capture_output=True)
-        if first.returncode != 0 and "captcha" in (first.stdout + first.stderr).lower():
+        done, why = self.registration("register", {"account": number}, f"register {number}", {})
+        if not done and "captcha" in why.lower():
             self.say(
                 "Signal asks for a captcha (new numbers usually do):\n"
                 "  1. On any device, open https://signalcaptchas.org/registration/generate.html and solve it.\n"
@@ -338,29 +434,65 @@ class Wizard:
                 "  3. Paste it below (hidden). It is a one-time code; it is not stored."
             )
             captcha = getpass.getpass("captcha link: ").strip()
-            first = self.run(
-                [*base, "register", "--captcha", captcha],
-                shown=[*base, "register", "--captcha", "<captcha link>"],
-                capture_output=True,
+            token = captcha.removeprefix("signalcaptcha://")
+            done, why = self.registration(
+                "register",
+                {"account": number, "captcha": token},
+                f"register {number} with <captcha link>",
+                {captcha: "<captcha link>", token: "<captcha link>"},
             )
-        if first.returncode != 0:
-            raise SystemExit(f"Registration failed: {(first.stderr or first.stdout).strip()[:300]}")
+        if not done:
+            raise SystemExit(f"Registration failed: {why.strip()[:300]}")
         pin_prompt = "Registration-lock PIN, only if this number had one (hidden, Enter to skip): "
         while True:  # a mistyped code or PIN can be typed again; q stops
             code = self.hidden("The code Signal sent by SMS (hidden): ").replace("-", "")
             pin = "" if code.lower() == "q" else self.hidden(pin_prompt)
             if "q" in (code.lower(), pin.lower()):
                 raise SystemExit("Verification failed: check the code and run setup again.")
-            verify = self.run(  # shown without the code and the PIN: the terminal may be an AI's transcript
-                [*base, "verify", code] + (["--pin", pin] if pin else []),
-                shown=[*base, "verify", "<SMS code>"] + (["--pin", "<PIN>"] if pin else []),
-                capture_output=True,
+            params: dict[str, object] = {"account": number, "verificationCode": code, **({"pin": pin} if pin else {})}
+            done, why = self.registration(  # shown without the code and the PIN: the terminal may be an AI's transcript
+                "verify",
+                params,
+                f"verify {number} with <SMS code>{' and <PIN>' if pin else ''}",
+                {code: "<SMS code>", pin: "<PIN>"},
             )
-            if verify.returncode == 0:
+            code = pin = ""
+            if done:
                 break
-            self.say(prompts.SETUP_CODE_FAILED.format(reason=(verify.stderr or verify.stdout).strip()[:300]))
+            self.say(prompts.SETUP_CODE_FAILED.format(reason=why.strip()[:300]))
         self.say(f"✓ Signal: {number} is {self.name}'s number.")
+        self.registration_lock(number)
         return number
+
+    def registration_lock(self, number: str) -> None:
+        """Right after registering: a PIN typed hidden twice, set over signal-cli's JSON-RPC on stdin (never argv,
+        never printed). Skipped, scripts/harden.sh offers it again."""
+        self.say(harden.LOCK_NOTE)
+        if not self.yes("Turn on Registration Lock now?"):
+            self.say("  Later: scripts/harden.sh offers it again.")
+            return
+        shown = [*harden.set_pin_argv(self.signal_cli, number), "(setPin with <PIN> on stdin)"]
+        while True:
+            pin = self.hidden("Registration Lock PIN (hidden; q to skip): ")
+            if pin.lower() == "q":
+                self.say("  Skipped: scripts/harden.sh offers it again.")
+                return
+            problem = harden.pin_problem(pin)
+            if problem:
+                self.say(f"  The PIN needs {problem}.")
+                continue
+            if self.hidden("The same PIN again (hidden): ") != pin:
+                self.say("  The two did not match; type it again.")
+                continue
+            self.say("  $ " + " ".join(shown))
+            done, why = harden.set_pin(self.signal_cli, number, pin)
+            pin = ""
+            if done:
+                self.say("✓ Registration Lock: on. Keep the PIN in your password manager.")
+                return
+            self.say(f"✗ Registration Lock: not set ({why}).")
+            if not self.again("Press Enter to try again, or type q to leave it for scripts/harden.sh."):
+                return
 
     # 3. who may talk to her: the owner's account ID, found from a message they send
     def owner(self, number: str) -> str:
@@ -375,7 +507,18 @@ class Wizard:
         word = one_time_word(self.name, secrets.randbelow(9000) + 1000)
         self.say(f"Now, from your own Signal on your phone, send exactly this word to {number}:  {word}")
         self.ask("Press Enter once it is sent.")
-        receive = [self.signal_cli, IPV4, "-o", "json", "-a", number, "receive", "-t", str(RECEIVE_SECONDS)]
+        receive = [
+            self.signal_cli,
+            IPV4,
+            *harden.TRUST,
+            "-o",
+            "json",
+            "-a",
+            number,
+            "receive",
+            "-t",
+            str(RECEIVE_SECONDS),
+        ]
         while True:  # the same word on every look: the owner is whoever sent it
             aci = owner_by_word(senders(self.run(receive, capture_output=True).stdout.splitlines()), word)
             if aci is not None:
@@ -442,15 +585,122 @@ class Wizard:
                 return chosen.code
             self.say(prompts.SETUP_LANGUAGE_UNKNOWN.format(answer=answer))
 
+    def model_digest(self) -> str:
+        """The digest Ollama lists for local-worker now (read-only); "" when it lists none."""
+        try:
+            listed = doctor.Probe().get_json(f"{OLLAMA}/api/tags").get("models", [])
+        except (OSError, ValueError, AttributeError, TypeError):
+            return ""
+        for item in listed if isinstance(listed, list) else []:
+            if isinstance(item, dict) and item.get("name") in ("local-worker", "local-worker:latest"):
+                digest = str(item.get("digest") or "").lower().removeprefix("sha256:")
+                return digest if re.fullmatch(r"[0-9a-f]{64}", digest) else ""
+        return ""
+
+    def projects(self) -> tuple[str, str] | None:
+        """Projects, an extra: asked, never guessed from the Mac's folders (most people: no). Yes: the folder (as typed,
+        ~ allowed; it must exist, and not be your home itself) and the level. A dry run only shows the question."""
+        self.say(prompts.SETUP_PROJECTS.format(name=self.name))
+        if self.dry_run:
+            self.say(prompts.SETUP_PROJECTS_DRY_RUN)
+            return None
+        if not self.yes(prompts.SETUP_PROJECTS_ASK):
+            return None
+        where = self._projects_where()
+        return None if where is None else (where.typed, where.level)
+
+    def _projects_where(self) -> _Where | None:
+        """The projects folder (it must exist, and not be your home itself; q or no terminal: none) and the level."""
+        while True:
+            given = self.typed(prompts.SETUP_PROJECTS_FOLDER)
+            if given is None or given.lower() == "q":  # no terminal: the default folder may be missing, never a loop
+                return None
+            answer = given or "~/dev"
+            folder = Path(os.path.abspath(Path(answer).expanduser()))
+            if folder == Path.home():
+                self.say(prompts.SETUP_PROJECTS_HOME)
+            elif not folder.is_dir():
+                self.say(prompts.SETUP_PROJECTS_NO_FOLDER.format(folder=folder))
+            else:
+                break
+        while True:
+            level = self.ask(prompts.SETUP_PROJECTS_LEVEL, "summary").lower()
+            if level in PROJECT_LEVELS:
+                break
+            self.say(prompts.SETUP_PROJECTS_BAD_LEVEL.format(answer=level))
+        typed = answer if answer.startswith("~") else str(folder)
+        self.say(prompts.SETUP_PROJECTS_CHOSEN.format(folder=typed, level=level))
+        return _Where(typed, folder, level)
+
+    def projects_extra(self) -> None:
+        """Projects picked from the extras: the folder and the level asked, then [projects] in the config (a copy of
+        the old one kept). In her own user her config is hers alone: the lines to add and the commands, nothing
+        written. A config that has [projects] already is left alone."""
+        mine = self.own_user()
+        text = ""
+        if not mine:
+            try:
+                text = self.config_path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                self.say(prompts.SETUP_PROJECTS_NO_CONFIG.format(path=self.config_path))
+                return
+            if ownuser.projects_on(text):
+                self.say(prompts.SETUP_PROJECTS_ON)
+                return
+            problem = _config_problem(text)
+            if problem:  # the user's work: never changed, and nothing asked for it
+                self.say(prompts.SETUP_PROJECTS_NOT_ADDED.format(path=self.config_path, why=problem))
+                return
+        self.say(prompts.SETUP_PROJECTS.format(name=self.name))
+        where = self._projects_where()
+        if where is None:
+            return
+        if mine:  # her ~ is /var/estia: her config names the folder by its absolute path
+            home = Path.home()
+            inside = where.folder != home and where.folder.is_relative_to(home)  # share-projects.sh shares only these
+            share = prompts.SETUP_PROJECTS_SHARE if inside else prompts.SETUP_PROJECTS_OUTSIDE
+            self.say(
+                prompts.SETUP_PROJECTS_HERS.format(
+                    config=ownuser.HOME / ownuser.HER_CONFIG,
+                    root=json.dumps(str(where.folder), ensure_ascii=False),
+                    level=where.level,
+                    share=share.format(folder=where.folder),
+                )
+            )
+            return
+        new = with_projects(text, where.typed, where.level)
+        problem = _config_problem(new)
+        if problem:
+            self.say(prompts.SETUP_PROJECTS_NOT_ADDED.format(path=self.config_path, why=problem))
+            return
+        self._write_private(self.config_path, new)
+        self.say(prompts.SETUP_PROJECTS_ADDED.format(path=self.config_path))
+
     def config(self, number: str, aci: str) -> None:
-        """The config from the example. No soul.md: her built-in style is the default until the user writes one."""
+        """The config from the example, with the model's pin when Ollama lists the alias setup just made, and
+        [projects] when the user asks for it. No soul.md: her built-in style is the default until the user writes
+        one."""
         example = (REPO / "config.example.toml").read_text(encoding="utf-8")
-        text = render_config(example, number, aci, self.language(), name=self.name, voice=self.voice)
+        digest = self.model_digest()
+        language = self.language()
+        projects = self.projects()
+        text = render_config(
+            example,
+            number,
+            aci,
+            language,
+            name=self.name,
+            voice=self.voice,
+            model_digest=digest,
+            projects=projects,
+        )
         self._write_private(self.config_path, text)
         if self.dry_run:
             self.say(f"(dry run) would write config {self.config_path} (mode 600, only you can read it).")
         else:
             self.say(f"✓ Config: {self.config_path} (only you can read it).")
+        if digest:
+            self.say(prompts.SETUP_PINNED)
         soul = self.config_path.parent / "soul.md"
         if soul.exists():
             self.say(f"✓ Personality: {soul} (yours; edit it any time).")
@@ -482,19 +732,55 @@ class Wizard:
         copy.chmod(0o600)
         self.say(f"Kept a copy of the old {path.name}: {copy} (only you can read it).")
 
-    # 5. always on
+    # 5. always on: in her own user
+    def own_user(self) -> bool:
+        """She runs as her own user: the bridge's service file says so (after a rollback it names you again)."""
+        return ownuser.moved(estia_root())
+
     def always_on(self) -> None:
-        if Path("/Library/LaunchDaemons/com.local-assistant.bridge.plist").exists():
-            self.say("✓ Always on: installed.")
+        if self.own_user():
+            self.say(f"✓ Always on: as her own user {ownuser.ROLE_USER}, from {ownuser.CURRENT}.")
             return
+        legacy = (estia_root() / ownuser.DAEMONS.relative_to("/") / f"{ownuser.BRIDGE}.plist").exists()
+        move = str(REPO / "scripts" / "migrate-to-own-user.sh")
+        if legacy:
+            self.say(
+                f"Always on: {self.name} runs as you today. Her own hidden user {ownuser.ROLE_USER} keeps her data and keys\n"
+                f"away from every program you run: the move copies her data to {ownuser.HOME} (only that user can read it)\n"
+                f"and her code to {ownuser.CODE} (owned by root). It needs your Mac password once; she never runs as you or as root."
+            )
+        else:
+            self.say(
+                f"Always on: {self.name} runs as a background service that starts when the Mac starts, as her own hidden\n"
+                f"user {ownuser.ROLE_USER}: her data moves to {ownuser.HOME} (only that user can read it) and her code to\n"
+                f"{ownuser.CODE} (owned by root). Installing it needs your Mac password once (sudo creates the user and\n"
+                "copies the files and the two service files). She never runs as you or as root."
+            )
+        if self.dry_run:
+            self.say(f"  $ {move}   (if you say yes; --dry-run first shows every step)")
+        elif self.yes("Install it now?" if not legacy else "Move her into her own user now?"):
+            self.run([move])
+
+    # 5b. the Mac's security around her, then the phone
+    def security(self) -> None:
+        harden_sh = str(REPO / "scripts" / "harden.sh")
         self.say(
-            f"Always on: {self.name} runs as a background service that starts when the Mac starts. Installing it needs\n"
-            "your Mac password once (sudo copies the service file to /Library/LaunchDaemons). She runs as you, not root."
+            "Security: SSH with keys only, no passwordless sudo, her files private and her Registration Lock, each with\n"
+            "one line on why; a change is made only on your yes, and sudo asks for your password once. FileVault and the\n"
+            "other settings only you can change are shown with their fixes.\n"
+            f"  {hostsec.NUCLEAR_LINE[0].upper()}{hostsec.NUCLEAR_LINE[1:]}; never part of setup."
         )
         if self.dry_run:
-            self.say(f"  $ {REPO / 'scripts/install-daemon.sh'}   (if you say yes)")
-        elif self.yes("Install it now?"):
-            self.run([str(REPO / "scripts/install-daemon.sh")])
+            self.say(f"  $ {harden_sh}   (if you say yes; {harden_sh} --dry-run shows every check)")
+            for line in harden.PHONE_CHECKLIST:
+                self.say(line)
+            return
+        if self.yes("Go through the security step now?"):
+            self.run([harden_sh])  # it ends with the phone checklist
+            return
+        self.say(f"  Later: {harden_sh}")
+        for line in harden.PHONE_CHECKLIST:
+            self.say(line)
 
     # 6. extras
     def extras(self) -> None:
@@ -509,8 +795,28 @@ class Wizard:
             self.say(f"  (not an extra: {', '.join(unknown)})")
         for name in picked:
             self.say(f"• {name}: {EXTRAS[name].how}")
+            if name == "projects":
+                self.projects_extra()
+
+    def voice_health(self) -> dict[str, object] | None:
+        """The voice service's health (127.0.0.1 only; never the running service under a test's ESTIA_ROOT)."""
+        found = ownuser.voice_health(estia_root() == Path("/"))
+        return dict(found) if found is not None else None
+
+    def voice_end(self, *, calls: bool = False) -> None:
+        """The last word on her voice when its service is installed: ready, or when calls work (a first install, a
+        move or a macOS update compiles it again). A text is promised only with `calls` ([calls] in the config setup
+        read; her own user's config is hers alone, so a re-run there promises none)."""
+        plist = estia_root() / ownuser.DAEMONS.relative_to("/") / f"{ownuser.VOICE}.plist"
+        if not self.dry_run and plist.exists():
+            self.say(
+                ownuser.voice_end(self.voice_health, calls=calls, clock=self.clock, sleep=self.sleep, say=self.say)
+            )
 
     def check(self) -> int:
+        if self.own_user():  # her config and data are hers alone: read through her wrapper, by its fixed path
+            self.say("sudo asks for your Mac password: her doctor runs as her own user.")
+            return self.run([SUDO, str(ownuser.BIN / "estia"), "doctor"]).returncode
         findings = doctor.run(self.config_path, doctor.Probe())
         self.say(doctor.render(findings))
         return doctor.exit_code(findings)
@@ -519,13 +825,32 @@ class Wizard:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Set the assistant up step by step (safe to run again).")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="where the config goes")
-    parser.add_argument("--extras", action="store_true", help="only show the extras and how to add them")
+    parser.add_argument(
+        "--extras",
+        action="store_true",
+        help="show the extras and how to add them (projects: asks the folder and the level and adds [projects])",
+    )
     parser.add_argument("--dry-run", action="store_true", help="print the steps and commands without running them")
     args = parser.parse_args(argv)
     wizard = Wizard(args.config, dry_run=args.dry_run)
     if args.extras:
         wizard.extras()
         return 0
+    if wizard.own_user():  # a re-run: never registers again, never rewrites her config
+        wizard.say(
+            f"Setup: she runs as her own user {ownuser.ROLE_USER}; her config and data are readable only by that user,\n"
+            "so setup reads them through /usr/bin/sudo /usr/local/estia/bin/estia and never writes them.\n"
+        )
+        wizard.model()
+        wizard.say(f"✓ Config, Signal number and your account: in her own user ({ownuser.HOME}).")
+        wizard.always_on()
+        wizard.security()
+        wizard.extras()
+        wizard.say("\nChecking everything:")
+        result = wizard.check()
+        wizard.voice_end()
+        wizard.say(prompts.SETUP_DONE.format(name=wizard.name))
+        return 0 if args.dry_run else result
     cfg: Config | None = None
     problem: ConfigError | None = None
     if args.config.exists():  # a config with a mistake is the user's work: say what is wrong, never replace it
@@ -551,10 +876,12 @@ def main(argv: list[str] | None = None) -> int:
         number = wizard.signal_number()
         wizard.config(number, wizard.owner(number))
     wizard.always_on()
+    wizard.security()
     wizard.extras()
     wizard.say("\nChecking everything:")
     time.sleep(0.2)
     result = wizard.check()
+    wizard.voice_end(calls=cfg is not None and cfg.calls_enabled)  # a config setup just wrote has no [calls]
     wizard.say(prompts.SETUP_DONE.format(name=wizard.name))
     return 0 if args.dry_run else result  # a dry run reports, it does not fail
 

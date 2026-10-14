@@ -3,8 +3,10 @@
 CallManager reads signal-cli's call events and answers only allowed callers; strangers are ignored, never rejected
 (a reject would send them something). It connects to the call helper's audio socket in a private folder and runs a
 laid-back conversation: listen (long thinking pauses are fine), transcribe, one turn through the app (the same tools
-as text), speak sentence by sentence, and let the caller talk over her. Audio lives only in memory; logs hold
-metadata only. The app is the Host: it stores the turns, runs Gemma and sends notes.
+as text), speak sentence by sentence, and let the caller talk over her: loudness or the voice service's speech
+detector stops her ([calls] barge, see call_audio.Barge), and the words decide what the stop was (a cough, her own
+voice from a loud speaker, or the caller's turn). Audio lives only in memory; logs hold metadata only. The app is the
+Host: it stores the turns, runs Gemma and sends notes.
 
 She places a call only for a reminder the user set (`place`, from the reminders' scheduler, which sends the text
 first): to an allowed account only, one call at a time, and the call starts for the app only when it is picked up
@@ -23,7 +25,9 @@ import os
 import random
 import re
 import time
-from collections.abc import AsyncIterator, Callable, Mapping
+import unicodedata
+import uuid
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -31,10 +35,17 @@ from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from local_assistant import prompts
-from local_assistant.call_audio import FRAME_S, RATE, CallAudio, faint_noise, pcm48_to_wav16k, wav_to_pcm48
+from local_assistant.call_audio import FRAME_S, RATE, Barge, CallAudio, faint_noise, pcm48_to_wav16k, wav_to_pcm48
 from local_assistant.config import DEFAULT_NAME
-from local_assistant.language import ENGLISH, INTERRUPTIONS, YES_WORDS
-from local_assistant.voice import Transcript, VoiceError, sentences, spoken_text
+from local_assistant.language import (
+    ENGLISH,
+    FUNCTION_WORDS,
+    INTERRUPTIONS,
+    JAPANESE_CALLER_WORDS,
+    NEGATIONS,
+    YES_WORDS,
+)
+from local_assistant.voice import Transcript, VoiceError, detector_state, sentences, spoken_text
 
 log = logging.getLogger(__name__)
 
@@ -79,6 +90,8 @@ class Voice(Protocol):
 
     async def health(self) -> Mapping[str, object] | None: ...
 
+    async def vad(self, chunk: bytes, *, stream: str) -> float | str: ...
+
 
 @dataclass(frozen=True)
 class Turn:
@@ -93,11 +106,14 @@ class Turn:
 
 
 class Host(Protocol):
-    def call_started(self, aci: str) -> None: ...
+    def call_started(self, aci: str, *, practice: bool = False) -> None:
+        """A call starts (`practice`: a practice call, the call's own flag)."""
 
     def call_ended(self) -> None: ...
 
-    async def call_turn(self, aci: str, text: str, on_tools: Callable[[], None]) -> Turn: ...
+    async def call_turn(self, aci: str, text: str, on_tools: Callable[[], None], *, practice: bool = False) -> Turn:
+        """What the user said: the answer (`practice`: a turn of a practice call, the call's own flag)."""
+        ...
 
     def call_interrupted(self, reply_id: int, heard: str) -> None: ...
 
@@ -108,6 +124,10 @@ class Host(Protocol):
     async def call_note(self, aci: str, text: str) -> None: ...
 
     async def call_summary(self, aci: str, lines: list[str], minutes: int) -> None: ...
+
+    async def practice_call_ended(self, aci: str) -> None:
+        """A practice call (/babble) the user spoke in ended: the session ends and its recap goes out at once, instead
+        of the call summary."""
 
 
 @dataclass(frozen=True)
@@ -126,6 +146,7 @@ class CallSettings:
     answer_after_s: float = 5.0  # let it ring about twice before answering (user: more natural)
     ring_wait_s: float = 75.0  # a call she places: signal-cli and RingRTC ring for 60 s; then it is a failed call
     wake_silence_s: float = 60.0  # after a wake-up call's opening, this much silence ends the call with a goodbye
+    barge: str = "loudness"  # what stops her when the caller talks over her: "loudness" or "speech" (call_audio.Barge)
 
 
 # Whisper writes noise as words: sound labels (*sad music*, [Music]) and, on a short sound, its favourite fillers
@@ -159,6 +180,11 @@ NOISE_VOICED_S = 0.6  # a filler word on less sustained voice than this (key cli
 # Less voiced sound than this is not sent to speech recognition at all: just above the 10-frame start run, so a brisk
 # "yes" or "no" (0.15-0.3 s of voice) still counts; is_noise_transcript sorts out the rest.
 MIN_VOICED_S = 0.12
+
+
+def voice_ready(health: Mapping[str, object] | None) -> bool:
+    """Whether the voice service can take a call: it answers and both engines (speech in, speech out) are ready."""
+    return health is not None and health.get("stt") == "ready" and health.get("tts") == "ready"
 
 
 def is_noise_transcript(text: str, sustained_s: float) -> bool:
@@ -206,6 +232,97 @@ def is_interruption(text: str, *, name: str) -> bool:
     words = real_words(text)
     units = sum(len(word) if _NO_SPACES.search(word) else 1 for word in words)
     return units >= 2 or (len(words) == 1 and words[0] in ONE_WORD_INTERRUPTIONS | name_words(name))
+
+
+# Her own voice: a loud speaker next to the caller's microphone (a laptop on Signal Desktop) plays her back, and the
+# stop's transcript is her own sentence. Only what she already played counts (the sentence before and this one up to
+# the stop): at least OWN_VOICE_MIN_WORDS of her content words (short function words left out), at least
+# OWN_VOICE_SHARE of the transcript's content words, and OWN_VOICE_RUN words or more in a row exactly as she said
+# them; a stop, yes or no word she did not say makes it the caller's. Then she carries on as after a cough. Japanese,
+# written without spaces, by characters: pairs for the share and a run of OWN_VOICE_RUN_CHARS (about as many words).
+# Review of 13 Oct: "the dentist at three", "turn it off" over "Should I turn the heater off?", "no, not Amsterdam" over
+# "... in Amsterdam" and "wait, it is at five" are the caller's.
+OWN_VOICE_MIN_WORDS = 3
+OWN_VOICE_SHARE = 0.6
+OWN_VOICE_RUN = 3
+OWN_VOICE_RUN_CHARS = 2 * OWN_VOICE_RUN  # Japanese counts about two characters a word
+
+
+def _plain_word(word: str) -> str:
+    """A word as compared for her own voice: lower case, without apostrophes or accents."""
+    plain = "".join(c for c in unicodedata.normalize("NFKD", word.lower()) if not unicodedata.combining(c))
+    return unicodedata.normalize("NFC", plain).replace("'", "").replace("’", "")
+
+
+_FUNCTION_PLAIN = frozenset(_plain_word(word) for word in FUNCTION_WORDS)
+# words that are the caller's unless her played text has them too: stop and yes words, a negation
+_CALLER_PLAIN = frozenset(_plain_word(word) for word in ONE_WORD_INTERRUPTIONS | NEGATIONS)
+
+
+def _compared(text: str) -> list[str]:
+    """A text's real words as compared for her own voice (_plain_word), in order."""
+    return [_plain_word(word) for word in real_words(text.replace("’", "'"))]
+
+
+def _longest_run(heard: Sequence[str], hers: Sequence[str]) -> int:
+    """How many words (or characters) in a row the transcript has exactly as in her text."""
+    best = 0
+    previous = [0] * (len(hers) + 1)
+    for unit in heard:
+        current = [0] * (len(hers) + 1)
+        for index, her_unit in enumerate(hers, 1):
+            if unit == her_unit:
+                current[index] = previous[index - 1] + 1
+                best = max(best, current[index])
+        previous = current
+    return best
+
+
+def played_part(hers: Sequence[str], fraction: float) -> tuple[str, ...]:
+    """Her sentences as far as the caller can have heard them: the ones before whole, the last up to `fraction` of it
+    (the stop's place in the clip), without a word cut in half (Japanese, without spaces, by characters)."""
+    if not hers:
+        return ()
+    *before, last = hers
+    end = int(len(last) * fraction)
+    if end >= len(last):
+        return (*before, last)
+    cut = last[:end]
+    if not last[end].isspace() and " " in cut:  # inside a word: that word is not said yet
+        cut = cut.rsplit(" ", 1)[0]
+    return (*before, cut.rstrip())
+
+
+def _own_voice_japanese(text: str, played: Sequence[str]) -> bool:
+    heard = "".join(real_words(text))
+    hers = "".join(word for sentence in played for word in real_words(sentence))
+    if any(word in heard and word not in hers for word in JAPANESE_CALLER_WORDS):
+        return False
+    pairs = [heard[i : i + 2] for i in range(len(heard) - 1)]
+    her_pairs = {hers[i : i + 2] for i in range(len(hers) - 1)}
+    if not pairs or sum(pair in her_pairs for pair in pairs) < OWN_VOICE_SHARE * len(pairs):
+        return False
+    return _longest_run(heard, hers) >= OWN_VOICE_RUN_CHARS
+
+
+def is_own_voice(text: str, played: Sequence[str]) -> bool:
+    """Whether a transcript of what stopped her is her own voice: a long part of what she already `played`, in her
+    order (see OWN_VOICE_MIN_WORDS), in any of the languages. A word only the caller says ("no", "wait", "yes") that
+    she did not say makes it the caller's."""
+    if turn_words(text) < OWN_VOICE_MIN_WORDS:
+        return False
+    if _NO_SPACES.search(text):
+        return _own_voice_japanese(text, played)
+    heard = _compared(text)
+    hers = [word for sentence in played for word in _compared(sentence)]
+    said = set(hers)
+    if any(word in _CALLER_PLAIN and word not in said for word in heard):
+        return False
+    content = [word for word in heard if word not in _FUNCTION_PLAIN]
+    mine = sum(word in said for word in content)
+    if mine < OWN_VOICE_MIN_WORDS or mine < OWN_VOICE_SHARE * len(content):
+        return False
+    return _longest_run(heard, hers) >= OWN_VOICE_RUN
 
 
 def is_lone_stop(text: str, *, name: str) -> bool:
@@ -364,6 +481,7 @@ class _Call:
     started_wall: float
     language: str  # a whole call is in one language (/language waits until it ends)
     spoken: prompts.CallLines  # her code-written lines in that language
+    practice: bool = False  # a call during language practice: in the practised language, its end ends practice
     events: asyncio.Queue[dict[str, Any]] = field(default_factory=asyncio.Queue)
     ended: asyncio.Event = field(default_factory=asyncio.Event)
     lines: list[str] = field(default_factory=list)
@@ -387,8 +505,17 @@ class CallManager:
         rng: random.Random | None = None,
         language: str = ENGLISH,
         name: str = DEFAULT_NAME,
+        practice: Callable[[str], str | None] = lambda aci: None,
+        locked: Callable[[], bool] = lambda: False,
+        missed: Callable[[str, bool], None] = lambda aci, promised: None,
+        reached: Callable[[str], None] = lambda aci: None,
     ) -> None:
         self._signal = signal
+        self._locked = locked  # /lock: no call is answered or placed until /unlock
+        # a call that rang while the voice was not ready, and whether its "not ready" note (a promise) went out: the
+        # voice-ready note follows
+        self._missed = missed
+        self._reached = reached  # a call connected (answered, or placed and picked up): that caller heard her
         self._voice = voice
         self._host = host
         self._allowed = frozenset(aci.lower() for aci in allowed)
@@ -399,6 +526,7 @@ class CallManager:
         self._rng = rng or random.Random()
         self.language = language  # the next call's language (/language sets it)
         self.name = name  # hers: greetings, "stop <name>", the summary's transcript
+        self._practice = practice  # the language this user is practising (/babble), read once when a call starts
         self._last_line = ""
         self._last_greeting = ""  # kept apart: one greeting per call, and the next call's must differ
         self._call: _Call | None = None
@@ -408,6 +536,7 @@ class CallManager:
         self._clips: dict[tuple[str, str], bytes] = {}  # canned lines at 48 kHz by (language, text) (no user data)
         self._last: tuple[float, int] | None = None  # the last call: wall start, minutes
         self._not_ready_at: float | None = None
+        self._detector = "not ready"  # the speech detector's state at the last readiness check (detector_state)
         self.saying = ""  # the clip being spoken now
         self.said: list[str] = []  # clips finished (played whole or cut off), latest last; the newest 20 kept
 
@@ -419,14 +548,25 @@ class CallManager:
     def speaking(self) -> bool:
         return self._audio is not None and self._audio.speaking.is_set()
 
-    def status_line(self, next_call: str = "") -> str:
-        """/status: whether she is in a call, the last one and (from the reminders) the next call she will place."""
+    def status_line(self, next_call: str = "", detector: str = "") -> str:
+        """/status: whether she is in a call, the last one, the speech detector's state (`detector`, when speech stops
+        her) and (from the reminders) the next call she will place."""
         if self._call is not None:
-            return f"Calls: in a call since {self._hhmm(self._call.started_wall)}"
-        line = "Calls: ready"
-        if self._last is not None:
-            line += f" (last call {self._hhmm(self._last[0])}, {self._last[1]} min)"
-        return f"{line} · next call {next_call}" if next_call else line
+            line = f"Calls: in a call since {self._hhmm(self._call.started_wall)}"
+        else:
+            line = "Calls: ready"
+            if self._last is not None:
+                line += f" (last call {self._hhmm(self._last[0])}, {self._last[1]} min)"
+        if detector:
+            line += f" · speech detector: {detector}"
+        return f"{line} · next call {next_call}" if next_call and self._call is None else line
+
+    async def detector(self) -> str:
+        """The speech detector's state for /status when speech stops her ([calls] barge = "speech"): ready, loading,
+        unavailable, old voice service or not ready (voice.detector_state); "" with loudness."""
+        if self.settings.barge != "speech":
+            return ""
+        return detector_state(await self._voice.health())
 
     def _hhmm(self, stamp: float) -> str:
         return datetime.fromtimestamp(stamp, self._tz).strftime("%H:%M")
@@ -455,7 +595,10 @@ class CallManager:
                 await self._signal.hangup_call(dial.aci, dial.call_id)
 
     async def can_place(self, aci: str) -> str:
-        """ "" when she can place a call now, else why not: in_call (one call at a time) or not_ready (the voice)."""
+        """ "" when she can place a call now, else why not: locked (/lock), in_call (one call at a time) or not_ready
+        (the voice)."""
+        if self._locked():
+            return "locked"
         if self._call is not None or self._dial is not None:
             return "in_call"
         if not await self._voice_ready():
@@ -491,10 +634,9 @@ class CallManager:
             outcome, event = await self._ring(dial)
             if outcome != "answered" or event.get("state") != "CONNECTED":
                 return outcome  # not picked up (or picked up on another device): nothing more here
-            language = self.language
-            lines = prompts.call_lines(language, name=self.name)
+            call = self._new_call(aci, call_id, practice_ok=False)  # her call for a reminder is never practice
+            lines = call.spoken
             line = f"{(lines.wake if wake else lines.call_reminder).format(time=time)} {text}".strip()
-            call = _Call(aci, call_id, self._clock(), self._wall(), language, lines)
             while not dial.events.empty():  # whatever came after CONNECTED belongs to the call now
                 call.events.put_nowait(dial.events.get_nowait())
             self._call = call
@@ -550,16 +692,28 @@ class CallManager:
         if aci not in self._allowed:
             log.info("calls: a call from an account that is not allowed was ignored")
             return
+        if self._locked():  # ignored, never rejected (a reject is a reply): it rings out
+            log.info("calls: a call was ignored while locked (/lock)")
+            return
         if call is not None or dial is not None:
             log.info("calls: a second call was ignored")
             return
         if not await self._voice_ready():
             await self._not_ready(aci)
             return
-        language = self.language
-        lines = prompts.call_lines(language, name=self.name)
-        self._call = _Call(aci, call_id, self._clock(), self._wall(), language, lines)
+        self._call = self._new_call(aci, call_id, practice_ok=True)
         self._task = asyncio.create_task(self._run_call(self._call), name="call")
+
+    def _new_call(self, aci: str, call_id: int, *, practice_ok: bool) -> _Call:
+        """A call's language: the one practised (/babble) when practice runs for this user and the user made the call
+        (`practice_ok`), else the user's own. A call she places for a reminder or a wake-up is never a practice call:
+        its turns may set a reminder, and its end leaves practice running."""
+        practised = self._practice(aci) if practice_ok else None
+        language = practised or self.language
+        lines = prompts.call_lines(language, name=self.name)
+        if practised:
+            log.info("calls: a practice call (%s)", practised)
+        return _Call(aci, call_id, self._clock(), self._wall(), language, lines, practice=bool(practised))
 
     async def _rings_out(self, call: _Call) -> bool:
         """Let it ring (about twice) before answering; True when the caller hung up meanwhile."""
@@ -577,19 +731,32 @@ class CallManager:
 
     async def _voice_ready(self) -> bool:
         health = await self._voice.health()
-        return health is not None and health.get("stt") == "ready" and health.get("tts") == "ready"
+        self._detector = detector_state(health)  # checked just before every call: the call's barge-in uses it
+        return voice_ready(health)
+
+    def _barge(self) -> Barge:
+        """The call's barge-in rules: the speech detector (one detector state per call) when the service has it ready,
+        else loudness, said once when speech should have stopped her."""
+        if self._detector != "ready":
+            if self.settings.barge == "speech":
+                log.info("calls: speech detector %s; loudness decides this call", self._detector)
+            return Barge(self.settings.barge)
+        return Barge(self.settings.barge, functools.partial(self._voice.vad, stream=uuid.uuid4().hex))
 
     async def _not_ready(self, aci: str) -> None:
         now = self._clock()
-        if self._not_ready_at is not None and now - self._not_ready_at < NOT_READY_NOTE_SECONDS:
+        promised = self._not_ready_at is None or now - self._not_ready_at >= NOT_READY_NOTE_SECONDS
+        self._missed(aci, promised)  # every ring counts, also one whose note is held back: the voice-ready note follows
+        if not promised:
+            log.info("calls: a call rang while the voice service was not ready (note held back: sent minutes ago)")
             return
         self._not_ready_at = now
-        log.info("calls: a call rang while the voice service was not ready")
+        log.info("calls: a call rang while the voice service was not ready (note sent)")
         await self._host.call_note(aci, prompts.CALL_NOT_READY)
 
     async def _run_call(self, call: _Call, opening: _Opening | None = None) -> None:
         """An incoming call (rings, then answered), or one she placed that was picked up (`opening`)."""
-        self._host.call_started(call.aci)
+        self._host.call_started(call.aci, practice=call.practice)
         log.info("calls: answering" if opening is None else "calls: the call placed was picked up")
         audio: CallAudio | None = None
         tasks: list[asyncio.Task[Any]] = []
@@ -602,9 +769,10 @@ class CallManager:
                 connected = await self._wait_connected(call)
             else:
                 accepted, connected = opening.started, opening.connected
+            self._reached(call.aci)  # connected: no "voice ready" note owed to this caller
             path = socket_path(accepted, connected, self.settings.socket_dir, call.call_id)
             reader, writer = await self._connect(path)
-            audio = CallAudio(reader, writer)
+            audio = CallAudio(reader, writer, self._barge())
             self._audio = audio
             tasks = [asyncio.create_task(audio.pump()), asyncio.create_task(self._watch(call, audio))]
             await asyncio.wait_for(audio.started.wait(), CONNECT_SECONDS)
@@ -623,6 +791,8 @@ class CallManager:
             for task in tasks:
                 task.cancel()
             if audio is not None:
+                audio.barge.close()
+                log.info("%s", audio.barge.summary())
                 audio.close()
             if not call.ended.is_set():
                 with contextlib.suppress(Exception):
@@ -640,11 +810,13 @@ class CallManager:
 
     async def _after(self, call: _Call, minutes: int) -> None:
         with contextlib.suppress(Exception):
+            if call.practice and call.user_turns:  # first: the texts typed meanwhile as practice, then the recap
+                await self._host.practice_call_ended(call.aci)
             if call.dropped:
                 await self._host.call_note(call.aci, prompts.CALL_DROPPED)
             if call.unfinished:  # the caller may think it was done: say it was not
                 await self._host.call_note(call.aci, prompts.CALL_UNFINISHED)
-            if self.settings.summary and call.user_turns >= 2:
+            if self.settings.summary and call.user_turns >= 2 and not call.practice:  # practice: the recap instead
                 await self._host.call_summary(call.aci, call.lines, minutes)
 
     async def _wait_connected(self, call: _Call) -> dict[str, Any]:
@@ -806,7 +978,7 @@ class CallManager:
         question it raised is dropped; when the call ended meanwhile, the user gets a note that it was not done."""
         s = self.settings
         tools = asyncio.Event()
-        task = asyncio.create_task(self._host.call_turn(call.aci, text, tools.set))
+        task = asyncio.create_task(self._host.call_turn(call.aci, text, tools.set, practice=call.practice))
         ended = asyncio.create_task(call.ended.wait())
         thought = checked = not s.fillers  # without fillers she simply answers when the answer is ready
         line_end: float | None = None
@@ -892,7 +1064,7 @@ class CallManager:
         `keep`: the clip may be kept for next time (canned lines only, never one with the user's words)."""
         self.saying = text
         clip = await self._clip(text, language, keep=keep)
-        result = await self._say_checked(audio, faint_noise(LEAD_MS) + clip, barge)
+        result = await self._say_checked(audio, faint_noise(LEAD_MS) + clip, barge, hers=(text,))
         self._done(text)
         return result[0] if result else None
 
@@ -939,7 +1111,8 @@ class CallManager:
                 self.saying = part
                 lead = faint_noise(LEAD_MS) if index == 0 else b""
                 whole = last_whole and index == len(parts) - 1
-                result = await self._say_checked(audio, lead + item, barge=not whole, fresh=index == 0)
+                hers = tuple(parts[max(0, index - 1) : index + 1])  # the sentence and the one before it
+                result = await self._say_checked(audio, lead + item, barge=not whole, fresh=index == 0, hers=hers)
                 self._done(part)
                 if result is not None:
                     text, fraction = result
@@ -961,10 +1134,13 @@ class CallManager:
                     raise ConnectionError("the call's audio ended") from None
 
     async def _say_checked(
-        self, audio: CallAudio, pcm: bytes, barge: bool, *, fresh: bool = True
+        self, audio: CallAudio, pcm: bytes, barge: bool, *, fresh: bool = True, hers: tuple[str, ...] = ()
     ) -> tuple[str, float] | None:
-        """Say `pcm`; when the caller talks over it, listen and check the words: an interruption returns
-        (what they said, how much of the clip went out); a cough or a noise resumes a little before the stop."""
+        """Say `pcm` (her sentences `hers`: the one before and the one being said); when the caller talks over it,
+        listen and check the words: an interruption returns (what they said, how much of the clip went out); a cough,
+        a noise or her own voice (compared with what she played of `hers` up to the stop) resumes a little before the
+        stop. Her own voice also raises the level a stop needs, once a call (call_audio.Barge.her_own_voice); it never
+        reaches Gemma."""
         offset = 0
         false_alarms = 0
         while True:
@@ -981,8 +1157,16 @@ class CallManager:
             except VoiceError:
                 text = ""
             noise = is_noise_transcript(text, float(info.get("sustained_s", 0.0)))  # typing heard as "*music*"
-            if (not noise and is_interruption(text, name=self.name)) or false_alarms >= MAX_FALSE_BARGE:
-                return ("" if noise else text), min(1.0, stop / max(1, len(pcm)))  # noise never reaches Gemma
+            fraction = min(1.0, stop / max(1, len(pcm)))
+            own = not noise and is_own_voice(text, played_part(hers, fraction))
+            if own:
+                audio.barge.her_own_voice(said.level)
+            caller = not noise and not own and is_interruption(text, name=self.name)
+            if not caller:
+                audio.barge.false_stop(said)  # no words or her own voice: the shadow that fired too would have erred
+            if caller or false_alarms >= MAX_FALSE_BARGE:
+                # noise and her own words never reach Gemma
+                return ("" if noise or own else text), fraction
             false_alarms += 1
-            log.info("calls: a sound without words; carrying on")
+            log.info("calls: her own voice heard; carrying on" if own else "calls: a sound without words; carrying on")
             offset = max(0, stop - 2 * int(RESUME_BACK_S * RATE))

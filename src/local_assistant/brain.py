@@ -10,9 +10,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from local_assistant import prompts
-from local_assistant.claims import claiming_clauses, mentions_reminder, restates, without_reminder_talk
+from local_assistant.babble import PracticeTurn, broken, tidy, users_words
+from local_assistant.claims import claiming_clauses, clauses, mentions_reminder, restates, without_reminder_talk
 from local_assistant.context import ContextBuilder, without_fake_notices
-from local_assistant.gemma import Completion, GemmaClient
+from local_assistant.gemma import Completion, GemmaClient, ToolCall
 from local_assistant.store import Conversation, Message
 from local_assistant.tools import ReminderAttempt, Tools, Turn
 from local_assistant.web_search import sources
@@ -59,6 +60,34 @@ def without_links(text: str) -> str:
     return re.sub(r"[ \t]{2,}", " ", _LINK.sub(keep_punctuation, text)).strip()
 
 
+# a bare domain Signal would make tappable (common top-level domains only, so file names stay as they are)
+_BARE_DOMAIN = re.compile(
+    r"(?<![\w@.\[\]/-])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+"
+    r"(?:com|net|org|info|biz|io|co|cc|app|dev|xyz|me|link|click|top|site|online|shop|store|live|icu|buzz|ru|cn|tk|"
+    r"nl|de|uk|gr|eu|fr|it|es|be|pl|pt|ch|at|us|ai|ly)(?![\w@-]|\.\w)",
+    re.IGNORECASE,
+)
+
+
+def defang_links(text: str, allowed: str) -> str:
+    """After outside text: links in her answer that the user did not send (`allowed`: their message) lose what makes
+    them tappable ("https://evil.example/login" -> "evil[.]example/login"); the Sources note stays code's."""
+    said = allowed.casefold()
+
+    def defang(match: re.Match[str]) -> str:
+        link = match.group(0)
+        core = link.rstrip(".,;:!?")
+        if core.casefold() in said:
+            return link
+        host, slash, rest = re.sub(r"^https?://", "", core, flags=re.IGNORECASE).partition("/")
+        return host.replace(".", "[.]") + slash + rest + link[len(core) :]
+
+    text = _LINK.sub(defang, text)
+    return _BARE_DOMAIN.sub(
+        lambda match: match.group(0) if match.group(0).casefold() in said else match.group(0).replace(".", "[.]"), text
+    )
+
+
 # the end_call tool's name written into her answer ("Bye!  end_call", "(end_call)", "`end_call()`")
 _WRITTEN_END_CALL = re.compile(r"[ \t]*[(\[`*]*\bend_call\b(?:\(\))?[)\]`*]*", re.IGNORECASE)
 
@@ -84,6 +113,23 @@ NOTHING_SAVED = 'Profile changes: none. Nothing was saved; say "remember that ..
 def _claims_a_save(text: str) -> bool:
     """The rules make Gemma confirm a save with "Noted: ..." (a plain "Noted!" acknowledgement does not count)."""
     return re.match(r"\s*noted\s*:", text, re.IGNORECASE) is not None
+
+
+def _practice_claims(words: str, users: Sequence[str]) -> list[str]:
+    """The clauses of her practice words that claim a reminder or a call (the broad set), leaving out a roleplay
+    sentence the user wrote that she repeats ("Mañana te llamo, mamá"): a clause that is the user's words, or whose
+    every claiming piece (split again at dashes and colons) is. A claim of hers around the user's words ("And I will
+    call you at 7") stays."""
+
+    def theirs(clause: str) -> bool:
+        return any(users_words(clause, line) for line in users)
+
+    found: list[str] = []
+    for clause in claiming_clauses(words, broad=True, saved=False):
+        pieces = [piece for piece, _ in clauses(clause, fine=True) if claiming_clauses(piece, broad=True)]
+        if not theirs(clause) and not (pieces and all(theirs(piece) for piece in pieces)):
+            found.append(clause)
+    return found
 
 
 def _reminder_text(arguments: str) -> str:
@@ -182,20 +228,40 @@ class Brain:
         recent: Mapping[int, Sequence[str]] | None = None,
         max_tokens: int | None = None,
         on_tools: Callable[[], None] | None = None,
+        practice: PracticeTurn | None = None,
+        glance: str = "",
+        reads: Sequence[tuple[str, str]] = (),
     ) -> Reply:
         """Gemma's reply to the newest message of the conversation (already stored), with its photos.
 
         `recent`: photos of an earlier message that are still shown (a follow-up question about them).
         On a call: `max_tokens` keeps spoken answers short; `on_tools` is called once, when the first tool that
-        takes a moment runs (the call says "let me check")."""
-        turn = Turn(message=message)
+        takes a moment runs (the call says "let me check"); `glance`: code's counts at the call's start (numbers and
+        times only: no outside text, so nothing in the answer is refused for it); `reads`: tool calls (name, JSON
+        arguments) code makes itself before she answers (a yes to her offer of the day's rundown): run through the same
+        tools, logged and counted like hers and given to her as her own tool calls with their results, so what they
+        read is outside text for this answer exactly as when she calls them. `practice`: a /babble turn
+        (`_practise`)."""
         limit_tokens = max_tokens or self._reply_max_tokens
         shown = {**(recent or {}), **({message.id: images} if images else {})}
-        messages = self._context.build(conversation, shown or None)
+        if practice is not None:
+            return await self._practise(conversation, message, practice, limit_tokens, shown)
+        turn = Turn(message=message, after_outside=self._context.after_outside(conversation, message.id))
+        messages = self._context.build(conversation, shown or None, glance=glance)
         said = [str(m["content"]) for m in messages if m.get("role") == "user" and isinstance(m.get("content"), str)]
         # the user asked for a reminder, a wake-up or a call now or in their message before ("and at 17:00?")
         asked_before = any(mentions_reminder(text) for text in said[-2:]) or mentions_reminder(message.text)
         calls = 0
+        if reads:  # code's own reads, as if she had called them first
+            if on_tools is not None:
+                on_tools()
+                on_tools = None
+            read = tuple(ToolCall(f"code_{number}_{name}", name, args) for number, (name, args) in enumerate(reads))
+            messages.append(_assistant_tool_message(Completion(content="", tool_calls=read)))
+            for call in read:
+                calls += 1
+                result = await self._tools.call(turn, call.name, call.arguments)
+                messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
         corrected = False
         while True:
             limit = self._learn_tool_calls if turn.learned_document_id is not None else self._max_tool_calls
@@ -235,6 +301,13 @@ class Brain:
                 self._context.refresh_snapshot()
             if turn.used_web:
                 text = without_links(text)
+            elif (
+                turn.untrusted
+                or turn.read_mail_or_calendar
+                or turn.after_outside
+                or message.text.startswith((prompts.AUDIO_MARK, "[photo]"))
+            ):  # a link planted in outside text never reaches the user tappable, unless they sent it themselves
+                text = defang_links(text, message.text)
             reminder = list(turn.reminder_notes)
             spoken = list(turn.reminder_spoken)
             # per answer, never across turns: a set_reminder that stored nothing gets code's line whatever she wrote;
@@ -283,6 +356,68 @@ class Brain:
                 not_set=not_set,
                 not_set_spoken=not_set_spoken,
             )
+
+    async def _practise(
+        self,
+        conversation: Conversation,
+        message: Message,
+        practice: PracticeTurn,
+        max_tokens: int,
+        shown: Mapping[int, Sequence[str]],
+    ) -> Reply:
+        """A practice turn: the practice rules, no tools offered (none can run), no tool loop. A reply that is empty,
+        only "---" or only a "→" line is asked again once, then replaced by the language's fallback question (the
+        broken reply is never kept); "---" lines go and one "→" line at most comes first (none when spoken, none that
+        changes nothing the user wrote). A written end_call on a call still ends it. Nothing can be saved or set here:
+        a "Noted: ..." gets code's note, and so does a claimed reminder when the user asked for one (this message or
+        the one before; a roleplay line such as a shop's "I'll call you tomorrow" is not a promise). The claim is read
+        in her words only: never the "→" line (the user's own sentence, corrected) nor a claim-shaped sentence the user
+        wrote that she repeats ("If I have time, I will call you": the practice evals' en-17). The injection-residue
+        guards: no set_reminder can run, so the overlap rule has nothing to check; links are defanged as in a chat
+        answer, after outside text in the practice conversation (an audio file or a photo) unless the user sent them."""
+        messages = self._context.build(conversation, shown or None, rules=practice.rules)
+        completion = await self._gemma.chat(messages, max_tokens=max_tokens, tools=None)
+        if not _has_images(messages):  # image tokens are counted by Ollama but not in our characters
+            self._context.calibrate(messages, completion.prompt_tokens)
+        if broken(completion.content):
+            log.warning("message %d: a broken practice reply; asking once more", message.id)
+            nudged = [*messages, {"role": "user", "content": prompts.EMPTY_NUDGE}]
+            completion = await self._gemma.chat(nudged, max_tokens=max_tokens, tools=None)
+        if broken(completion.content):
+            log.warning("message %d: the practice reply stayed broken; the fallback question instead", message.id)
+            text = practice.fallback
+        else:
+            text = tidy(without_fake_notices(completion.content), spoken=practice.spoken, said=message.text)
+        text, wrote_end_call = without_written_end_call(text)
+        end_call = wrote_end_call and self._tools.calls_on and message.text.startswith(prompts.CALL_MARK)
+        text = text or practice.fallback
+        # the chat's link rule over the practice conversation (no tool runs here, so its outside text is an audio file
+        # or a photo, in it or answered now); the chat's outside text is not in this context
+        if self._context.after_outside(conversation, message.id) or message.text.startswith(
+            (prompts.AUDIO_MARK, "[photo]")
+        ):
+            text = defang_links(text, message.text)
+        said = [str(m["content"]) for m in messages if m.get("role") == "user" and isinstance(m.get("content"), str)]
+        users = [*said[-2:], message.text]
+        asked = any(mentions_reminder(line) for line in users)
+        words = tidy(text, spoken=True)  # her words, without the "→" line (the user's own sentence, corrected)
+        claimed = _practice_claims(words, users)
+        reminder = spoken = ""
+        if self._tools.reminders_on and asked and claimed:
+            reminder, spoken = prompts.PRACTICE_NO_REMINDER, prompts.PRACTICE_NO_REMINDER_SPOKEN
+            log.warning("message %d: no reminder was set (claimed in practice)", message.id)
+        claimed_save = _claims_a_save(words)
+        if claimed_save:
+            log.warning("message %d: 'Noted' in practice, where nothing is saved", message.id)
+        return Reply(
+            text=text,
+            tool_calls=0,
+            prompt_tokens=completion.prompt_tokens,
+            notice=prompts.PRACTICE_NOTHING_SAVED if claimed_save else "",
+            end_call=end_call,
+            reminder=reminder,
+            reminder_spoken=spoken,
+        )
 
     async def _complete(self, messages: list[dict[str, Any]], allow_tools: bool, max_tokens: int) -> Completion:
         """One Gemma call; an answer with neither text nor a usable tool call is retried once."""

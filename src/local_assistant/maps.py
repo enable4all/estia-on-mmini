@@ -1,14 +1,17 @@
 """Places and routes for her: Google Places (Text Search, New) and Google Routes, with Google Maps links.
 
 "Where the user is" is the last Signal location pin (3 hours, in memory only), else the home area from the private
-config, looked up once and kept rounded to ~1 km. Only place names, addresses and that rough area go to Google (a
-route from a pin uses the pin itself). A daily cap per API keeps the free monthly allowance; results are data, never
+config, looked up once and kept rounded to ~1 km. The address stays only in the private config: the database keeps
+the rounded centre and a tag of the address (a keyed hash, to notice a new address), never the address itself. Only
+place names, addresses and that rough area go to Google (a route from a pin uses the pin itself). A daily cap per API keeps the free monthly allowance; results are data, never
 instructions, and are not stored.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import re
@@ -18,7 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import quote, quote_plus, urlencode, urlsplit
 from zoneinfo import ZoneInfo
 
 from local_assistant.calendar_tools import clean
@@ -68,7 +71,9 @@ NAME_CHARS = 100
 ADDRESS_CHARS = 150
 PIN_SECONDS = 3 * 3600.0
 BIAS_METRES = 3000.0
-HOME_AREA_KEY = "maps_home_area"  # "lat,lng" rounded to 2 decimals, and the address it belongs to
+HOME_AREA_KEY = "maps_home_area"  # "lat,lng" rounded to 2 decimals, and the tag of the address it belongs to
+HOME_FAILED_PREFIX = "maps_home_failed_"  # + the day: the tag of an address Google could not place that day
+_TAG = re.compile(r"^[0-9a-f]{64}$")
 # Signal's location share ends with this link on its own line; a link inside a question is not "where I am"
 _PIN = re.compile(r"https://maps\.google\.com/maps\?q=(-?\d{1,2}(?:\.\d+)?)(?:%2C|,)(-?\d{1,3}(?:\.\d+)?)(?![\d.])\s*$")
 HOME_WORDS = frozenset({"home", "my home", "my house", "my place", "home address", "at home"})
@@ -100,7 +105,7 @@ class Route:
     km: float
     lines: tuple[str, ...]  # by public transport: "tram 13", "metro 52"
     origin: str  # "where you sent your location", "home" or the place the user named
-    link: str  # Google Maps directions
+    link: str  # Google Maps directions; "" for a route home whose area is not known (never the address)
 
 
 class Mapper(Protocol):
@@ -124,6 +129,44 @@ def find_pin(text: str) -> tuple[float, float] | None:
 
 def _today_name() -> str:
     return datetime.now().strftime("%Y-%m-%d")
+
+
+def home_tag(address: str, key: str) -> str:
+    """The address's tag: HMAC-SHA256 keyed with the Google Maps key, which is never in the database, so the database
+    alone cannot confirm a guessed address near the kept centre. A new key reads as a new address: one lookup."""
+    return hmac.new(key.encode(), address.strip().encode(), hashlib.sha256).hexdigest()
+
+
+def forget_home_address(store: Store, home: str, keys_path: Path) -> None:
+    """At start: no row keeps the home address, which belongs only in the private config. An earlier version kept it
+    beside the home area ("lat,lng|<address>"), in the day's failed-lookup row and in the Directions links of its
+    Sources notes. The area of the configured address keeps its centre with the address's tag; any other old area,
+    and every failed-lookup row that holds no tag, is deleted (secure_delete overwrites the row); in a note the
+    address's link form becomes the kept centre, else "home" (the search index follows); then the log is written
+    back into the file at once."""
+    changed = False
+    home = home.strip()
+    key = read_keys(keys_path, ("GOOGLE_MAPS_API_KEY",)).get("GOOGLE_MAPS_API_KEY", "") if home else ""
+    area, _, tail = (store.get_state(HOME_AREA_KEY) or "").partition("|")
+    if tail and not _TAG.match(tail):
+        if home and key and tail == home and "," in area:
+            store.set_state(HOME_AREA_KEY, f"{area}|{home_tag(home, key)}")
+        else:
+            store.delete_state(HOME_AREA_KEY)
+        changed = True
+    for name, value in store.states_with_prefix(HOME_FAILED_PREFIX):
+        if not _TAG.match(value):
+            store.delete_state(name)
+            changed = True
+    if home:
+        area, _, tail = (store.get_state(HOME_AREA_KEY) or "").partition("|")
+        kept = bool(key) and "," in area and tail == home_tag(home, key)
+        spot = quote_plus(area) if kept else "home"
+        forms = dict.fromkeys((quote_plus(home), quote(home), quote(home, safe="")))
+        changed = store.rewrite_notes(list(forms), spot) > 0 or changed
+    if changed:
+        store.checkpoint()
+        log.info("maps: the home address was removed from the database")
 
 
 class Maps:
@@ -219,28 +262,29 @@ class Maps:
         if mode not in MODES:
             raise ValueError("the way of travel must be bike, walk, transit or car.")
         to, origin = " ".join(to.split()), " ".join(origin.split())
-        if to.casefold() in HOME_WORDS:
+        to_home = to.casefold() in HOME_WORDS
+        if to_home:
             if not self._home:
                 raise MapsError("there is no home address in the config.", retry=True)
             to = self._home
         to = _words(to, "where to")
-        link: dict[str, str] = {"api": "1"}
         here = self.here()
         word = origin.casefold()
-        if word in HOME_WORDS or (word in HERE_WORDS and here is None):
+        named = ""  # a start the user named goes into the link; from the pin none: the phone uses where it is
+        from_home = word in HOME_WORDS or (word in HERE_WORDS and here is None)
+        if from_home:
             if not self._home:
                 raise MapsError(
                     "I don't know where you are: send your location in Signal, or name where you start.", retry=True
                 )
             start: dict[str, Any] = {"address": self._home}
-            label, link["origin"] = "home", self._home
+            label = "home"
         elif word in HERE_WORDS and here is not None:
             start = {"location": {"latLng": {"latitude": here[0], "longitude": here[1]}}}
-            label = self._pin_label()  # no origin in the link: the phone uses where it is
+            label = self._pin_label()
         else:
             origin = _words(origin, "where from")
-            start, label, link["origin"] = {"address": origin}, origin, origin
-        link |= {"destination": to, "travelmode": LINK_MODES[mode]}
+            start, label, named = {"address": origin}, origin, origin
         body = {
             "origin": start,
             "destination": {"address": to},
@@ -258,23 +302,33 @@ class Maps:
         metres = first.get("distanceMeters")
         lines = _lines(first.get("legs"))
         km = round(metres / 1000, 1) if isinstance(metres, int | float) and not isinstance(metres, bool) else 0.0
-        return Route(mode, round(seconds / 60), km, lines, label, f"https://www.google.com/maps/dir/?{urlencode(link)}")
+        # the link is sent and stored as a note: a home end is the rounded centre, never the address (from home
+        # without a centre: no origin, the phone uses where it is; to home without one: no link)
+        centre = await self._home_center(quick) if to_home or from_home else None
+        spot = f"{centre[0]},{centre[1]}" if centre is not None else ""
+        start_at = spot if from_home else named
+        link = {"api": "1"} | ({"origin": start_at} if start_at else {})
+        link |= {"destination": spot if to_home else to, "travelmode": LINK_MODES[mode]}
+        url = "" if to_home and not spot else f"https://www.google.com/maps/dir/?{urlencode(link)}"
+        return Route(mode, round(seconds / 60), km, lines, label, url)
 
     @staticmethod
     def _rough(spot: tuple[float, float] | None) -> tuple[float, float] | None:
         return None if spot is None else (round(spot[0], 2), round(spot[1], 2))
 
     async def _home_center(self, quick: bool) -> tuple[float, float] | None:
-        """The home area rounded to ~1 km, looked up once (a failed lookup is not repeated the same day)."""
+        """The home area rounded to ~1 km, looked up once (a failed lookup is not repeated the same day). Kept with
+        the address's tag, never the address (no key: nothing is looked up, nothing kept)."""
         if not self._home:
             return None
-        saved = self._store.get_state(HOME_AREA_KEY) or ""
-        area, _, address = saved.partition("|")
-        if address == self._home and "," in area:
+        key = self._key()
+        tag = home_tag(self._home, key) if key else ""
+        area, _, kept = (self._store.get_state(HOME_AREA_KEY) or "").partition("|")
+        if tag and kept == tag and "," in area:
             lat, lng = area.split(",", 1)
             return float(lat), float(lng)
-        failed_key = f"maps_home_failed_{self._day()}"
-        if self._store.get_state(failed_key) == self._home:
+        failed_key = f"{HOME_FAILED_PREFIX}{self._day()}"
+        if tag and self._store.get_state(failed_key) == tag:
             return None
         try:
             answer = await self._ask(
@@ -284,9 +338,10 @@ class Maps:
             center = round(float(spot["latitude"]), 2), round(float(spot["longitude"]), 2)
         except (MapsError, LookupError, TypeError, ValueError) as exc:
             log.warning("maps: the home area could not be looked up: %s", type(exc).__name__)
-            self._store.set_state(failed_key, self._home)
+            if tag:
+                self._store.set_state(failed_key, tag)
             return None
-        self._store.set_state(HOME_AREA_KEY, f"{center[0]},{center[1]}|{self._home}")
+        self._store.set_state(HOME_AREA_KEY, f"{center[0]},{center[1]}|{tag}")
         return center
 
     def _key(self) -> str:

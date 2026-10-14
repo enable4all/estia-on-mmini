@@ -216,3 +216,23 @@ def test_words_typed_with_an_audio_file_are_kept() -> None:
         envelope(data={"attachments": [{**VOICE, "isVoiceNote": False}], "message": " who is this? "}), ALLOWED
     )
     assert decision.kind is Kind.VOICE and decision.text == "who is this?"
+
+
+# hardening: which of the sender's devices sent it (1: their phone; linked devices 2 and up)
+
+
+@pytest.mark.parametrize(
+    ("value", "device"), [(1, 1), (2, 2), (17, 17), (0, None), (-1, None), ("2", None), (True, None), (None, None)]
+)
+def test_the_decision_names_the_sending_device(value: object, device: int | None) -> None:
+    for env in (envelope(data={"message": "hi"}), envelope(data={"message": "/devices"}), envelope(source=STRANGER)):
+        env["sourceDevice"] = value
+        assert classify(env, ALLOWED).device == device
+
+
+def test_without_a_device_field_the_device_is_unknown() -> None:
+    env = envelope(data={"message": "hi"})
+    del env["sourceDevice"]
+    decision = classify(env, ALLOWED)
+    assert (decision.kind, decision.device) == (Kind.TEXT, None)
+    assert classify(envelope(data={"message": "hi"}, sourceDevice=3), ALLOWED).device == 3

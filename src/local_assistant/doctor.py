@@ -7,6 +7,13 @@ private value is printed (key files: present, private and which keys only; never
 text).
 Key files are looked for next to the config file (for the default config, where the bridge reads them).
 
+Her Signal account's devices, a changed safety number and the model's pause come from status.json too (times and a
+count only); the model's pin is compared with what Ollama lists now; retention from the database's state. The projects
+folder is read as the user doctor runs as (as her: what her project tools can read, with git's fixed argv). Then the
+Mac's own checks (`hostsec`: firewall, SSH passwords, FileVault, her file modes, her Registration Lock, set or not, never
+its PIN) and those of her own user (`ownuser`), mapped one to one. Run as `_estia` (`/usr/bin/sudo /usr/local/estia/bin/estia
+doctor`), a check that needs root shows ! with the owner's command: doctor never escalates.
+
 An optional part whose setup is in place shows what its last real use did, from the bridge's status.json
 (part_status): ✓ working, ○ set up but not tested yet, ✗ failing with the fix. Doctor never uses a part itself, so
 a failure whose fix was saved since (a sign-in, key, login, secret address or helper) is ○ again until the next use.
@@ -15,7 +22,9 @@ a failure whose fix was saved since (a sign-in, key, login, secret address or he
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
+import os
 import platform
 import shutil
 import sqlite3
@@ -28,7 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from local_assistant import prompts
+from local_assistant import hostsec, ownuser, prompts
 from local_assistant.config import (
     DEFAULT_AVATAR,
     DEFAULT_CONFIG_PATH,
@@ -41,15 +50,29 @@ from local_assistant.config import (
     load_config,
     read_avatar,
 )
+from local_assistant.gemma import is_remote
+from local_assistant.hostsec import Check
 from local_assistant.initiative import ENABLED_KEY, QUIET_KEY, Settings
 from local_assistant.keyfile import read_keys
 from local_assistant.language import CODES, ENGLISH, LANGUAGE_KEY
 from local_assistant.mail_auth import TokenStore
-from local_assistant.part_status import Record, calendar_mailbox, calendar_part, describe, label_of, mail_part, read
+from local_assistant.part_status import (
+    Record,
+    calendar_mailbox,
+    calendar_part,
+    describe,
+    label_of,
+    mail_part,
+    read,
+    read_security,
+)
+from local_assistant.projects import Access, Projects
 from local_assistant.reminders import FAILED, PROBLEM_DAYS, STUCK_S, iso, summary
 from local_assistant.soul import load_soul
 from local_assistant.spotify_auth import SpotifyTokens
 from local_assistant.store import Store
+from local_assistant.timefmt import local_when
+from local_assistant.voice import detector_state
 
 Status = Literal["ok", "untested", "warn", "fail"]
 MARKS: dict[Status, str] = {"ok": "✓", "untested": "○", "warn": "!", "fail": "✗"}
@@ -92,6 +115,31 @@ class Probe:
         with opener.open(url, timeout=3) as response:
             return json.loads(response.read(1_000_000))
 
+    def security_checks(self, home: Path, bot_number: str) -> list[Check]:
+        """The Mac's checks around her (read-only, fixed tools, nothing applied; `home`: hers)."""
+        return hostsec.doctor_checks(hostsec.Host(hostsec.estia_root(), say=lambda _line: None), home, bot_number)
+
+    def install_checks(self) -> list[Check]:
+        """Her own user's checks: the user, the root-owned code, the service files, the rollback window."""
+        return ownuser.install_checks(hostsec.estia_root())
+
+    def moved(self) -> bool:
+        """She runs as her own user here (the bridge's service file says so)."""
+        return ownuser.moved(hostsec.estia_root())
+
+    def her_user(self) -> bool:
+        """This doctor runs as her (_estia)."""
+        return os.geteuid() == (ownuser.lookup_uid(ownuser.ROLE_USER) or -1)
+
+    def projects(self, cfg: Config) -> Access:
+        """What this user can read in the projects folder (as her: what her project tools can read)."""
+        return asyncio.run(Projects(cfg).access())
+
+    def program_checks(self, cfg: Config) -> list[Check]:
+        """What she runs: root's alone (her signal-cli, the call helper's Java and tunnel, the folders on her PATH)."""
+        root = hostsec.estia_root()
+        return [ownuser.program_check(ownuser.her_programs(cfg, root), root)]
+
 
 def run(config_path: Path, probe: Probe) -> list[Finding]:
     """Every check, in the order of the setup guide; the optional parts only when they are turned on."""
@@ -99,6 +147,8 @@ def run(config_path: Path, probe: Probe) -> list[Finding]:
         cfg = load_config(config_path)
     except ConfigError as exc:
         fix = "" if config_path.exists() else f"cp config.example.toml {config_path} && chmod 600 {config_path}"
+        if not config_path.exists() and probe.moved():  # her config is hers: readable only as her user
+            fix = prompts.DOCTOR_OWN_USER_CONFIG
         return [_mac(probe, DEFAULT_NAME), _tools(probe), Finding("fail", "Config", str(exc), fix)]
     findings = [_mac(probe, cfg.name), _tools(probe)]
     placeholders = [
@@ -122,20 +172,140 @@ def run(config_path: Path, probe: Probe) -> list[Finding]:
         findings.append(
             Finding("ok", "Config", f"{config_path} reads fine, {len(cfg.allowed_acis)} allowed account(s)")
         )
+    models = _models(cfg, probe)  # Ollama's list, read once
+    own = probe.moved()
     findings += [
-        _model(cfg, probe),
+        _model(cfg, models),
+        _model_pin(cfg, models, config_path if own else None),
         _signal_number(cfg, probe),
         _picture(cfg),
-        _personality(config_path.parent, cfg.name),
+        _personality(config_path.parent, cfg.name, own=own),
         _language(cfg, probe),
     ]
     if cfg.reminders_enabled:
         findings.append(_reminders(cfg, probe.now()))
     findings.append(_initiative(cfg, probe.now()))
+    findings.append(_history(cfg, probe.now()))
+    if cfg.projects_enabled:  # an extra: off without [projects], nothing to read
+        findings.append(_projects(cfg, probe, own))
+    findings += _signal_security(cfg, probe.now())
     records = read(cfg.data_dir / "status.json")  # what the bridge saw; nothing known without it
     findings += _optional_parts(cfg, config_path.parent, probe, _States(cfg, config_path.parent, records, probe.now()))
     findings.append(_daemon())
+    findings += _host(probe, cfg)
     return findings
+
+
+def _finding(check: Check) -> Finding:
+    """A check as doctor shows it: a neutral fact (info) is ○, like a part with nothing to test."""
+    return Finding("untested" if check.status == "info" else check.status, check.part, check.text, check.fix)
+
+
+def _host(probe: Probe, cfg: Config) -> list[Finding]:
+    """The Mac's checks and her own user's, one finding each; one that cannot run is a warning, never a crash."""
+    found: list[Finding] = []
+    try:
+        found += [_finding(check) for check in probe.security_checks(probe.home, cfg.bot_number)]
+    except (OSError, ValueError) as exc:
+        found.append(Finding("warn", "Mac security", prompts.DOCTOR_HOST_FAILED.format(why=type(exc).__name__)))
+    try:
+        found += [_finding(check) for check in probe.install_checks()]
+        if probe.moved():
+            found += [_finding(check) for check in probe.program_checks(cfg)]
+    except (OSError, ValueError) as exc:
+        found.append(Finding("warn", "Own user", prompts.DOCTOR_HOST_FAILED.format(why=type(exc).__name__)))
+    return found
+
+
+def _projects(cfg: Config, probe: Probe, own: bool) -> Finding:
+    """The projects folder as the user doctor runs as reads it: ✓ a tracked README opens; ✗ (in her own user, with
+    your share command) when nothing can be read; ○ when there is nothing to check."""
+    root = cfg.projects_root
+    access = probe.projects(cfg)
+    share = prompts.DOCTOR_PROJECTS_SHARE_FIX.format(root=root) if own else ""
+    closed: Status = "fail" if own else "warn"  # she runs as you: your own permissions keep you out, nothing to share
+    if access.state == "missing":
+        return Finding(
+            "untested", "Projects", prompts.DOCTOR_PROJECTS_MISSING.format(root=root), prompts.DOCTOR_PROJECTS_ROOT_FIX
+        )
+    if access.state == "closed":
+        return Finding(closed, "Projects", prompts.DOCTOR_PROJECTS_CLOSED.format(root=root), share)
+    if access.readme is None and access.unreadable:
+        text = prompts.DOCTOR_PROJECTS_NONE_READ.format(root=root, closed=access.unreadable)
+        return Finding(closed, "Projects", text, share)
+    if access.readme is None:
+        return Finding("untested", "Projects", prompts.DOCTOR_PROJECTS_EMPTY.format(root=root))
+    if access.unreadable:
+        text = prompts.DOCTOR_PROJECTS_SOME.format(root=root, closed=access.unreadable)
+        return Finding("warn", "Projects", text, share)
+    return Finding("ok", "Projects", prompts.DOCTOR_PROJECTS_OK.format(root=root, count=access.projects))
+
+
+def _signal_security(cfg: Config, now: float) -> list[Finding]:
+    """A changed safety number and her own Signal account's devices, as the bridge last saw them (status.json)."""
+    security = read_security(cfg.data_dir / "status.json")
+    if security.identity_changed is None:
+        safety = Finding("ok", prompts.SAFETY_NUMBER_LABEL, prompts.DOCTOR_SAFETY_UNCHANGED)
+    else:
+        when = local_when(security.identity_changed, now, cfg.timezone)
+        text = prompts.SAFETY_NUMBER_CHANGED.format(when=when)
+        safety = Finding("fail", prompts.SAFETY_NUMBER_LABEL, text, prompts.SAFETY_NUMBER_FIX)
+    count = security.linked_devices
+    if count is None:
+        devices = Finding("untested", prompts.LINKED_LABEL, prompts.DOCTOR_DEVICES_NOT_COUNTED)
+    else:
+        when = local_when(security.devices_checked or now, now, cfg.timezone)
+        if count <= 1:
+            devices = Finding("ok", prompts.LINKED_LABEL, prompts.LINKED_ONE.format(when=when))
+        else:
+            text = prompts.LINKED_MORE.format(count=count, when=when)
+            devices = Finding("fail", prompts.LINKED_LABEL, text, prompts.LINKED_FIX)
+    return [safety, devices]
+
+
+def _model_pin(cfg: Config, models: list[dict[str, Any]] | None, her_config: Path | None = None) -> Finding:
+    """The model alias against `model_digest`: pinned and matching, pinned and not (answers paused), or not pinned
+    (with the line that pins the digest Ollama lists now). `her_config`: she runs as her own user, so the fix says how
+    to edit her config as her and restart her."""
+    how = prompts.DOCTOR_OWN_EDIT.format(path=her_config) if her_config is not None else ""
+    base = _ollama(cfg)
+    wanted = cfg.model if ":" in cfg.model else f"{cfg.model}:latest"
+    listed = next((item for item in models or [] if item.get("name") == wanted), None)
+    digest = str(listed.get("digest") or "").strip().lower().removeprefix("sha256:") if listed else ""
+    if not cfg.model_digest:
+        fix = (
+            prompts.DOCTOR_PIN_FIX.format(digest=digest, model=cfg.model)
+            if digest
+            else prompts.DOCTOR_PIN_FIX_UNKNOWN.format(base=base, model=cfg.model)
+        )
+        return Finding("warn", "Model pin", prompts.DOCTOR_PIN_NONE.format(model=cfg.model), fix + how)
+    if not digest:
+        return Finding("warn", "Model pin", prompts.DOCTOR_PIN_UNREAD.format(model=cfg.model))
+    if digest == cfg.model_digest:
+        return Finding("ok", "Model pin", prompts.DOCTOR_PIN_OK.format(model=cfg.model))
+    fix = prompts.DOCTOR_PIN_CHANGED_FIX.format(digest=digest) + how
+    return Finding("fail", "Model pin", prompts.DOCTOR_PIN_CHANGED.format(model=cfg.model), fix)
+
+
+def _history(cfg: Config, now: float) -> Finding:
+    """[privacy] keep_days: kept forever, or pruned each night (the last time from the database's state)."""
+    if cfg.keep_days is None:
+        return Finding("ok", "History", prompts.DOCTOR_HISTORY_KEPT)
+    try:
+        with closing(_read_only(cfg)) as conn:
+            row = conn.execute("SELECT value FROM state WHERE key = 'privacy:pruned_at'").fetchone()
+    except sqlite3.Error:
+        row = None
+    try:
+        last = float(row[0]) if row is not None else None
+    except ValueError:
+        last = None
+    if last is None:
+        return Finding("untested", "History", prompts.DOCTOR_HISTORY_NOT_YET.format(days=cfg.keep_days))
+    text = prompts.DOCTOR_HISTORY_PRUNED.format(days=cfg.keep_days, when=local_when(last, now, cfg.timezone))
+    if now - last > 3 * 86_400:  # it runs each night: three nights without one means it does not run
+        return Finding("warn", "History", text, prompts.DOCTOR_HISTORY_FIX)
+    return Finding("ok", "History", text)
 
 
 def _mac(probe: Probe, name: str) -> Finding:
@@ -148,18 +318,38 @@ def _mac(probe: Probe, name: str) -> Finding:
 
 
 def _tools(probe: Probe) -> Finding:
+    if probe.her_user():  # Homebrew's tools are yours and not on her PATH
+        return Finding("ok", "Tools", prompts.DOCTOR_TOOLS_HERS)
     missing = [tool for tool in TOOLS if probe.which(tool) is None]
     if not missing:
         return Finding("ok", "Tools", ", ".join(TOOLS))
     return Finding("fail", "Tools", f"missing: {', '.join(missing)}", f"brew install {' '.join(missing)}")
 
 
-def _model(cfg: Config, probe: Probe) -> Finding:
-    base = cfg.ollama_base_url.removesuffix("/").removesuffix("/v1")
+def _ollama(cfg: Config) -> str:
+    return cfg.ollama_base_url.removesuffix("/").removesuffix("/v1")
+
+
+def _models(cfg: Config, probe: Probe) -> list[dict[str, Any]] | None:
+    """Ollama's model list (/api/tags); None when it does not answer properly."""
     try:
-        names = {str(item.get("name", "")) for item in probe.get_json(f"{base}/api/tags").get("models", [])}
+        listed = probe.get_json(f"{_ollama(cfg)}/api/tags").get("models", [])
     except (OSError, ValueError, AttributeError):
+        return None
+    return [item for item in listed if isinstance(item, dict)] if isinstance(listed, list) else None
+
+
+def _model(cfg: Config, models: list[dict[str, Any]] | None) -> Finding:
+    base = _ollama(cfg)
+    if models is None:
         return Finding("fail", "Model", f"Ollama does not answer at {base}", "brew services start ollama")
+    wanted = cfg.model if ":" in cfg.model else f"{cfg.model}:latest"
+    listed = next((item for item in models if item.get("name") == wanted), None)
+    if listed is not None and is_remote(listed):  # the model runs only on this Mac
+        return Finding(
+            "fail", "Model", prompts.DOCTOR_MODEL_CLOUD.format(model=cfg.model), prompts.model_cloud_fix(cfg.model)
+        )
+    names = {str(item.get("name", "")) for item in models}
     if cfg.model in names or f"{cfg.model}:latest" in names:
         return Finding("ok", "Model", f"Ollama has {cfg.model}")
     return Finding(
@@ -204,15 +394,14 @@ def _picture(cfg: Config) -> Finding:
     return Finding("ok", "Profile picture", prompts.DOCTOR_PICTURE_OWN.format(file=path.name))
 
 
-def _personality(folder: Path, name: str) -> Finding:
+def _personality(folder: Path, name: str, *, own: bool = False) -> Finding:
     path = folder / "soul.md"
     if not path.exists():  # the default: her built-in style
         return Finding("ok", "Personality", f"no soul.md: {name}'s built-in playful style (soul.example.md: your own)")
     soul = load_soul(path)
     if soul.problem:
-        return Finding(
-            "warn", "Personality", f"soul.md is not used: {soul.problem}", f"chmod 600 {path}, then check it"
-        )
+        chmod = f"/usr/bin/sudo -u {ownuser.ROLE_USER} chmod 600 {path}" if own else f"chmod 600 {path}"
+        return Finding("warn", "Personality", f"soul.md is not used: {soul.problem}", f"{chmod}, then check it")
     return Finding("ok", "Personality", "soul.md")
 
 
@@ -340,6 +529,24 @@ def _language(cfg: Config, probe: Probe) -> Finding:
     return Finding("ok", "Language", name)
 
 
+def _speech_detector(cfg: Config, probe: Probe) -> Finding:
+    """With [calls] barge = "speech": whether the voice service's speech detector is ready (else loudness stops her on
+    calls meanwhile)."""
+    try:
+        health = probe.get_json(f"{cfg.voice_url.rstrip('/')}/health")
+    except (OSError, ValueError):
+        health = None
+    state = detector_state(health if isinstance(health, dict) else None)
+    if state == "ready":
+        return Finding("ok", "Speech detector", "ready")
+    text, fix = {
+        "old voice service": (prompts.DOCTOR_DETECTOR_OLD, prompts.DOCTOR_VOICE_REINSTALL),
+        "loading": (prompts.DOCTOR_DETECTOR_LOADING, prompts.DOCTOR_DETECTOR_LOADING_FIX),
+        "unavailable": (prompts.DOCTOR_DETECTOR_UNAVAILABLE, prompts.DOCTOR_DETECTOR_UNAVAILABLE_FIX),
+    }.get(state, (prompts.DOCTOR_DETECTOR_SILENT, prompts.DOCTOR_VOICE_REINSTALL))
+    return Finding("warn", "Speech detector", text, fix)
+
+
 def _private_file(path: Path) -> bool:
     try:
         return path.is_file() and not path.stat().st_mode & (stat.S_IRWXG | stat.S_IRWXO)
@@ -434,7 +641,7 @@ def _optional_parts(cfg: Config, folder: Path, probe: Probe, states: _States) ->
         )
     if cfg.calls_enabled:
         missing = [path.name for path in (cfg.call_signal_cli, cfg.call_tunnel) if not path.exists()]
-        java = cfg.calls_java_home or probe.java_home()
+        java = cfg.java_home or probe.java_home()
         if java is None or not (java / "bin" / "java").exists():
             missing.append("Java")
         if not missing:
@@ -458,6 +665,8 @@ def _optional_parts(cfg: Config, folder: Path, probe: Probe, states: _States) ->
                     + ("; set [calls] java_home" if "Java" in missing else ""),
                 )
             )
+        if cfg.calls_barge == "speech":
+            found.append(_speech_detector(cfg, probe))
     if cfg.mail_enabled:
         tokens = TokenStore(cfg.mail_token_path)
         waiting = [account.name for account in cfg.mail_accounts if not tokens.refresh_token(account.address)]
@@ -544,7 +753,8 @@ def _calendar(cfg: Config, folder: Path, source: CalendarSource, states: _States
 
 
 def _daemon() -> Finding:
-    if Path("/Library/LaunchDaemons/com.local-assistant.bridge.plist").exists():
+    plist = hostsec.estia_root() / ownuser.DAEMONS.relative_to("/") / f"{ownuser.BRIDGE}.plist"  # a test: its own root
+    if plist.exists():
         return Finding("ok", "Always on", "the LaunchDaemon is installed")
     return Finding("warn", "Always on", "not installed yet (try scripts/run.sh first)", "scripts/install-daemon.sh")
 

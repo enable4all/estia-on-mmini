@@ -1,6 +1,9 @@
+import array
 import json
+import math
 import socket
 import stat
+import time
 from pathlib import Path
 
 import pytest
@@ -13,6 +16,7 @@ from local_assistant.voice import (
     VoiceTooLongError,
     VoiceUnavailableError,
     VoiceUnreadableError,
+    detector_state,
     sentences,
     sniff,
     spoken_text,
@@ -269,3 +273,69 @@ def test_japanese_is_spoken_sentence_by_sentence_too() -> None:
     long = "今日は晴れです。" * 300
     cut = spoken_text(long, max_chars=200, rest="")
     assert len(cut) <= 200 and cut.endswith("晴れです。")
+
+
+CHUNK = array.array("h", (int(3000 * math.sin(2 * math.pi * 220 * i / 16_000)) for i in range(4096))).tobytes()
+
+
+async def test_the_speech_detector_gets_one_chunk_and_answers_a_probability() -> None:
+    with FakeVoiceService() as service:
+        service.vad = "ready"
+        client = VoiceClient(service.url, voice="af_heart", speed=1.1)
+        assert await client.vad(CHUNK, stream="0a1b2c") == 1.0
+        assert await client.vad(bytes(8192), stream="0a1b2c") == 0.02
+        method, path, headers, body = service.requests[0]
+        assert (method, path, body) == ("POST", "/vad?stream=0a1b2c", CHUNK)
+        assert headers["content-type"] == "application/octet-stream"
+
+
+@pytest.mark.parametrize(
+    ("vad", "answer", "chunk"),
+    [
+        (None, None, CHUNK),  # an older service: no /vad (404)
+        ("loading", None, CHUNK),  # 503 until the model is ready
+        ("ready", None, CHUNK[:100]),  # 400: not 4096 samples
+        ("ready", b"not json", CHUNK),
+        ("ready", b'{"p": "high"}', CHUNK),
+        ("ready", b'{"p": 1.5}', CHUNK),
+        ("ready", b'{"p": NaN}', CHUNK),
+        ("ready", b"[1.0]", CHUNK),
+    ],
+    ids=["older-service", "loading", "short-chunk", "not-json", "not-a-number", "above-1", "nan", "a-list"],
+)
+async def test_a_speech_detector_that_cannot_answer_is_an_http_failure_never_an_error(
+    tmp_path: Path, vad: str | None, answer: bytes | None, chunk: bytes
+) -> None:
+    status = recorder(tmp_path)
+    with FakeVoiceService() as service:
+        service.vad, service.vad_answer = vad, answer
+        client = VoiceClient(service.url, voice="af_heart", speed=1.1, status=status)
+        assert await client.vad(chunk, stream="s1") == "http"
+    assert status.snapshot() == {}  # the detector is not the voice: a failure never marks the voice as failing
+
+
+async def test_a_speech_detector_that_does_not_answer_is_an_http_failure() -> None:
+    assert await VoiceClient(closed_port_url(), voice="af_heart", speed=1.1).vad(CHUNK, stream="s1") == "http"
+
+
+async def test_a_slow_speech_detector_is_given_up_on_quickly_as_a_timeout() -> None:
+    with FakeVoiceService() as service:
+        service.vad, service.vad_delay = "ready", 0.8
+        started = time.monotonic()
+        assert await VoiceClient(service.url, voice="af_heart", speed=1.1).vad(CHUNK, stream="s1") == "timeout"
+        assert time.monotonic() - started < 0.6  # a call never waits for the detector
+
+
+@pytest.mark.parametrize(
+    ("health", "state"),
+    [
+        ({"stt": "ready", "tts": "ready", "vad": "ready"}, "ready"),
+        ({"stt": "ready", "tts": "ready", "vad": "loading"}, "loading"),
+        ({"stt": "ready", "tts": "ready", "vad": "unavailable"}, "unavailable"),  # no model: its own fix (doctor)
+        ({"stt": "ready", "tts": "ready"}, "old voice service"),  # built before the detector
+        (None, "not ready"),  # no answer
+        ({"stt": "ready", "tts": "ready", "vad": "something new"}, "not ready"),
+    ],
+)
+def test_the_speech_detectors_state_from_the_health(health: dict[str, str] | None, state: str) -> None:
+    assert detector_state(health) == state

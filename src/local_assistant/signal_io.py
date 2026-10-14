@@ -14,8 +14,10 @@ import contextlib
 import json
 import logging
 import os
+import re
 import time
 from collections.abc import AsyncIterator, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -45,18 +47,58 @@ class NotAllowedError(Exception):
 
 
 IPV4 = "-Djava.net.preferIPv4Stack=true"
+# A changed safety number is never trusted by itself: a SIM swap of the user's number looks exactly like one. Pinned
+# here, not left to signal-cli's default; setup's own signal-cli calls pass the same.
+TRUST_NEW_IDENTITIES = ("--trust-new-identities", "on-first-use")
+UNTRUSTED_IDENTITY = "UntrustedIdentityException"  # signal-cli's receive exception for a changed safety number
+_PLAIN_WORD = re.compile(r"[^A-Za-z0-9_.]")
 
 
-def signal_cli_command(signal_cli: str, bot_number: str, *, jvm: bool = False) -> list[str]:
+@dataclass(frozen=True)
+class ReceiveProblem:
+    """A message signal-cli received but could not open (its receive `exception`): the exception's type, and who sent
+    it from which device when the envelope says so. Never the exception's message: it names the account."""
+
+    kind: str  # e.g. UntrustedIdentityException
+    sender: str | None = None  # the sender's ACI, lowercase
+    device: int | None = None  # the sender's device (1: their phone)
+
+    @property
+    def untrusted_identity(self) -> bool:
+        """The sender's safety number changed and has not been confirmed: the message was dropped."""
+        return self.kind == UNTRUSTED_IDENTITY
+
+
+@dataclass(frozen=True)
+class LinkedDevice:
+    """One device of the bot's own Signal account (listDevices): its id and when it was linked, never its name."""
+
+    id: int
+    created: int | None  # epoch milliseconds
+
+
+def device_number(value: object) -> int | None:
+    """A Signal device id (1 or more), or None for anything else."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 1 else None
+
+
+def signal_cli_command(
+    signal_cli: str, bot_number: str, *, jvm: bool = False, config_dir: Path | None = None
+) -> list[str]:
     """IPv4 only: chat.signal.org also answers over IPv6, but Signal's captcha is checked against an IPv4 address, so
     registering over IPv6 fails with 403 (signal-cli issue 1788); the flag keeps one network path for every command.
+    New identities are trusted on first use only (`TRUST_NEW_IDENTITIES`), pinned in code.
     Manual receive (subscribe once ready); photos are fetched with getAttachment, so attachments are not ignored
     (strangers' files are deleted on receipt by the app).
-    The JVM build's launcher would hand a -D argument to signal-cli itself: it gets IPv4 from JAVA_OPTS."""
+    The JVM build's launcher would hand a -D argument to signal-cli itself: it gets IPv4 from JAVA_OPTS.
+    `config_dir`: signal-cli's data folder, given explicitly (Java takes its home from the account record, which
+    macOS keeps at /var/empty for her own user, not from $HOME)."""
     return [
         signal_cli,
         *([] if jvm else [IPV4]),
         "--scrub-log",
+        *(["--config", str(config_dir)] if config_dir is not None else []),
+        *TRUST_NEW_IDENTITIES,
         "-a",
         bot_number,
         "jsonRpc",
@@ -68,13 +110,15 @@ def signal_cli_command(signal_cli: str, bot_number: str, *, jvm: bool = False) -
     ]
 
 
-def call_env(*, java_home: Path | None, tunnel: Path, socket_dir: Path) -> dict[str, str]:
+def call_env(*, java_home: Path | None, tunnel: Path, socket_dir: Path, home: Path | None = None) -> dict[str, str]:
     """What the JVM signal-cli and the call helper it starts per call need, on top of the bridge's environment:
     Java (none given: the launcher looks for `java` itself), IPv4, our signal-call-tunnel build in pipe mode
-    (audio over a Unix socket in a private folder)."""
+    (audio over a Unix socket in a private folder). `home` becomes Java's user.home (JAVA_OPTS splits on spaces:
+    a home with a space stays out; signal-cli's data folder is given with --config anyway)."""
+    user_home = f" -Duser.home={home}" if home is not None and not any(c.isspace() for c in str(home)) else ""
     return {
         **({"JAVA_HOME": str(java_home)} if java_home is not None else {}),
-        "JAVA_OPTS": IPV4,
+        "JAVA_OPTS": IPV4 + user_home,
         "SIGNAL_CALL_TUNNEL_BIN": str(tunnel),
         "SIGNAL_CALL_TUNNEL_AUDIO_MODE": "pipe",
         "SIGNAL_CALL_TUNNEL_SOCKET_DIR": str(socket_dir),
@@ -110,6 +154,7 @@ class SignalClient:
         self._stable_after = stable_after
         self._envelopes: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._call_events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._problems: asyncio.Queue[ReceiveProblem] = asyncio.Queue()
         self._pending: dict[str, asyncio.Future[Any]] = {}
         self._next_id = 0
         self._proc: asyncio.subprocess.Process | None = None
@@ -138,6 +183,24 @@ class SignalClient:
     async def envelopes(self) -> AsyncIterator[dict[str, Any]]:
         while True:
             yield await self._envelopes.get()
+
+    async def problems(self) -> AsyncIterator[ReceiveProblem]:
+        """Messages signal-cli received but could not open (a changed safety number, ...): never dropped silently."""
+        while True:
+            yield await self._problems.get()
+
+    async def list_devices(self) -> tuple[LinkedDevice, ...]:
+        """The bot account's own devices (this Mac is 1), through the running signal-cli: ids and creation times."""
+        result = await self.request("listDevices", {})
+        devices: list[LinkedDevice] = []
+        for item in result if isinstance(result, list) else []:
+            number = device_number(item.get("id")) if isinstance(item, dict) else None
+            if number is None:
+                continue
+            created = item.get("createdTimestamp")
+            created = created if isinstance(created, int) and not isinstance(created, bool) else None
+            devices.append(LinkedDevice(number, created))
+        return tuple(devices)
 
     async def call_events(self) -> AsyncIterator[dict[str, Any]]:
         """signal-cli's callEvent results (callId, state, uuid, …), plus RESTART_ENDS_CALLS after each restart."""
@@ -342,6 +405,9 @@ class SignalClient:
             params = obj.get("params")
             container = params.get("result", params) if isinstance(params, dict) else None
             envelope = container.get("envelope") if isinstance(container, dict) else None
+            exception = container.get("exception") if isinstance(container, dict) else None
+            if isinstance(exception, dict):
+                self._problems.put_nowait(_problem(exception, envelope if isinstance(envelope, dict) else {}))
             if isinstance(envelope, dict):
                 self._envelopes.put_nowait(envelope)
 
@@ -361,3 +427,15 @@ class SignalClient:
         except TimeoutError:
             proc.kill()
             await proc.wait()
+
+
+def _problem(exception: Mapping[str, Any], envelope: Mapping[str, Any]) -> ReceiveProblem:
+    """signal-cli 0.14.9's receive exception ({"message", "type"}) and its envelope, as a ReceiveProblem."""
+    kind = exception.get("type")
+    word = _PLAIN_WORD.sub("", kind)[:60] if isinstance(kind, str) else ""
+    sender = envelope.get("sourceUuid")
+    return ReceiveProblem(
+        word or "unknown",
+        sender.lower() if isinstance(sender, str) and sender else None,
+        device_number(envelope.get("sourceDevice")),
+    )

@@ -37,6 +37,24 @@ def amsterdam_time(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest
     monkeypatch.setattr(config, "LOCALTIME", link)
 
 
+@pytest.fixture(autouse=True)
+def no_live_system(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests never read the owner's Mac: system paths (/Library/LaunchDaemons, /usr/local/estia, /var/estia) resolve
+    under an empty root of their own (ESTIA_ROOT), and the live voice service is never asked. A test that needs "/"
+    says so (monkeypatch.delenv("ESTIA_ROOT")) and reads nothing there."""
+    from local_assistant import ownuser
+
+    monkeypatch.setenv("ESTIA_ROOT", str(tmp_path_factory.mktemp("estia-root")))
+    real = ownuser.voice_health
+
+    def voice_health(live: bool) -> object:
+        if live:
+            raise AssertionError("a test asked the live voice service (127.0.0.1:8150)")
+        return real(live)
+
+    monkeypatch.setattr(ownuser, "voice_health", voice_health)
+
+
 @pytest.fixture
 def store(tmp_path: Path) -> Iterator[Store]:
     db = Store.open(tmp_path / "data" / "assistant.db")

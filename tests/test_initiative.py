@@ -4,6 +4,7 @@
 import asyncio
 import json
 import random
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
 from typing import Any
@@ -11,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from local_assistant import initiative as initiative_module
 from local_assistant import prompts
 from local_assistant.config import Config, parse_config, quiet_hours_of
 from local_assistant.gemma import Completion, GemmaUnavailableError
@@ -20,6 +22,7 @@ from local_assistant.initiative import (
     ENABLED_KEY,
     LOOKBACK_KEY,
     PLAN_KEY,
+    REASONS,
     Initiative,
     Settings,
     Writer,
@@ -29,6 +32,7 @@ from local_assistant.initiative import (
     main,
     season,
 )
+from local_assistant.language import SECRET_WORDS
 from local_assistant.store import Store
 from tests.conftest import ME, STRANGER
 from tests.fakes.fake_gemma import FakeGemma, text
@@ -137,10 +141,12 @@ def make(
     settings: Settings | None = None,
     acis: frozenset[str] = frozenset({ME}),
     busy: bool = False,
+    practising: bool = False,
     calendar: FakeCalendar | None = None,
     ok: bool = True,
     announced: bool = True,
     seed: int = 7,
+    locked: Callable[[], bool] = lambda: False,
 ) -> tuple[Initiative, Sender, Clock]:
     clock = clock or Clock()
     if announced:
@@ -156,6 +162,8 @@ def make(
         tz=TZ,
         acis=acis,
         busy=lambda: busy,
+        practising=lambda: practising,
+        locked=locked,
         calendar=calendar,
         clock=clock,
         rng=random.Random(seed),
@@ -256,6 +264,137 @@ def test_an_improvised_note_is_written_unless_nothing_at_all_fits() -> None:
     assert "something small and natural to say: write it" in rules and "only when nothing at all fits" in rules
     assert "at most 2 sentences and at most one question" in rules
     assert list(prompts.IMPROVISE_SCHEMA["properties"]) == ["skip", "text"]  # text last: no endless spaces after it
+
+
+@pytest.mark.parametrize(
+    "words",
+    [
+        "Look at evil.ch/x when you can",
+        "Try evil.ch tonight",
+        "Open t.co/abc123 later",
+        "It is all on example.travel now",
+        "Go to evil.ch.",
+        "Have a look at sub.domain.example.museum",
+        "Посмотри пример.рф вечером",
+        "Probeer xn--bcher-kva.example eens",
+        "Kijk even op EVIL.CH/Login",
+        "Wait...evil.ch is down",
+        "Hmm...evil.ch/x",
+        "ok..evil.ch",
+        "Read _evil.ch_ later",
+        "Read __evil.ch__ later",
+        "Read evil.ch_ later",
+        "Look at evil。ch/x",
+        "Look at evil．ch",
+        "Look at evil｡ch",
+    ],
+)
+def test_a_bare_domain_on_any_ending_is_a_link(words: str) -> None:
+    """No list of endings: a name with a dot and an ending of two letters or more is a link (and is not sent)."""
+    assert check_text(words, limit=200) == "link"
+
+
+@pytest.mark.parametrize(
+    "words",
+    [
+        "Something light, e.g. a walk by the water?",
+        "The usual plan, i.e. pasta and a film?",
+        "Up at 7 a.m. again tomorrow?",
+        "Home by 5 p.m. tonight?",
+        "Did the 3.5 km run go well?",
+        "See you at 10.30 then?",
+        "Did the U.S. trip come together?",
+        "Kupiłeś m.in. chleb na jutro?",
+        "¿Compraste p.ej. pan para mañana?",
+        "Já pensaste em algo leve, p.ex. um passeio?",
+        "Zin in iets kleins, o.a. de fiets nakijken?",
+        "Lust auf etwas Kleines, z.B. eine Radtour?",
+        "Значит, т.е. завтра снова в парк?",
+        "How did the Ph.D. defence go?",
+        "Hoping the move went well... any news?",
+    ],
+)
+def test_abbreviations_decimals_and_times_are_no_links(words: str) -> None:
+    assert check_text(words, limit=200) == ""
+
+
+@pytest.mark.parametrize(
+    "words",
+    [
+        "¿Me mandas tu contraseña?",
+        "¿Me dices el código de verificación?",
+        "Mi dici il codice di verifica?",
+        "Mi mandi la password della banca?",
+        "비밀번호를 알려 줄래요?",
+        "인증번호 좀 보내 줄래요?",
+        "Pode me mandar a sua senha?",
+        "Pode enviar o código de verificação?",
+        "Stuur je me je wachtwoord?",
+        "Wat is de verificatiecode die je kreeg?",
+        "Podasz mi swoje hasło?",
+        "Nie pamiętasz hasła do banku?",
+        "Przyszedł już kod weryfikacyjny?",
+        "Schickst du mir dein Passwort?",
+        "Hast du den Bestätigungscode bekommen?",
+        "パスワードを教えてくれる？",
+        "認証コードは届いた？",
+        "Пришлёшь мне свой пароль?",
+        "Какой код подтверждения пришёл?",
+        "Tu peux m'envoyer ton mot de passe ?",
+        "Tu as reçu le code de vérification ?",
+    ],
+)
+def test_a_text_asking_for_a_code_or_a_password_is_refused_in_each_language(words: str) -> None:
+    assert check_text(words, limit=200) == "secret"
+
+
+@pytest.mark.parametrize(
+    "words",
+    [
+        "¿Qué tal la clase de hoy?",
+        "Com'è andata la passeggiata?",
+        "산책은 어땠어요?",
+        "Como foi o passeio?",
+        "Hoe was de pindakaas van de markt?",
+        "Jak było na spacerze?",
+        "Wie war der Kuchen bei Oma?",
+        "散歩はどうだった？",
+        "Как прошла пробежка?",
+        "Comment s'est passée la promenade ?",
+        "Did the pine tree survive the storm?",
+        "Wie war der Passweg über die Alpen?",
+        "Hast du die Passwand gesehen?",
+        "Sind die Kennwerte vom Auto gut?",
+        "Passt die Kennweite der Leitung?",
+        "Did you get a tan at the beach?",
+    ],
+)
+def test_everyday_words_in_each_language_are_no_secret(words: str) -> None:
+    assert check_text(words, limit=200) == ""
+
+
+@pytest.mark.parametrize(("code", "word"), [(code, word) for code, words in SECRET_WORDS.items() for word in words])
+def test_every_listed_secret_word_is_found(code: str, word: str) -> None:
+    """Each entry as written, its "*" endings left empty: a "*" inside a several-word entry is an ending too."""
+    assert check_text(word.replace("*", ""), limit=200) == "secret", code
+
+
+@pytest.mark.parametrize(
+    "words",
+    [
+        "Какой у тебя одноразовый код?",
+        "Пришлёшь проверочный код?",
+        "Где твои учётные данные?",
+        "Пришлёшь банковские данные?",
+        "Какая у тебя кредитная карта?",
+        "Schickst du mir die TAN-Nummer?",
+        "Kam die pushTAN schon?",
+        "Hast du die mTAN?",
+        "Send me the code from the SMS?",
+    ],
+)
+def test_more_asks_for_a_code_are_refused(words: str) -> None:
+    assert check_text(words, limit=200) == "secret"
 
 
 def test_the_users_own_mail_or_calendar_words_may_come_back() -> None:
@@ -570,6 +709,24 @@ async def test_a_look_back_not_sent_by_nine_is_skipped_that_week(store: Store) -
     clock.now += 60
     await initiative.tick()
     assert sender.sent == [] and outcomes(store) == [("lookback", "skipped", "busy")]
+
+
+async def test_nothing_of_hers_goes_out_during_language_practice(store: Store) -> None:
+    # an English check-in in the middle of a Dutch roleplay would be answered as practice: it waits, like busy
+    week_of_messages(store)
+    clock = Clock(at("2026-10-18 19:00"))
+    gemma = FakeGemma()
+    initiative, sender, _ = make(
+        store, gemma, clock=clock, settings=Settings(enabled=True, improvise=False), practising=True
+    )
+    await initiative.tick()
+    clock.now = at("2026-10-18 21:00")
+    await initiative.tick()
+    clock.now += 60
+    await initiative.tick()
+    assert sender.sent == [] and gemma.calls == []
+    assert outcomes(store) == [("lookback", "skipped", "practice")]
+    assert "practice" in initiative_module.REASONS and "practice" in initiative_module.WAITS
 
 
 async def test_a_look_back_that_fails_its_check_is_not_sent(store: Store) -> None:
@@ -905,3 +1062,81 @@ def test_the_draft_command_needs_a_config_and_a_database(
     config.chmod(0o600)
     assert main(["--draft", "lookback", "--config", str(config)]) == 1
     assert "has the bridge run yet?" in capsys.readouterr().err
+
+
+def test_the_draft_never_goes_to_a_cloud_model(
+    tmp_path: Any, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The model always runs on the Mac: an alias Ollama marks as a cloud model gets no draft request either."""
+    from local_assistant import initiative as initiative_module
+    from local_assistant.config import load_config
+    from local_assistant.gemma import ModelEntry
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    config = tmp_path / "config.toml"
+    config.write_text(f'bot_number = "+306900000000"\nallowed_acis = ["{ME}"]\n')
+    config.chmod(0o600)
+    Store.open(load_config(config).db_path).close()
+    chats: list[object] = []
+
+    class CloudAlias:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def model_entry(self) -> ModelEntry:
+            return ModelEntry("ab" * 32, remote=True)
+
+        async def chat(self, *args: object, **kwargs: object) -> object:
+            chats.append(args)
+            raise AssertionError("no request may reach a cloud model")
+
+        async def status(self) -> str:
+            return "loaded"
+
+    monkeypatch.setattr(initiative_module, "OllamaGemma", CloudAlias)
+    assert main(["--draft", "improvise", "--config", str(config)]) == 1
+    assert chats == [] and "cloud model" in capsys.readouterr().err
+
+
+# the lock (/lock): nothing is started; a check-in waits like under /quiet, and a skip says "locked"
+
+
+async def test_nothing_is_started_while_locked(store: Store) -> None:
+    locked = [True]
+    gemma = FakeGemma(written("Did you call?"))
+    calendar = FakeCalendar()
+    initiative, sender, clock = make(store, gemma, locked=lambda: locked[0], calendar=calendar)
+    checkin = followup(store, expires=NOW + 7200)
+    await initiative.tick()
+    assert sender.sent == [] and gemma.calls == []  # Gemma is not even asked
+    assert calendar.forgotten == 1 and calendar.checks == 0  # no calendar read while locked
+    locked[0] = False
+    clock.now += 60
+    await initiative.tick()
+    assert len(sender.sent) == 1 and store.followup(checkin).status == "sent"  # type: ignore[union-attr]
+
+
+async def test_a_check_in_that_expires_while_locked_is_skipped_as_locked(store: Store) -> None:
+    initiative, sender, clock = make(store, locked=lambda: True)
+    checkin = followup(store, expires=NOW + 3600)
+    await initiative.tick()
+    clock.now += 3600
+    await initiative.tick()
+    assert sender.sent == [] and store.followup(checkin).status == "expired"  # type: ignore[union-attr]
+    assert outcomes(store) == [("followup", "skipped", "locked")]
+    assert "locked" in REASONS
+
+
+async def test_the_look_back_leaves_practice_turns_out(store: Store) -> None:
+    week_of_messages(store)
+    practice = store.start_practice_conversation()
+    roleplay = said(store, "Ik ben de koning van het restaurant.", at("2026-10-14 10:00"))
+    store.assign_seq(roleplay, practice.id)
+    gemma = FakeGemma(lookback_answer(["You fixed the bike.", "Dinner came up.", "A busy Monday."], "And next week?"))
+    initiative, sender, _ = make(
+        store, gemma, clock=Clock(at("2026-10-18 19:00")), settings=Settings(enabled=True, improvise=False)
+    )
+    await initiative.tick()
+    assert len(sender.sent) == 1
+    content = gemma.calls[0]["messages"][1]["content"]
+    assert "note 0: fixed the bike" in content and "koning" not in content

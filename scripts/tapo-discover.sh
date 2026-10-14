@@ -4,6 +4,8 @@
 # and Tapo devices need the TP-Link login (Tapo is untested). Save it first with scripts/set-tapo-credentials.sh.
 # A fixed address per device (DHCP reservation in the router) is recommended.
 set -euo pipefail
+source "$(dirname "$0")/own-user.sh"  # moved, and her commands' fixed paths ($estia, $estia_deploy)
+if moved && [[ "$(id -un)" != _estia ]]; then exec "$sudo" "$estia" tapo-discover; fi  # her TP-Link login is hers
 tapo="$(cd "$(dirname "$0")/../tools/tapo" && pwd)"
 cd "$tapo"
 [[ -x .venv/bin/python ]] || uv sync --frozen -q

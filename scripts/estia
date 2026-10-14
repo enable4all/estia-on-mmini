@@ -1,0 +1,128 @@
+#!/bin/bash
+# Her owner commands, installed root-owned as /usr/local/estia/bin/estia. Run them with sudo, by that full path:
+#   sudo /usr/local/estia/bin/estia doctor                          the read-only check (exit 1 on ✗)
+#   sudo /usr/local/estia/bin/estia logs [bridge|voice|launchd] [-n N]
+#   sudo /usr/local/estia/bin/estia check                           the service, signal-cli, the last messages
+#   sudo /usr/local/estia/bin/estia restart                         the bridge, after a change to her config
+#   sudo /usr/local/estia/bin/estia mail-login <address> [--mail-only]
+#   sudo /usr/local/estia/bin/estia spotify-login
+#   sudo /usr/local/estia/bin/estia secret set <file> <KEY>         the value from a hidden prompt or stdin, never argv
+#   sudo /usr/local/estia/bin/estia tapo-discover
+#   sudo /usr/local/estia/bin/estia signal listIdentities|trust|listDevices|removeDevice [options]
+#                                                                   her signal-cli, the bridge stopped meanwhile
+#   sudo /usr/local/estia/bin/estia unlock                          ends /lock from the Mac (the bridge restarts)
+#   sudo /usr/local/estia/bin/estia rollback                        back to your user, within 7 days of the move
+#   sudo /usr/local/estia/bin/estia remove-old                      delete her old folders held since the move
+#   sudo /usr/local/estia/bin/estia account                         her account again: no shell, hidden, no password
+# Each runs as her own user _estia (env -i, a PATH of root-owned folders, the release's Python in isolated mode),
+# except launchctl and the last three, which run as root from the root-owned tools, never from a release.
+# A value typed on a command line lands in sudo's log: if that happened, change the key.
+# --dry-run (first) prints the command instead of running it, and needs no root.
+set -euo pipefail
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+cd /  # her user cannot enter your folders
+dry=""
+if [[ "${1:-}" == --dry-run ]]; then dry=1; shift; fi
+root=""
+if [[ $EUID -ne 0 ]]; then root="${ESTIA_ROOT:-}"; root="${root%/}"; fi  # root never takes its targets from the env
+code="$root/usr/local/estia/current"
+tools="$root/usr/local/estia/tools"
+python="$code/.venv/bin/python"
+user=_estia
+home=/var/estia
+bridge=com.local-assistant.bridge
+plist="$root/Library/LaunchDaemons/$bridge.plist"
+as_her=(/usr/bin/sudo -u "$user" -H -- /usr/bin/env -i "HOME=$home" "PATH=/usr/local/estia/current/.venv/bin:/usr/bin:/bin:/usr/sbin:/sbin" LANG=en_US.UTF-8)
+as_root=("$tools/python3" -I -c 'import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); runpy.run_module(sys.argv.pop(1), run_name="__main__", alter_sys=True)' "$tools/src")
+
+usage() { sed -n '2,17p' "$0" | sed -E 's/^# ?//' >&2; exit 2; }
+show() { printf 'would run:'; printf ' %s' "$@"; printf '\n'; }
+run() {
+  if [[ -n "$dry" ]]; then show "${as_her[@]}" "$@"; exit 0; fi
+  exec "${as_her[@]}" "$@"
+}
+moved() { [[ "$(/usr/libexec/PlistBuddy -c 'Print :UserName' "$plist" 2>/dev/null)" == "$user" ]]; }
+# the bridge stopped while her signal-cli runs by hand (one signal-cli per account), and always started again
+stopped() {
+  if [[ -n "$dry" ]]; then
+    show /bin/launchctl bootout "system/$bridge"; show "${as_her[@]}" "$@"; show /bin/launchctl bootstrap system "/Library/LaunchDaemons/$bridge.plist"
+    exit 0
+  fi
+  /bin/launchctl bootout "system/$bridge" 2>/dev/null || true
+  for _ in $(seq 1 50); do /bin/launchctl print "system/$bridge" >/dev/null 2>&1 || break; sleep 0.2; done
+  trap '/bin/launchctl bootstrap system "/Library/LaunchDaemons/$bridge.plist" || true; echo "she runs again" >&2' EXIT
+  "${as_her[@]}" "$@"
+}
+
+[[ -n "$dry" || $EUID -eq 0 ]] || { echo "run it with sudo: /usr/bin/sudo /usr/local/estia/bin/estia ${1:-doctor}" >&2; exit 2; }
+command="${1:-}"
+[[ $# -eq 0 ]] || shift
+case "$command" in
+  rollback|remove-old)
+    [[ $# -eq 0 ]] || usage
+    if [[ -n "$dry" ]]; then show "${as_root[@]}" local_assistant.ownuser migrate "--$command"; exit 0; fi
+    exec "${as_root[@]}" local_assistant.ownuser migrate "--$command" ;;
+esac
+[[ -n "$dry" || -x "$python" ]] || { echo "no release in /usr/local/estia yet: scripts/migrate-to-own-user.sh makes the first" >&2; exit 1; }
+if [[ -z "$dry" ]] && ! moved; then
+  echo "she runs as your user (the move was rolled back, or not made): use the scripts in your checkout" >&2
+  exit 1
+fi
+case "$command" in
+  doctor)
+    [[ $# -eq 0 ]] || usage
+    run "$python" -I -m local_assistant.doctor ;;
+  check)
+    [[ $# -eq 0 ]] || usage
+    run /bin/bash "$code/scripts/check.sh" ;;
+  account)  # as root from the tools: fixed dscl commands, never her code
+    [[ $# -eq 0 ]] || usage
+    if [[ -n "$dry" ]]; then show "${as_root[@]}" local_assistant.ownuser account; exit 0; fi
+    exec "${as_root[@]}" local_assistant.ownuser account ;;
+  restart)
+    [[ $# -eq 0 ]] || usage
+    if [[ -n "$dry" ]]; then show /bin/launchctl kickstart -k "system/$bridge"; exit 0; fi
+    exec /bin/launchctl kickstart -k "system/$bridge" ;;
+  logs)
+    which=bridge
+    lines=50
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        bridge|voice|launchd) which="$1"; shift ;;
+        -n) [[ "${2:-}" =~ ^[0-9]{1,5}$ ]] || usage; lines="$2"; shift 2 ;;
+        *) usage ;;
+      esac
+    done
+    run /usr/bin/tail -n "$lines" "$home/Library/Logs/local-assistant/$which.log" ;;
+  mail-login)
+    if [[ $# -eq 1 || ( $# -eq 2 && "${2:-}" == --mail-only ) ]]; then
+      run "$code/.venv/bin/local-assistant" --mail-login "$@"
+    fi
+    usage ;;
+  spotify-login)
+    [[ $# -eq 0 ]] || usage
+    run "$code/.venv/bin/local-assistant" --spotify-login ;;
+  secret)
+    if [[ $# -gt 3 ]]; then
+      echo "the value goes through stdin or the hidden prompt, never the command line (sudo logs it there: change that key); nothing saved" >&2
+      exit 2
+    fi
+    [[ "${1:-}" == set && $# -eq 3 ]] || usage
+    if [[ -t 0 && -z "$dry" ]]; then  # her user cannot open your terminal: the hidden prompt is asked here
+      IFS= read -rs -p "$3 (hidden, then Enter): " value
+      echo >&2
+      printf '%s\n' "$value" | "${as_her[@]}" "$python" -I -m local_assistant.secretfile set "$2" "$3"
+      exit 0
+    fi
+    run "$python" -I -m local_assistant.secretfile set "$2" "$3" ;;
+  tapo-discover)
+    [[ $# -eq 0 ]] || usage
+    run /bin/bash "$code/scripts/tapo-discover.sh" ;;
+  signal)
+    case "${1:-}" in listIdentities|trust|listDevices|removeDevice) ;; *) usage ;; esac
+    stopped "$python" -I -m local_assistant.admin signal "$@" ;;
+  unlock)
+    [[ $# -eq 0 ]] || usage
+    stopped "$python" -I -m local_assistant.admin unlock ;;
+  *) usage ;;
+esac

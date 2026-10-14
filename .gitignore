@@ -21,16 +21,19 @@ OWNER-CONFIG-ADDITIONS.toml
 .DS_Store
 dist/
 *.egg-info/
-# internal working files and local tool state
+# local tool state
 .superpowers/
-docs/superpowers/
-todo.md
+# vendor builds for her release (JVM signal-cli, the call helper): estia-deploy copies them from here
+/vendor/
 # Swift voice service build output (tools/voice)
 .build/
 .swiftpm/
-docs/build-notes-*
-docs/e2e-results-*
 
 # brand sources: the font and renders stay local
 docs/brand/source/fonts/
 docs/brand/source/out/
+# internal working files (kept out of the public repo)
+docs/superpowers/
+todo.md
+docs/build-notes-*
+docs/e2e-results-*

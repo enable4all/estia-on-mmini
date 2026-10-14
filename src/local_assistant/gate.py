@@ -7,11 +7,14 @@ not be used (strangers', unsupported types) are listed for deletion at once.
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
+
+from local_assistant.signal_io import device_number
 
 
 class Kind(StrEnum):
@@ -41,6 +44,7 @@ class Decision:
     photos: tuple[AttachmentRef, ...] = ()
     audio: tuple[AttachmentRef, ...] = ()  # one voice note; its bytes decide (voice.sniff)
     discard: tuple[AttachmentRef, ...] = ()  # files to delete at once
+    device: int | None = None  # the sender's device that sent it (1: their phone, 2 and up: linked); None: not named
 
 
 IMAGE_TYPES = frozenset({"image/jpeg", "image/png", "image/heic", "image/heif", "image/webp", "image/gif"})
@@ -102,7 +106,17 @@ def attachments(data: Mapping[str, Any]) -> tuple[AttachmentRef, ...]:
     return tuple(refs)
 
 
+def source_device(envelope: Mapping[str, Any]) -> int | None:
+    """The sender's device that sent the envelope (signal-cli's sourceDevice), or None when it names none."""
+    return device_number(envelope.get("sourceDevice"))
+
+
 def classify(envelope: Mapping[str, Any], allowed: frozenset[str]) -> Decision:
+    """What to do with the envelope, and which of the sender's devices sent it."""
+    return dataclasses.replace(_classify(envelope, allowed), device=source_device(envelope))
+
+
+def _classify(envelope: Mapping[str, Any], allowed: frozenset[str]) -> Decision:
     aci = sender_aci(envelope)
     data = envelope.get("dataMessage")
     if aci is None or aci not in allowed:

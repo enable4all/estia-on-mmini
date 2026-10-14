@@ -4,4 +4,6 @@
 # Works while the bridge is running; the sign-in lasts 6 months (she reminds you before it ends).
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source "$(dirname "$0")/own-user.sh"  # moved, and her commands' fixed paths ($estia, $estia_deploy)
+if moved; then exec "$sudo" "$estia" spotify-login; fi  # the sign-in is saved in her data, as her
 exec uv run --quiet local-assistant --spotify-login

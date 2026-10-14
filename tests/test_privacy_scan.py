@@ -26,6 +26,7 @@ def clean_env(home: Path) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_") and k != "XDG_CONFIG_HOME"}
     env["HOME"] = str(home)
     env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["ESTIA_ROOT"] = str(home / "no-system")  # never the Mac's own /var/estia
     return env
 
 
@@ -553,3 +554,14 @@ def test_this_repo_passes_its_own_scan_with_a_realistic_owner_config(tmp_path: P
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_a_note_says_when_her_own_user_holds_the_config(repo: Repo, tmp_path: Path) -> None:
+    """After the move into her own user your copy is gone: the owner-value rule is skipped, and the scan says so."""
+    repo.add("notes.txt", "fine\n")
+    assert repo.scan().stderr == ""  # no own user: silent, as before
+    (tmp_path / "root" / "var" / "estia").mkdir(parents=True)
+    repo.env["ESTIA_ROOT"] = str(tmp_path / "root")
+    result = repo.scan()
+    assert result.returncode == 0
+    assert "your own config values were not checked" in result.stderr and "--config" in result.stderr

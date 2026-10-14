@@ -67,6 +67,23 @@ def test_a_folder_that_cannot_be_made_is_not_an_error(tmp_path: Path) -> None:
     assert status.snapshot()["web"].reason == "busy"
 
 
+def test_a_cloud_model_is_kept_from_its_first_time_and_named_in_status(tmp_path: Path) -> None:
+    """Answers paused because the model runs on Ollama's servers: its own fact and its own /status line."""
+    path = tmp_path / "data" / "status.json"
+    clock = Clock()
+    status = PartStatus(path, clock=clock)
+    status.model_cloud(True)
+    clock.now += 60
+    status.model_cloud(True)
+    found = part_status.read_security(path)
+    assert found.model_cloud == NOW and found.model_paused is None
+    (line,) = part_status.security_lines(found, NOW, TZ, model="local-worker")
+    assert line.state == "failing" and line.text.startswith("✗ answers paused since 11:40")
+    assert "cloud model" in line.text and "Ollama's servers" in line.text and "create local-worker" in line.fix
+    status.model_cloud(False)
+    assert part_status.read_security(path).model_cloud is None
+
+
 @pytest.mark.parametrize(
     "content",
     [
@@ -291,3 +308,85 @@ def test_lines_cover_each_calendar_in_the_configs_order() -> None:
     found = lines(cfg, {"calendar:work": Record(failed=NOW, reason="no_consent")}, NOW)
     assert [line.label for line in found] == ["Mail (office)", "Calendar (family)", "Calendar (work)"]
     assert "<address of office>" in found[2].fix
+
+
+# hardening: the safety number, her Signal account's devices and the model's pin (numbers and times only)
+
+
+def security_file(path: Path) -> dict[str, Any]:
+    section: dict[str, Any] = json.loads(path.read_text()).get("security", {})
+    return section
+
+
+def test_a_changed_safety_number_is_kept_as_a_time_only(tmp_path: Path) -> None:
+    path = tmp_path / "data" / "status.json"
+    clock = Clock()
+    status = PartStatus(path, clock=clock)
+    status.ok("voice")
+    status.identity_changed()
+    assert security_file(path) == {"identity_changed": NOW}
+    assert saved(path) == {"voice": {"ok": NOW}}  # the parts stay
+    assert ME not in path.read_text()
+    clock.now += 600
+    status.identity_changed()  # the same problem again: its first time stays
+    assert part_status.read_security(path).identity_changed == NOW
+    status.identity_ok()  # a message from the user opened fine again
+    assert security_file(path) == {} and part_status.read_security(path).identity_changed is None
+    status.ok("web")
+    assert saved(path) == {"voice": {"ok": NOW}, "web": {"ok": NOW + 600}}
+
+
+def test_the_linked_devices_count_is_kept_with_when_it_was_checked(tmp_path: Path) -> None:
+    path = tmp_path / "data" / "status.json"
+    clock = Clock()
+    status = PartStatus(path, clock=clock)
+    status.linked_devices(1)
+    assert security_file(path) == {"linked_devices": 1, "devices_checked": NOW}
+    clock.now += 3 * 3600
+    status.linked_devices(2)
+    found = part_status.read_security(path)
+    assert (found.linked_devices, found.devices_checked) == (2, NOW + 3 * 3600)
+    again = PartStatus(path, clock=clock)  # a restart keeps what was known
+    again.model_paused(True)
+    assert part_status.read_security(path).linked_devices == 2
+
+
+def test_the_model_pause_is_kept_from_its_first_time_until_it_ends(tmp_path: Path) -> None:
+    path = tmp_path / "data" / "status.json"
+    clock = Clock()
+    status = PartStatus(path, clock=clock)
+    status.model_paused(True)
+    clock.now += 60
+    status.model_paused(True)
+    assert part_status.read_security(path).model_paused == NOW
+    status.model_paused(False)
+    assert part_status.read_security(path).model_paused is None
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        {"security": {"identity_changed": "x", "linked_devices": True, "model_paused": [1]}},
+        {"security": {"linked_devices": -1, "devices_checked": "now"}},
+        {"security": "odd"},
+        {},
+    ],
+)
+def test_an_odd_security_section_means_nothing_known(tmp_path: Path, content: dict[str, Any]) -> None:
+    path = tmp_path / "status.json"
+    path.write_text(json.dumps(content))
+    assert part_status.read_security(path) == part_status.Security()
+
+
+def test_security_lines_say_what_is_wrong_and_the_next_step() -> None:
+    assert part_status.security_lines(part_status.Security(), NOW, TZ, model="local-worker") == []
+    fine = part_status.Security(linked_devices=1, devices_checked=NOW)
+    (line,) = part_status.security_lines(fine, NOW, TZ, model="local-worker")
+    assert line.state == "working" and line.line() == "Her Signal account: 1 device: this Mac (checked 11:40)"
+    bad = part_status.Security(identity_changed=NOW, linked_devices=3, devices_checked=NOW, model_paused=NOW)
+    safety, account, model = part_status.security_lines(bad, NOW, TZ, model="local-worker")
+    assert all(item.state == "failing" for item in (safety, account, model))
+    assert safety.label == "Safety number" and safety.text.startswith("✗ changed 11:40")
+    assert '7. Operations, "Safety number changed"' in safety.fix and "compare" in safety.fix
+    assert account.text.startswith("✗ 3 devices") and "removeDevice" in account.fix
+    assert model.text.startswith("✗ answers paused since 11:40") and "local-worker" in model.text
