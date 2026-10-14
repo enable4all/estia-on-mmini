@@ -29,6 +29,7 @@ from local_assistant.projects import ProjectError, Projects
 from local_assistant.reminders import ReminderError, Reminders, nearest_year, own_words
 from local_assistant.store import Message, SourceKind, Store
 from local_assistant.timefmt import local_date, local_stamp
+from local_assistant.video import Kept, VideoError, VideoReader, first_link, link_in, video_id
 from local_assistant.web_search import Searcher, WebResults, WebSearchError
 
 log = logging.getLogger(__name__)
@@ -45,6 +46,7 @@ LEARN_NEXT_STEP = (
 Consolidate = Callable[[str, int | None, SourceKind, int | None], Awaitable[ApplyResult]]
 LearnPage = Callable[[Page, int | None, int], Awaitable[ApplyResult]]  # page, source message, document id
 StatusReport = Callable[[], Awaitable[str]]
+ToolNote = Callable[[Message, str], Awaitable[None]]  # code's note to the user during an answer (a long video)
 
 
 def _home_relative(path: Path) -> str:
@@ -398,6 +400,11 @@ class Turn:
     # a project tool ran (private files, perhaps a planted line): nothing goes to a search engine or Google Maps
     read_project: bool = False
     links: list[tuple[str, str]] = field(default_factory=list)  # map links for the Sources note
+    # links the user sent that stay tappable in her answer (a kept video's link, from an earlier message)
+    allowed_links: list[str] = field(default_factory=list)
+    # YouTube videos read in this answer, by ID: a second read_link of one reads nothing again (no part calls, no
+    # note); their captions are what code checks her answer against (brain: never written out)
+    videos_read: dict[str, Kept] = field(default_factory=dict)
     used_web: bool = False  # web text is data: nothing is saved to or removed from the profile in this answer
     web: list[WebResults] = field(default_factory=list)  # results Gemma saw, for the code-written Sources note
     # read outside text (mail, calendar, a page, a project file): device changes in this answer wait for a yes
@@ -443,6 +450,7 @@ class Tools:
         web_timeout: float = 25.0,
         maps: Mapper | None = None,
         reminders: Reminders | None = None,
+        videos: VideoReader | None = None,
         base_schemas: list[dict[str, Any]] | None = None,
         project_schemas: list[dict[str, Any]] | None = None,
         name: str = DEFAULT_NAME,
@@ -464,6 +472,8 @@ class Tools:
         self._web_timeout = web_timeout
         self._maps = maps
         self._reminders = reminders
+        self._videos = videos  # YouTube links: their captions (always on in the app)
+        self._notify: ToolNote | None = None
         self._profile = profile
         self._tz = tz
         self._fetch = fetch
@@ -499,6 +509,23 @@ class Tools:
     def set_learn_page(self, learn_page: LearnPage) -> None:
         self._learn_page = learn_page
 
+    def video_hint(self, message: Message) -> str:
+        """Code's lines for her prompt: while this account's last video is kept in this conversation, its link and the
+        minutes left (read_link reads it again); then, when the user's current message holds a YouTube link, that link
+        (read_link reads its captions; for the full transcript she gives the link). "" otherwise, so a request without
+        either stays as it was, and always on a call."""
+        if self._videos is None or message.text.startswith(prompts.CALL_MARK):
+            return ""
+        found = self._videos.last(message.peer_aci, message.conversation_id)
+        kept = prompts.VIDEO_KEPT.format(link=found[0].link, minutes=found[1]) if found is not None else ""
+        link = first_link(message.text)
+        here = prompts.VIDEO_IN_MESSAGE.format(link=link) if link is not None else ""
+        return "\n\n".join(line for line in (kept, here) if line)
+
+    def set_notify(self, notify: ToolNote) -> None:
+        """How code's note reaches the user during an answer (before a long video is read)."""
+        self._notify = notify
+
     async def call(self, turn: Turn, name: str, arguments: str) -> str:
         """Run one tool call. Bad input becomes an 'Error: ...' result for Gemma, never an exception."""
         started = time.monotonic()
@@ -525,6 +552,8 @@ class Tools:
             kept = f"({name} result not kept: Spotify content is never stored)"
         elif name == "web_search" and result.startswith("Web results"):  # Brave's terms: used for this answer only
             kept = f"({name} result not kept: web results are never stored)"
+        elif name == "read_link" and result.startswith(prompts.VIDEO_MARK):  # captions are never stored
+            kept = prompts.VIDEO_STUB
         elif name in ("places_search", "route") and result.startswith(("Places for", "Route by")):
             kept = f"({name} result not kept: Google Maps content is not stored)"  # Google's terms
         else:
@@ -970,6 +999,9 @@ class Tools:
             return f"Could not read the link: {exc}"
 
     async def _read_link(self, turn: Turn, url: str) -> str:
+        video = video_id(url) if self._videos is not None else None
+        if video is not None and self._videos is not None:
+            return await self._read_video(turn, self._videos, video)
         page = await self._read(turn, url, "read_link")
         if isinstance(page, str):
             return page
@@ -979,7 +1011,37 @@ class Tools:
             f"Title: {page.title}\nURL: {page.final_url}\n\n{page.text}"
         )
 
+    async def _read_video(self, turn: Turn, videos: VideoReader, video: str) -> str:
+        """A YouTube video: a link in the user's current message, or the video this account read in the last 10
+        minutes (a follow-up question); never on a call. Only the ID reaches the helper; nothing is stored. The link
+        kept (and left tappable) is the user's own, never Gemma's argument (it may carry more than the video)."""
+        message = turn.message
+        if message.text.startswith(prompts.CALL_MARK):
+            return prompts.VIDEO_NOT_ON_CALL
+        if video in turn.videos_read:  # already read in this answer: its result is above
+            return prompts.VIDEO_READ_ABOVE
+        kept = videos.kept(message.peer_aci, message.conversation_id, video)
+        if kept is None:
+            link = link_in(message.text, video)
+            if link is None:  # a link in the current message names this video (in any of its forms)
+                return prompts.VIDEO_REFUSED
+            try:
+                kept = await videos.fetch(message.peer_aci, message.conversation_id, video, link)
+            except VideoError as exc:
+                return f"Could not read the video: {exc}"
+        turn.allowed_links.append(kept.link)
+        turn.videos_read[video] = kept
+        notify = self._notify
+
+        async def note(text: str) -> None:
+            if notify is not None:
+                await notify(message, text)
+
+        return await videos.material(kept, message.text, note)
+
     async def _learn_link(self, turn: Turn, url: str) -> str:
+        if video_id(url) is not None:  # learning stores the page it reads; captions are never stored
+            return prompts.VIDEO_LEARN_REFUSED
         page = await self._read(turn, url, "learn_link")
         if isinstance(page, str):
             return page

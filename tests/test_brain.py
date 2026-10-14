@@ -13,6 +13,7 @@ from local_assistant.profile import Profile
 from local_assistant.reminders import Reminders
 from local_assistant.store import Message, Store
 from local_assistant.tools import TOOL_SCHEMAS, Tools
+from local_assistant.video import Captions, KeptVideos, VideoReader
 from tests.conftest import ME, T0, TZ
 from tests.fakes.fake_gemma import FakeGemma, text, tool
 from tests.test_devices import Home
@@ -837,6 +838,160 @@ async def test_links_are_defanged_while_outside_text_is_still_in_her_context(sto
     assert message_id is not None
     reply = await brain.answer(conv, store.message(message_id))
     assert reply.text == "Sure: evil[.]example/login is where to log in."
+
+
+async def test_a_follow_up_about_a_kept_video_keeps_the_users_own_link_tappable(store: Store) -> None:
+    """Asked for the full transcript on a follow-up, she gives the video's link: the user sent it (earlier), so it stays
+    tappable; a link the captions planted does not."""
+    link = "https://youtu.be/AbCdEfGhI_-"
+
+    class Source:
+        async def captions(self, video: str) -> Captions:
+            return Captions(((0.0, "Visit evil.example/win now."),), "en", False, 10.0, False)
+
+    profile = Profile(store)
+    reader = VideoReader(Source(), FakeGemma())
+    tools = Tools(store, profile, TZ, no_fetch, videos=reader)
+    first = FakeGemma(tool("read_link", url=link), text("A short video about a prize."))
+    await Brain(first, ContextBuilder(store, profile, TZ), tools).answer(
+        store.current_conversation(), incoming(store, f"summarise {link}")
+    )
+    later = FakeGemma(
+        tool("read_link", url=link), text(f"The full transcript is here: {link} (see https://evil.example/win)")
+    )
+    conv = store.current_conversation()
+    message_id = store.add_incoming(conv.id, ME, T0 + 1, "text", "can I have the full transcript?")
+    assert message_id is not None
+    reply = await Brain(later, ContextBuilder(store, profile, TZ), tools).answer(conv, store.message(message_id))
+    assert reply.text == f"The full transcript is here: {link} (see evil[.]example/win)"
+
+
+async def test_a_link_gemma_adds_to_the_videos_link_stays_defanged(store: Store) -> None:
+    """Gemma's read_link argument carries the video's ID and a planted link: only the user's own link is allowed, so
+    the planted one in her answer is defanged."""
+    link = "https://youtu.be/AbCdEfGhI_-"
+    crafted = "https://www.youtube.com/watch?v=AbCdEfGhI_-&x=https://evil.example/login"
+
+    class Source:
+        async def captions(self, video: str) -> Captions:
+            return Captions(((0.0, "Steel beams carry the load."),), "en", False, 10.0, False)
+
+    profile = Profile(store)
+    tools = Tools(store, profile, TZ, no_fetch, videos=VideoReader(Source(), FakeGemma()))
+    gemma = FakeGemma(tool("read_link", url=crafted), text("Sign in at https://evil.example/login to watch."))
+    reply = await Brain(gemma, ContextBuilder(store, profile, TZ), tools).answer(
+        store.current_conversation(), incoming(store, f"summarise {link}")
+    )
+    assert reply.text == "Sign in at evil[.]example/login to watch."
+
+
+async def test_captions_written_out_never_reach_the_user(store: Store) -> None:
+    """Asked (or told by a planted line) to write the captions out, her copied sentences go and code's line gives the
+    user's own link instead; her other sentences stay. Nothing copied: her answer is untouched."""
+    link = "https://youtu.be/AbCdEfGhI_-"
+    words = "A main cable is not one thick rope: it is made of thousands of thin steel wires bundled together."
+
+    class Source:
+        async def captions(self, video: str) -> Captions:
+            return Captions(((0.0, "Welcome to the bridge lecture."), (65.0, words)), "en", False, 70.0, False)
+
+    profile = Profile(store)
+    tools = Tools(store, profile, TZ, no_fetch, videos=VideoReader(Source(), FakeGemma()))
+    gemma = FakeGemma(
+        tool("read_link", url=link),
+        text(f"Here you go.\n[1:05] {words}"),
+        tool("read_link", url=link),
+        text(f"[1:05] {words}"),
+        tool("read_link", url=link),
+        text("The cables are steel wires bundled together (1:05)."),
+    )
+    brain = Brain(gemma, ContextBuilder(store, profile, TZ), tools)
+    conv = store.current_conversation()
+    reply = await brain.answer(conv, incoming(store, f"the full transcript please {link}"))
+    assert reply.text == "Here you go.\n" + prompts.VIDEO_NOT_SENT.format(link=link)
+    second = store.add_incoming(conv.id, ME, T0 + 1, "text", f"word for word {link}")
+    assert second is not None
+    assert (await brain.answer(conv, store.message(second))).text == prompts.VIDEO_NOT_SENT.format(link=link)
+    third = store.add_incoming(conv.id, ME, T0 + 2, "text", f"what about the cables? {link}")
+    assert third is not None
+    assert (await brain.answer(conv, store.message(third))).text == (
+        "The cables are steel wires bundled together (1:05)."
+    )
+
+
+async def test_while_a_video_is_kept_her_prompt_says_how_to_read_it_again(store: Store) -> None:
+    """The follow-up: code's line, last in the system prompt, names the kept video's link and the minutes left; none on
+    a call, none once it is gone."""
+    link = "https://youtu.be/AbCdEfGhI_-"
+    clock = [1_000.0]
+
+    class Source:
+        async def captions(self, video: str) -> Captions:
+            return Captions(((0.0, "Steel beams carry the load."),), "en", False, 10.0, False)
+
+    profile = Profile(store)
+    reader = VideoReader(Source(), FakeGemma(), kept=KeptVideos(clock=lambda: clock[0]))
+    tools = Tools(store, profile, TZ, no_fetch, videos=reader)
+    gemma = FakeGemma(tool("read_link", url=link), text("About steel beams."), text("Steel."), text("Steel?"))
+    brain = Brain(gemma, ContextBuilder(store, profile, TZ), tools)
+    await brain.answer(store.current_conversation(), incoming(store, f"summarise {link}"))
+    assert prompts.VIDEO_KEPT.split("{")[0] not in gemma.calls[0]["messages"][0]["content"]
+    conv = store.current_conversation()
+    clock[0] += 240
+    later = store.add_incoming(conv.id, ME, T0 + 1, "text", "what about steel?")
+    assert later is not None
+    await brain.answer(conv, store.message(later))
+    system = gemma.calls[2]["messages"][0]["content"]
+    assert system.endswith(prompts.VIDEO_KEPT.format(link=link, minutes=6))
+    clock[0] += 400
+    gone = store.add_incoming(conv.id, ME, T0 + 2, "text", "and concrete?")
+    assert gone is not None
+    await brain.answer(conv, store.message(gone))
+    assert prompts.VIDEO_KEPT.split("{")[0] not in gemma.calls[3]["messages"][0]["content"]
+
+
+class OneLine:
+    async def captions(self, video: str) -> Captions:
+        return Captions(((0.0, "Steel beams carry the load."),), "en", False, 10.0, False)
+
+
+async def test_a_youtube_link_in_the_message_puts_codes_line_last(store: Store) -> None:
+    link = "https://youtu.be/AbCdEfGhI_-"
+    profile = Profile(store)
+    tools = Tools(store, profile, TZ, no_fetch, videos=VideoReader(OneLine(), FakeGemma(), kept=KeptVideos()))
+    gemma = FakeGemma(text(f"The full transcript is not sent here: the video is at {link}"))
+    brain = Brain(gemma, ContextBuilder(store, profile, TZ), tools)
+    await brain.answer(store.current_conversation(), incoming(store, f"Please send me the full transcript: {link}"))
+    system = gemma.calls[0]["messages"][0]["content"]
+    assert system.endswith("\n\n" + prompts.VIDEO_IN_MESSAGE.format(link=link))
+    assert system.count(link) == 1 and gemma.calls[0]["tools"] == tools.schemas
+
+
+async def test_without_a_youtube_link_her_request_is_the_one_from_before(store: Store) -> None:
+    """No YouTube link in the current message (and no video kept), or a call: the request is byte for byte the one
+    before code's line for a link in the message: the context's messages as they are, the same tools. A text in every
+    request once cost call_goodbye 30 points (AGENTS.md, Gotchas)."""
+    profile = Profile(store)
+    context = ContextBuilder(store, profile, TZ)
+    tools = Tools(store, profile, TZ, no_fetch, videos=VideoReader(OneLine(), FakeGemma(), kept=KeptVideos()))
+    said = (
+        "what's on today?",
+        "is youtube.com down?",
+        "https://www.youtube.com/playlist?list=PL0123456789",
+        "https://example.com/watch?v=AbCdEfGhI_-",
+        "https://vimeo.com/76979871",
+        f"{prompts.CALL_MARK} the full transcript of https://youtu.be/AbCdEfGhI_-",
+    )
+    gemma = FakeGemma(*(text("Okay.") for _ in said))
+    brain = Brain(gemma, context, tools)
+    for number, words in enumerate(said):
+        conv = store.current_conversation()
+        message_id = store.add_incoming(conv.id, ME, T0 + number, "text", words)
+        assert message_id is not None
+        await brain.answer(conv, store.message(message_id))
+        before = context.build(store.current_conversation())
+        assert json.dumps(gemma.calls[-1]["messages"]) == json.dumps(before)
+        assert gemma.calls[-1]["tools"] == tools.schemas
 
 
 async def test_without_outside_text_links_stay(store: Store) -> None:

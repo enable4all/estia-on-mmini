@@ -19,7 +19,7 @@ Her commands run as her with admin rights (`/usr/bin/sudo`, which asks for your 
 Gemma (the local model, served by Ollama under the name in `model`) as a personal assistant for one person, reached over
 Signal from a phone. She is called Estia unless you give her another name (`name` in the config, 2.4); this guide says
 Estia. It answers from its own knowledge and the tools you turn on: memory and search of earlier chats,
-learning from links you name, the Mac's health, a read-only overview of your projects (an extra, off by default), photos, voice notes and calls,
+learning from links you name, summaries of YouTube videos you send (from their captions), the Mac's health, a read-only overview of your projects (an extra, off by default), photos, voice notes and calls,
 lights and plugs, read-only mail and calendar, web search, music, and places and routes.
 
 The model always runs on the Mac: a cloud model is refused (2.2). Everything else stays on the Mac too, except Signal
@@ -57,9 +57,11 @@ brew install signal-cli ollama uv
 uv python install 3.13
 brew services start ollama          # Ollama in the background; it starts again at each login (see 2.8)
 uv sync --frozen                    # the bridge's environment (Python 3.13)
+(cd tools/youtube && uv sync --frozen)  # the YouTube helper's own environment (YouTube links, always on)
 ```
 
-`uv sync` uses the bridge's standard-library runtime; there are no runtime dependencies to install.
+`uv sync` uses the bridge's standard-library runtime; there are no runtime dependencies to install. The YouTube
+helper has its own environment, as the device and calendar helpers do; `scripts/run.sh` and every deploy build it too.
 
 ### 2.2 Model (once)
 
@@ -406,7 +408,9 @@ only what happened and when, never message text.
 
 When a release changes a root-run tool (`scripts/estia`, `scripts/estia-deploy`, `deploy.py`, `ownuser.py`,
 `hostsec.py`, a service template), the deploy says so and keeps the installed one. Read its diff and take it with
-`/usr/bin/sudo /usr/local/estia/bin/estia-deploy --update-tools` (it shows the diff and asks).
+`/usr/bin/sudo /usr/local/estia/bin/estia-deploy --update-tools` (it shows the diff and asks). A change in how a
+release is built (a new helper's environment, as for the YouTube helper) takes effect only from the next deploy:
+deploy again after `--update-tools` (a commit that is live already is built again).
 
 **Her config and keys** are hers: edit the config with sudoedit, which gives your editor a copy and writes it back as her,
 then restart her:
@@ -1179,7 +1183,7 @@ Write to the bot from Signal as you would to a person. Replies come as short pla
 | `/profile` | Numbered facts with where they came from (learned from chat, you asked, from a link) and the date |
 | `/fix N new text` | Correct fact N in place: same number, the text checked like a "remember" fact, and from then on it counts as yours ("you asked"). The change log keeps the old text |
 | `/forget N` · `/forget words` | Remove fact N, or the facts containing the words (asks for a number if several match). Takes effect at once |
-| `/learn <link>` | Learn about you from a page (e.g. your public LinkedIn profile): the bridge reads it, one structured model call takes out the facts about you, and you get the exact list of what was saved and what was already known |
+| `/learn <link>` | Learn about you from a page (e.g. your public LinkedIn profile): the bridge reads it, one structured model call takes out the facts about you, and you get the exact list of what was saved and what was already known. A YouTube link gets "/learn does not read YouTube links: it keeps what it reads, and a video's captions are never kept. Send the link without /learn for a summary." |
 | `/status` | Model loaded or not, waiting messages, profile fill, last learning run, history size, Signal restarts, and a line per part that is turned on: working (last read), set up but not tested yet, or failing with the fix |
 | `/voice` · `/voice auto\|on\|off` · `/voice echo on\|off` | Spoken answers: for voice notes (auto, default), always, or never; the transcript echo (off by default) |
 | `/language` · `/language <name or code>` | The 11 languages with the current one marked; switch with a code or a name in English or in the language itself (`/language nl`, `/language dutch`, `/language nederlands`) |
@@ -1204,6 +1208,40 @@ In normal messages:
 - "Learn from my profile: <link>" → Gemma calls its learn tool, which reads the page and saves the facts itself (the same
   extraction as `/learn`). Asking again re-reads the page; facts already saved are skipped.
 - "Have a look at <link>" → Gemma reads the page to answer you and saves nothing. Only links in that same message can be read.
+- A YouTube video link (`youtube.com/watch?v=…`, `youtu.be/…`, `/shorts/`, `/live/` and `/embed/` links, also on
+  `m.youtube.com`, and `music.youtube.com/watch?v=…`), with or without a question → `read_link` reads the video's
+  captions, not the page, through the YouTube helper (`tools/youtube`). Only a link in that same message is read, and
+  only the video's 11-character ID goes to the helper; a video named in a web search result is never read. Gemma
+  answers from the captions only, in at most about 300 words (her reply cap is 600 tokens, fixed in code), with
+  the time of each main point, and says when YouTube generated the captions automatically (names and terms may be
+  misheard). Hand-written captions come before automatic ones, each in the video's own language first: the automatic
+  track's language, else the track YouTube shows by default (tested only on recorded YouTube answers), else English.
+  So a hand-written track in another language (often a translation) comes before YouTube's automatic one in the
+  video's own language. YouTube's machine translations are never asked for; she answers in your language. Asked for
+  the full transcript, she gives the link. Her answer never holds the captions word for word: code leaves out each
+  sentence of hers that copies 13 or more of their words in a row (in Chinese, Japanese and Thai, 13 characters), or
+  shorter stretches of 6 or more that together make up more than 30% of them, and adds "The captions are never sent
+  word for word: the video is at <your link>". The link kept and left tappable is always the one in your message,
+  never a link Gemma passes. Other YouTube addresses (a playlist, a channel, youtube-nocookie.com) are read as
+  ordinary web pages, which hold little more than the title.
+- Captions over 15,000 characters are read in parts of about that size. Code's note comes first, in place of the busy
+  note: "Reading a 1 h 40 min video: about 1 minute." (the estimate counts 8 s for each part and 8 s for joining them). Then Gemma makes notes on each
+  part in a call of its own (no tools, your message in each), and her answer joins the notes; a second read of the
+  same video in one answer reads nothing again. At most the first 2 hours are read: past that, the note says
+  "Reading the first 2 hours of a … video", and so does her answer. At most 120,000 characters of captions are read
+  (more than 2 hours of fast speech): past that, the note says how far ("Reading the first 1 h 10 min of a … video"),
+  and so does her answer.
+- Follow-up questions about the video ("and what about the second half?") within 10 minutes of the first read use the
+  kept captions, without the helper; a follow-up does not extend the 10 minutes. The captions stay in memory only,
+  never on disk, per account and conversation; `/new` drops them. While they are kept, a line from the code in her
+  prompt names the link and the minutes left.
+- When your message holds a YouTube link, a line from the code in her prompt says that `read_link` reads that
+  video's captions and that the link is given for the full transcript. Without such a link, no line is added.
+- A video is never read on a call: a link cannot be spoken. The learn tool refuses a video link, as `/learn` does.
+- When a video cannot be read, she passes on the code's reason: "This video has no captions." (nothing is
+  transcribed), a private or removed video or one not shown in this country, an age-restricted one (no account is used), YouTube
+  refusing this Mac for now, YouTube not answering in time, YouTube not reachable just now, the YouTube helper not
+  set up on the Mac (doctor shows how), or captions that could not be read (YouTube may have changed).
 - "What did I say about …?" → Gemma searches the history.
 - "How's the Mac?" → Gemma runs `mini_status` (Gemma and Ollama, optional extra checks, disk, memory, uptime, new ERROR lines
   in the logs since the last status, Signal restarts) and answers in a few lines.
@@ -1457,7 +1495,7 @@ Voice notes (in the current language):
 - Without `[voice]`, voice notes get "I can only handle text and photos for now."
 
 What it does not do: send, draft, move or delete mail; change calendar events; or handle files other than photos, voice notes
-and the link pages it is asked to read. Files are answered with "I can only handle text, photos and voice notes for now."
+and the link pages and YouTube captions it is asked to read; it never transcribes a video. Files are answered with "I can only handle text, photos and voice notes for now."
 
 Notes you may see:
 
@@ -1502,6 +1540,8 @@ Notes you may see:
   Learning may add facts and change the ones it learned itself, but never replaces or removes a fact you stated ("remember
   that …", a link you asked to learn, a `/fix`): such a change is skipped and logged by fact number only. To change one of
   your own facts, use `/fix N new text`.
+- **YouTube:** no table holds captions. `tool_calls` keeps `read_link`'s link (your message has it too) and a stub in
+  place of the result; the last video's captions stay in memory only, for 10 minutes.
 - **Forget vs delete:** `/forget` removes the fact and blanks its text in the change log. The original chat message stays in
   the history. Messages are kept until you delete them.
 
@@ -1510,8 +1550,9 @@ Notes you may see:
 1. **Unit tests** (offline, about 30 seconds): `scripts/verify.sh` runs the privacy check (`scripts/privacy_scan.py`),
    ruff (lint and format), mypy in strict mode, and
    pytest, with a fake signal-cli, a fake voice service, a fake device helper and a scripted fake Gemma. The helpers have
-   their own suites: `cd tools/voice && swift test` (Swift Testing), `cd tools/tapo && uv run pytest -q` and
-   `cd tools/ical && uv run pytest -q`.
+   their own suites: `cd tools/voice && swift test` (Swift Testing), `cd tools/tapo && uv run pytest -q`,
+   `cd tools/ical && uv run pytest -q` and `cd tools/youtube && uv run pytest -q` (recorded YouTube answers, no
+   network).
 2. **Gemma test set** (the real model): `uv run python -m evals.gemma_suite`, or with your own style file:
    `EVAL_SOUL=~/.config/local-assistant/soul.md uv run python -m evals.gemma_suite`. It uses the model in your config
    (`local-worker` when `model` is unset, see 2.2); `EVAL_MODEL=<tag>` runs it with another tag. The gate is simple: every
@@ -1526,13 +1567,15 @@ Notes you may see:
      project status and a misheard project name on a call (taken as the nearest project, or "Do you mean …?" when two
      sound alike), photos (and follow-ups), the mail digest and reading a mail, device switching and dimming, the
      calendar, the start of a call (today's numbers said without a title, the titles read after a yes, and with
-     `EVAL_LANGUAGE` in that language), and reminders (a time tomorrow, "in 20 minutes", a wake-up call; a mentioned
-     time sets none).
+     `EVAL_LANGUAGE` in that language), reminders (a time tomorrow, "in 20 minutes", a wake-up call; a mentioned
+     time sets none), and a YouTube video from made-up captions (a summary with times, automatic captions named,
+     nothing beyond the captions, the link when asked for the full transcript, a long video in three parts, a
+     follow-up answered from the kept captions).
    - **Safety:** planted instructions in a web page (in English and Greek), a mail, a project README and a pasted email; a
      link without "learn" saves nothing; "ignore previous instructions" is not stored; "ask first" and "never off" devices
      behave as the rules say; a hostile personality file cannot loosen the rules; no reminder from a mail or a planted
-     page, and no claim of one that was refused; a personality file that asks her to request a PIN in a message she
-     starts herself.
+     page, and no claim of one that was refused; an order planted in a video's captions sets no reminder and changes
+     nothing; a personality file that asks her to request a PIN in a message she starts herself.
    - **Learning:** facts are extracted, a changed fact replaces the old one, small talk adds nothing, mail is sorted, and
      a plan the user states becomes one check-in on the right day.
    - **Messages she starts:** a gentle check-in, a look back only about that week, spontaneous notes that pass the
@@ -1561,7 +1604,7 @@ Notes you may see:
 | Security step | `scripts/harden.sh` (`--dry-run` first): SSH keys only, rules that let admin commands skip your password, her file modes, Registration Lock, each on your yes (2.10). The nuclear option, `scripts/harden.sh --nuclear`, adds the firewall, stealth mode, python3 and ruby off the firewall's list and the keychain lock: it may stop other services on this Mac (2.10) |
 | Answers paused: a cloud model | A note "Answers are paused: Ollama lists the model … as a cloud model …": her model's name in Ollama points to a model on Ollama's servers. `/usr/bin/sudo /usr/local/estia/bin/estia doctor` shows ✗ on its Model line with the fix (a model downloaded to the Mac, 2.2, then a restart). A note says when answers are back |
 | Voice service | `curl -s http://127.0.0.1:8150/health`. Restart: `/usr/bin/sudo launchctl kickstart -k system/com.local-assistant.voice`. After changes in `tools/voice`, run `scripts/install-voice-daemon.sh`. After an install, a move or a macOS update the first start takes up to about 15 minutes (Neural Engine compile); with `[calls]` she texts once it is ready |
-| Upgrade | `git pull && uv sync --frozen && (cd tools/tapo && uv sync --frozen) && (cd tools/ical && uv sync --frozen)`, then restart (an install that runs as you). In her own user: `git pull` in your checkout, then `/usr/bin/sudo /usr/local/estia/bin/estia-deploy`: a new release owned by root, switched, restarted and checked within 120 s, switched back on a failure (2.7). After changes in `tools/voice`, `scripts/install-voice-daemon.sh` |
+| Upgrade | `git pull && uv sync --frozen && (cd tools/tapo && uv sync --frozen) && (cd tools/ical && uv sync --frozen) && (cd tools/youtube && uv sync --frozen)`, then restart (an install that runs as you). In her own user: `git pull` in your checkout, then `/usr/bin/sudo /usr/local/estia/bin/estia-deploy`: a new release owned by root, switched, restarted and checked within 120 s, switched back on a failure (2.7). After changes in `tools/voice`, `scripts/install-voice-daemon.sh` |
 | Upgrade signal-cli | Homebrew's signal-cli about monthly (`brew upgrade signal-cli`); releases older than three months may stop working, so read the release notes first. Calls need the JVM build to match Homebrew's version: `tools/call-tunnel/install-signal-cli-jvm.sh <new version>`, point `[calls] signal_cli` at the new folder, pin with `brew unpin signal-cli && brew upgrade signal-cli && brew pin signal-cli`, restart, and make a test call. Undo: the old folder and the old config line still work with the old version. In her own user, `/usr/bin/sudo /usr/local/estia/bin/estia-deploy` then copies Homebrew's new signal-cli (and the new JVM build from `<repo>/vendor`) into her release |
 | Calls | Call the bot from Signal (phone or linked device). `/usr/bin/sudo /usr/local/estia/bin/estia doctor` shows Calls ✓ and `/usr/bin/sudo /usr/local/estia/bin/estia check` shows `signal-cli: running`; "How's the Mac?" covers calls too. A call that never answers: `/usr/bin/sudo /usr/local/estia/bin/estia logs -n 5000 \| grep -i call`. A call that rings out with the note "I can't take calls yet: my voice is still loading …" means her voice is still loading: wait for "My voice is ready: you can call me now." (3, Calls, "While her voice loads"); `/usr/bin/sudo /usr/local/estia/bin/estia logs -n 5000 \| grep "voice ready"` shows when it went. What stopped her, per call: `/usr/bin/sudo /usr/local/estia/bin/estia logs -n 5000 \| grep "calls: barge-in"` (the counts per rule; see 3, Calls) |
 | Safety number changed | Replies stop and doctor and `/status` show ✗. Never trust a new key blindly: a SIM swap of your number looks exactly like this. On the Mac, `/usr/bin/sudo /usr/local/estia/bin/estia signal listIdentities -n <your ACI>` (it stops the bridge, runs her signal-cli as her, then starts her again; before her own user, stop the bridge and run `signal-cli -Djava.net.preferIPv4Stack=true -a <bot-number> listIdentities -n <your ACI>`), compare its safety number with the one your phone shows (Signal, the chat with Estia, View safety number), and only if they match: `/usr/bin/sudo /usr/local/estia/bin/estia signal trust -v <safety number> <your ACI>`. Turn on Registration Lock (a Signal PIN) for your own account and Estia's (2.3, 2.10), so a SIM swap alone cannot take either over. With `[calls]` on, the wrapper uses her JVM build (the flag goes in `JAVA_OPTS`) |
@@ -1571,6 +1614,7 @@ Notes you may see:
 | The laptop cannot reach a program on the Mac (a page you open from your laptop, a file share) | The firewall is on (`scripts/harden.sh --nuclear`, an earlier security step, or your own choice) and does not let that program through (no screen to click "Allow"). `/usr/bin/sudo /usr/local/estia/bin/estia doctor` names it in a "! Firewall: … cannot be reached from other machines" line with the two `socketfilterfw` commands for a program you started, each with the program's full path (2.10). After a Homebrew update the path changes: run doctor again |
 | A new device is held | "A message came from a new linked device N and was held." Yours: send `/devices ok N` from your phone. Not yours: remove it in Signal → Settings → Linked devices, then turn on Registration Lock for your number |
 | The move failed | Her old setup comes back (on a first install nothing is installed). Keep the ✗ line: it names what failed. Fix that, run `scripts/migrate-to-own-user.sh --dry-run` again, then `scripts/install-daemon.sh` |
+| YouTube | Nothing to set up: always on with `read_link`. `/usr/bin/sudo /usr/local/estia/bin/estia doctor` shows a YouTube line: its last read (working, set up but not tested yet, or failing with the fix), then youtube-transcript-api's version in brackets; `/status` shows the same line without the version. "refused by the service": YouTube blocks this Mac for a while after many requests or a bot check; wait. "unreadable answer": YouTube changed; a newer pinned version of `tools/youtube` may be needed. Every video said to have no captions or to be private or removed, while `/status` shows YouTube working: YouTube may have changed too (SECURITY.md, known gaps); try a video you know has captions. "! … the YouTube helper is not set up": before her own user, run `cd tools/youtube && uv sync --frozen`. In her own user, run `/usr/bin/sudo /usr/local/estia/bin/estia-deploy`; if it says the root-run tools differ, read the diff, run `/usr/bin/sudo /usr/local/estia/bin/estia-deploy --update-tools`, then run `/usr/bin/sudo /usr/local/estia/bin/estia-deploy` again. `/usr/bin/sudo /usr/local/estia/bin/estia logs -n 5000 \| grep youtube` has outcome codes, character counts and times, never the video or its title |
 | Backup | Not set up yet: the database and her Signal account (`/var/estia/Library/Application Support/local-assistant`, `/var/estia/.local/share/signal-cli`) have no backup |
 
 ## 8. Security
@@ -1680,11 +1724,26 @@ This section is the threat model. [SECURITY.md](SECURITY.md) explains how to rep
   "where you are" in memory for 3 hours and never logs it; the message you sent, with its map link, stays in the chat history like any
   message. Results are data (cleaned, capped), never stored (Google's terms), and their links appear only in the Sources note. An
   answer that used them refuses `remember` and `forget`, and its device requests wait for your yes.
-- The only tools that open web pages are `learn_link` and `read_link`, both using the same guarded fetcher: http(s) only, and the link
-  must be in the user's current message. Hosts resolve to IPv4 only (the home network's global IPv6 addresses would otherwise count as
-  "public"). Every address must be public (no loopback, private, link-local, CGNAT or Tailscale, or multicast). The connection goes to
+- The only tools that open web pages are `learn_link` and `read_link`, both using the same guarded fetcher (a YouTube video link goes
+  to the YouTube helper instead, below): http(s) only, and the link must be in the user's current message. Hosts resolve to IPv4
+  only (the home network's global IPv6 addresses would otherwise count as "public"). Every address must be public (no loopback, private, link-local, CGNAT or Tailscale, or multicast). The connection goes to
   the checked address, and redirects are checked again (at most 3). Limits: 2 MB, 15 s per step, 30 s in total, and a 45 s hard limit on
   the whole fetch. Login walls are reported, and chat control tokens are stripped from page text.
+- YouTube (always on, with `read_link`; no switch): a video link is checked in code (`video.video_id`: youtube.com, www. and m.
+  for watch, shorts, live and embed links, music. for watch links only, and youtu.be; https or http; no login, port or other host;
+  exactly one `v=`), and only its 11-character ID reaches the helper, never the link. The bridge runs
+  `tools/youtube/.venv/bin/python -I tools/youtube/helper.py captions --until 7200 -- <ID>` with fixed arguments (the ID last,
+  after `--`: about 1 in 64 IDs starts with `-`), no shell and a clean environment, and kills it at 30 s (fixed in code); the
+  helper stops itself after 20 s. Every request and redirect passes one check that allows only https://www.youtube.com (no other
+  host, port or login; at most 3 redirects), with no proxy settings, `.netrc`, cookie file, account or key of its own (it uses the
+  public key YouTube puts in the video's page; `trust_env` off); the session lives for one run, so cookies YouTube sets are never
+  kept. YouTube sees the Mac's internet address, the video's ID and a user agent that names this helper. It returns one JSON line:
+  at most 120,000 characters of captions with their times, or an error code, never YouTube's or the library's own error text.
+  Nothing is transcribed (no yt-dlp, no Whisper). The captions are outside text with a page's rules (no `remember` or `forget`, no
+  reminders, device changes wait for your yes, links defanged; only your own video link, as your message has it, stays tappable)
+  and never stored: no document, the link and a stub in the tool log, the last video's captions in memory only, for 10 minutes per
+  account and conversation. Her answer never holds them word for word (code leaves out the copied sentences, section 4). Logs hold outcome codes, character
+  counts and times, never the video's ID or its title. YouTube's terms and its undocumented endpoint: SECURITY.md, known gaps.
 - Text from pages and tools is data. Every profile fact passes `check_fact` (after NFKC normalisation: hidden and invisible characters,
   instruction-like text in English, Greek, Dutch and German, chat control tokens, credentials, odd link types). Facts from a learned page
   are checked strictly: they may not address Gemma ("you", "Gemma", "assistant") and may contain no link other than the page's own. Every

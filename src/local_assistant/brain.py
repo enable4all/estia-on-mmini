@@ -16,6 +16,7 @@ from local_assistant.context import ContextBuilder, without_fake_notices
 from local_assistant.gemma import Completion, GemmaClient, ToolCall
 from local_assistant.store import Conversation, Message
 from local_assistant.tools import ReminderAttempt, Tools, Turn
+from local_assistant.video import without_copies
 from local_assistant.web_search import sources
 
 log = logging.getLogger(__name__)
@@ -179,6 +180,19 @@ def _quoted(text: str, limit: int = 80) -> str:
     return f'"{text if len(text) <= limit else text[: limit - 1].rstrip() + "…"}"'
 
 
+def _without_captions(text: str, turn: Turn) -> str:
+    """A video's captions are never written out: her sentences that copy them go (video.without_copies), and code's
+    line gives the user's own link to the video instead (counts in the log, never text)."""
+    lines: list[str] = []
+    for kept in turn.videos_read.values():
+        text, copied = without_copies(text, kept.captions)
+        if copied:
+            lines.append(prompts.VIDEO_NOT_SENT.format(link=kept.link))
+    if lines:
+        log.warning("message %d: captions written out; those sentences left out", turn.message.id)
+    return "\n".join(part for part in (text, *lines) if part)
+
+
 def _has_images(messages: list[dict[str, Any]]) -> bool:
     return any(isinstance(message.get("content"), list) for message in messages)
 
@@ -247,6 +261,9 @@ class Brain:
         if practice is not None:
             return await self._practise(conversation, message, practice, limit_tokens, shown)
         turn = Turn(message=message, after_outside=self._context.after_outside(conversation, message.id))
+        # code's video lines, last in the prompt: a kept video's (reading it again), a YouTube link in this message's
+        # (what read_link reads); none on a call, so never with a call's glance
+        glance = "\n\n".join(part for part in (glance, self._tools.video_hint(message)) if part)
         messages = self._context.build(conversation, shown or None, glance=glance)
         said = [str(m["content"]) for m in messages if m.get("role") == "user" and isinstance(m.get("content"), str)]
         # the user asked for a reminder, a wake-up or a call now or in their message before ("and at 17:00?")
@@ -307,7 +324,8 @@ class Brain:
                 or turn.after_outside
                 or message.text.startswith((prompts.AUDIO_MARK, "[photo]"))
             ):  # a link planted in outside text never reaches the user tappable, unless they sent it themselves
-                text = defang_links(text, message.text)
+                text = defang_links(text, "\n".join([message.text, *turn.allowed_links]))
+            text = _without_captions(text, turn)
             reminder = list(turn.reminder_notes)
             spoken = list(turn.reminder_spoken)
             # per answer, never across turns: a set_reminder that stored nothing gets code's line whatever she wrote;

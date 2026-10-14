@@ -34,6 +34,7 @@ def checkout(tmp_path: Path) -> Path:
         "src/local_assistant/deploy.py": "# deploy\n",
         "tools/tapo/pyproject.toml": "",
         "tools/ical/pyproject.toml": "",
+        "tools/youtube/pyproject.toml": "",
         "docs/brand/estia-avatar.png": "png",
     }.items():
         path = repo / name
@@ -200,6 +201,10 @@ def test_a_deploy_builds_as_the_owner_freezes_and_switches(tmp_path: Path) -> No
     assert (release / "tools/voice/.build/release/voice-service").is_file()
     assert (release / "tools/voice/.build/release/FluidAudio_FluidAudio.bundle/Info.plist").is_file()
     assert (release / ".venv/bin/python").is_symlink() and (release / "tools/tapo/.venv").is_dir()
+    youtube = release / "tools/youtube/.venv/bin/python"  # the YouTube helper: built, and checked that it imports
+    assert youtube.is_symlink() and any(
+        argv[-4:] == (str(youtube), "-I", "-c", "import youtube_transcript_api, requests") for argv in mac.asked
+    )
     assert os.readlink(release / ".venv/bin/python").startswith(str(release / "python"))  # its own interpreter
     meta = json.loads((release / "release.json").read_text())
     assert meta["sha"] == release.name.rsplit("-", 1)[1] and meta["source"] == str(repo) and meta["voice"] is True
@@ -420,7 +425,7 @@ def test_the_release_keeps_bytecode_valid_after_the_freeze(tmp_path: Path) -> No
     mac = FakeMac(root)
     assert deployment(root, repo, mac, clock, health=False).run() == 0
     syncs = [argv for argv in mac.asked if "sync" in argv]
-    assert len(syncs) == 3 and all("UV_COMPILE_BYTECODE=1" in argv for argv in syncs)
+    assert len(syncs) == 4 and all("UV_COMPILE_BYTECODE=1" in argv for argv in syncs)
     assert any("compileall" in argv for argv in mac.asked)
     release = (root / "usr/local/estia/current").resolve()
     source = repo / "src/local_assistant/__init__.py"

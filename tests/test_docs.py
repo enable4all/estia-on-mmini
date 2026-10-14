@@ -656,3 +656,96 @@ def test_the_voice_models_are_described_as_the_code_loads_them() -> None:
     assert "set aside" in prose(ROOT / "SECURITY.md") and "set aside" in prose(ROOT / "setup_assistant.md")
     gaps = prose(ROOT / "SECURITY.md").split("Known accepted gaps", 1)[1]
     assert "Kokoro" in gaps and "only when a file is missing" in gaps
+
+
+# YouTube (owner, 13-14 Oct): always on with read_link; the docs say what is read, what is kept and the known gaps in the
+# words the code uses, and the notices list the helper's packages at the versions its lock pins
+
+
+def _youtube_runtime() -> dict[str, str]:
+    """youtube-transcript-api and every package it needs at runtime, with the versions tools/youtube/uv.lock pins."""
+    import tomllib
+
+    lock = tomllib.loads((ROOT / "tools/youtube/uv.lock").read_text(encoding="utf-8"))
+    packages = {package["name"]: package for package in lock["package"]}
+    found: dict[str, str] = {}
+    todo = ["youtube-transcript-api"]
+    while todo:
+        name = todo.pop()
+        if name not in found:
+            found[name] = packages[name]["version"]
+            todo.extend(dependency["name"] for dependency in packages[name].get("dependencies", []))
+    return found
+
+
+def test_the_notices_list_the_youtube_helpers_packages_at_their_pinned_versions() -> None:
+    notices = (ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+    runtime = _youtube_runtime()
+    assert runtime["youtube-transcript-api"] == "1.2.4" and len(runtime) == 7
+    for name, version in runtime.items():
+        assert f"{name} {version}" in notices, name
+    assert "YouTube" in notices.split("Online services", 1)[1]
+
+
+def test_the_readme_has_youtube_in_what_she_can_do_and_what_goes_online() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    can_do = readme.split("## What she can do", 1)[1].split("\n### ", 1)[0]
+    assert "| YouTube videos | Send a YouTube link" in can_do
+    online = readme.split("### What stays home, and what goes online", 1)[1].split("\n## ", 1)[0]
+    assert (
+        "Outside services are reached only for Signal, links you send and the extras you switch on." in online
+    )  # site: word for word, YouTube is one of the links you send
+    assert "| | YouTube, for the captions of a video link you send |" in online
+    flat = prose(ROOT / "README.md")
+    for words in (
+        "Only a link in your current message is read. A video found by a web search is named, never read.",
+        "YouTube's terms forbid automated access",
+        "| YouTube helper | `tools/youtube/` |",
+    ):
+        assert words in flat, words
+
+
+def test_the_docs_quote_the_youtube_texts_as_the_code_writes_them() -> None:
+    from local_assistant import prompts, video
+
+    captions = video.Captions(segments=((0.0, "words"),), language="en", generated=False, length=6_000.0, cut=False)
+    note = video.reading_note(captions, 3)
+    assert note == "Reading a 1 h 40 min video: about 1 minute."
+    for name in ("README.md", "setup_assistant.md"):
+        assert note in prose(ROOT / name), name
+    guide = prose(ROOT / "setup_assistant.md")
+    assert prompts.VIDEO_LEARN_COMMAND in guide and prompts.VIDEO_ERRORS["no_captions"] in guide
+    assert f"{video.PART_CHARS:,} characters" in guide and f"{video.CAP_CHARS:,} characters" in guide
+    assert prompts.VIDEO_NOT_SENT.split("{")[0] in guide  # code's line after copied captions, word for word
+    copies = f"{video.COPY_WORDS} or more of their words in a row"
+    shares = f"shorter stretches of {video.SHARE_WORDS} or more that together make up more than {video.COPY_SHARE:.0%}"
+    for name in ("README.md", "SECURITY.md", "setup_assistant.md"):
+        flat = prose(ROOT / name)
+        assert copies in flat and shares in flat, name  # the copy check, in the numbers the code uses
+
+
+def test_the_guide_covers_youtube_from_setup_to_security() -> None:
+    guide = (ROOT / "setup_assistant.md").read_text(encoding="utf-8")
+    upgrade = re.search(r"^\| Upgrade \| `([^`]+)`", guide, re.M)
+    assert upgrade and "(cd tools/youtube && uv sync --frozen)" in upgrade.group(1)
+    assert "cd tools/youtube && uv run pytest -q" in guide.split("## 6. Tests", 1)[1].split("\n## ", 1)[0]
+    security = prose(ROOT / "setup_assistant.md").split("8. Security", 1)[1]
+    assert "https://www.youtube.com" in security and "never the link" in security
+    assert "deploy again" in prose(ROOT / "setup_assistant.md").split("2.7 Always on", 1)[1].split("2.8 Keep", 1)[0]
+    assert "cd tools/youtube && uv sync --frozen" in (ROOT / "SETUP-WITH-YOUR-AI.md").read_text(encoding="utf-8")
+
+
+def test_security_md_names_the_youtube_helper_and_its_gaps() -> None:
+    security = prose(ROOT / "SECURITY.md")
+    assert "`tools/youtube/`" in security.split("Out of scope", 1)[0]
+    gaps = security.split("Known accepted gaps", 1)[1]
+    for words in (
+        "YouTube's terms forbid automated access",
+        "accepted for personal use",
+        "undocumented",
+        "youtube-transcript-api 1.2.4",
+        "downloading its content",
+        "still show YouTube working",  # a changed YouTube can look like an answer
+    ):
+        assert words in gaps, words
+    assert "no key of its own" in security and "local-assistant youtube helper" in security

@@ -222,7 +222,12 @@ def test_each_part_has_its_label_verb_and_fix() -> None:
     assert helper.fix == "cd tools/tapo && uv sync --frozen"
     quiet = describe("devices", Record(failed=NOW, reason="no_answer"), NOW, TZ)
     assert "check the device" in quiet.fix
-    for part in ("voice", "calendar", "calendar:work", "devices", "web", "places", "spotify", "mail:home"):
+    assert describe("youtube", Record(ok=old), NOW, TZ).line() == "YouTube: working, last read 6 Oct 11:40"
+    youtube = describe("youtube", Record(failed=NOW, reason="helper_missing"), NOW, TZ)
+    assert youtube.fix.startswith("cd tools/youtube && uv sync --frozen") and "a deploy builds it" in youtube.fix
+    assert "a newer" in describe("youtube", Record(failed=NOW, reason="bad_answer"), NOW, TZ).fix
+    assert describe("youtube", Record(failed=NOW, reason="refused"), NOW, TZ).fix.startswith("wait")
+    for part in ("voice", "calendar", "calendar:work", "devices", "web", "places", "spotify", "mail:home", "youtube"):
         for reason in get_args(Reason):
             assert describe(part, Record(failed=NOW, reason=reason), NOW, TZ).fix  # always a next step
 
@@ -256,10 +261,12 @@ def test_lines_cover_each_enabled_part_in_order() -> None:
         "Web search",
         "Places",
         "Spotify",
+        "YouTube",
     ]
     assert found[2].text == "working, last read 11:40" and found[1].state == "untested"
     plain = Config(bot_number="+306900000000", allowed_acis=frozenset({ME}))
-    assert lines(plain, {"calendar": Record(ok=NOW)}, NOW) == []  # only parts that are turned on
+    # only parts that are turned on; YouTube always is (with read_link: no switch)
+    assert [line.label for line in lines(plain, {"calendar": Record(ok=NOW)}, NOW)] == ["YouTube"]
 
 
 def test_each_calendar_is_a_part_of_its_own(tmp_path: Path) -> None:
@@ -306,7 +313,7 @@ def test_lines_cover_each_calendar_in_the_configs_order() -> None:
         calendar_sources=(CalendarSource("family"), CalendarSource("work", mailbox="office")),
     )
     found = lines(cfg, {"calendar:work": Record(failed=NOW, reason="no_consent")}, NOW)
-    assert [line.label for line in found] == ["Mail (office)", "Calendar (family)", "Calendar (work)"]
+    assert [line.label for line in found] == ["Mail (office)", "Calendar (family)", "Calendar (work)", "YouTube"]
     assert "<address of office>" in found[2].fix
 
 

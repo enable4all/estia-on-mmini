@@ -1,0 +1,22 @@
+[project]
+name = "local-assistant-youtube"
+version = "0.1.0"
+description = "YouTube helper for local-assistant: the captions of one video per run, from www.youtube.com only, in its own environment"
+requires-python = ">=3.13"
+license = "MIT"
+# youtube-transcript-api 1.2.4 (MIT, 2026-01-29, the latest release on 2026-10-14; with requests 2.34.2 (Apache-2.0),
+# urllib3 2.8.0 (MIT), idna 3.20 (BSD-3-Clause), charset-normalizer 3.5.2 (MIT), certifi 2026.7.22 (MPL-2.0) and
+# defusedxml 0.7.1 (PSF-2.0); every version pinned in uv.lock): it reads YouTube's undocumented caption endpoint, so a
+# change at YouTube can break it until a newer release. Change the pin deliberately, after reading the release notes.
+dependencies = ["youtube-transcript-api==1.2.4"]
+
+[dependency-groups]
+dev = ["pytest>=8.3", "mypy>=1.13", "types-requests>=2.32"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+files = ["helper.py", "tests"]

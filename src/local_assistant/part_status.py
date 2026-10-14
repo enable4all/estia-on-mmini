@@ -2,8 +2,8 @@
 
 The bridge records, per part, when its last real read or call worked and since when it fails, with a reason from a
 fixed list (`Reason`). Parts: each mailbox ("mail:<name>"), each calendar ("calendar" for the one named calendar,
-"calendar:<name>" for the others), the voice service, the device helper, web search, Google Places and Routes ("places")
-and Spotify. Calls are not a part of their own: they use the voice service.
+"calendar:<name>" for the others), the voice service, the device helper, web search, Google Places and Routes ("places"),
+Spotify and the YouTube helper ("youtube", always on). Calls are not a part of their own: they use the voice service.
 
 The records live in <data_dir>/status.json (0600, replaced atomically) so doctor can read them without the bridge. The
 file holds part names, times, reasons and HTTP status numbers only: never message, mail, event, search or device text,
@@ -61,7 +61,7 @@ State = Literal["untested", "working", "failing"]
 REASONS: frozenset[str] = frozenset(get_args(Reason))
 REASON_MAX_CHARS = 60
 WRITE_EVERY_SECONDS = 60.0  # an unchanged state is written at most this often
-PARTS = ("voice", "calendar", "devices", "web", "places", "spotify")  # and "mail:<name>", "calendar:<name>"
+PARTS = ("voice", "calendar", "devices", "web", "places", "spotify", "youtube")  # and "mail:<name>", "calendar:<name>"
 _NAMED = re.compile(r"^(?:mail|calendar):[a-z0-9][a-z0-9_-]{0,19}$")  # config.py's rule for mailbox and calendar names
 
 
@@ -279,6 +279,7 @@ def enabled_parts(cfg: Config) -> list[str]:
         ("web", cfg.web_enabled),
         ("places", cfg.maps_enabled),
         ("spotify", cfg.spotify_enabled),
+        ("youtube", True),  # always on, with read_link: no switch
     ):
         if enabled:
             parts.append(part)

@@ -183,6 +183,11 @@ def _default_ical_helper() -> tuple[str, ...]:
     return (str(ical / ".venv" / "bin" / "python"), "-I", str(ical / "helper.py"))
 
 
+def _default_youtube_helper() -> tuple[str, ...]:
+    youtube = CODE_ROOT / "tools" / "youtube"
+    return (str(youtube / ".venv" / "bin" / "python"), "-I", str(youtube / "helper.py"))
+
+
 # what a release of her own user holds in vendor/ besides the call helpers: Homebrew's signal-cli and a JDK, copied by
 # estia-deploy, so nothing she runs sits in a folder the owner can change
 _NATIVE_SIGNAL_CLI = Path("signal-cli-native/bin/signal-cli")
@@ -294,6 +299,10 @@ class Config:
     calendar_digest: bool = True
     calendar_helper_timeout: float = 30
     calendar_helper: tuple[str, ...] = field(default_factory=_default_ical_helper)  # the command, without arguments
+    # YouTube links in a message: their captions through tools/youtube (always on with read_link: no switch); the
+    # helper stops itself after 20 s
+    youtube_helper_timeout: float = 30
+    youtube_helper: tuple[str, ...] = field(default_factory=_default_youtube_helper)  # the command, without arguments
 
     # voice calls (the JVM signal-cli + our signal-call-tunnel build, see tools/call-tunnel); off without [calls]
     calls_enabled: bool = False

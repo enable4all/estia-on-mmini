@@ -28,8 +28,10 @@ from local_assistant.tools import (
     project_schemas,
     tool_schemas,
 )
+from local_assistant.video import Captions, KeptVideos, VideoError, VideoReader, reading_note, split, stamp
 from local_assistant.web_search import WebResult, WebResults
-from tests.conftest import ME, T0, TZ
+from tests.conftest import ME, STRANGER, T0, TZ
+from tests.fakes.fake_gemma import FakeGemma, text
 from tests.fakes.fake_maps import FakeMaps
 from tests.fakes.fake_spotify import FakeSpotify
 from tests.fakes.fake_web import FakeWeb
@@ -348,6 +350,15 @@ def test_the_descriptions_follow_the_config() -> None:
     for given, default in ((schemas, TOOL_SCHEMAS), (projects, PROJECT_SCHEMAS)):
         assert [s["function"]["name"] for s in given] == [s["function"]["name"] for s in default]
         assert [s["function"]["parameters"] for s in given] == [s["function"]["parameters"] for s in default]
+
+
+def test_read_link_keeps_its_text_from_before_youtube() -> None:
+    """YouTube lives in code (the link check, the kept video, prompts.VIDEO_KEPT), never in this text: naming it here
+    cost call_goodbye 88% -> 58% in the live evals (same request otherwise)."""
+    assert described(TOOL_SCHEMAS, "read_link") == (
+        "Read a web page the user sent when they want you to look at it or answer a question about it. Saves "
+        "nothing. Only for a link in the user's current message."
+    )
 
 
 def test_the_tools_offer_the_schemas_they_were_given(store: Store) -> None:
@@ -1323,3 +1334,257 @@ async def test_after_outside_text_earlier_the_users_own_words_still_set_one(stor
     current.after_outside = True
     result = await tools.call(current, "set_reminder", json.dumps({"at": "17:00", "text": "call mum"}))
     assert result.startswith("Set as #1") and current.reminder_set
+
+
+# YouTube videos: a link in the current message, read through the helper (here a fake); captions are outside text and
+# never stored; the last video stays in memory for 10 minutes per account for follow-up questions; never on a call
+
+VIDEO_ID = "AbCdEfGhI_-"
+VIDEO_LINK = f"https://youtu.be/{VIDEO_ID}"
+
+
+class FakeCaptions:
+    """The helper's side: captions per video ID, or a VideoError code; every ID asked is kept."""
+
+    def __init__(self, captions: Captions | None = None, error: str = "") -> None:
+        self.asked: list[str] = []
+        self.error = error
+        self.result = captions or Captions(
+            segments=((0.0, "Welcome to the lecture on bridges."), (65.5, "Steel beams carry the load.")),
+            language="en",
+            generated=False,
+            length=70.0,
+            cut=False,
+        )
+
+    async def captions(self, video: str) -> Captions:
+        self.asked.append(video)
+        if self.error:
+            raise VideoError(self.error)
+        return self.result
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.now = 5_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def video_tools(
+    store: Store, source: FakeCaptions | None = None, gemma: FakeGemma | None = None, **kwargs: Any
+) -> tuple[Tools, FakeCaptions, FakeFetch, Clock]:
+    source = source or FakeCaptions()
+    clock = Clock()
+    fetch = FakeFetch()
+    reader = VideoReader(source, gemma or FakeGemma(), kept=KeptVideos(clock=clock))
+    return Tools(store, Profile(store), TZ, fetch, videos=reader, **kwargs), source, fetch, clock
+
+
+def documents(store: Store) -> int:
+    count: int = store._conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+    return count
+
+
+async def test_a_video_link_is_read_through_the_helper_never_stored(store: Store) -> None:
+    tools, source, fetch, _ = video_tools(store)
+    current = turn(store, f"summarise this {VIDEO_LINK}")
+    result = await tools.call(current, "read_link", json.dumps({"url": VIDEO_LINK}))
+    assert result.startswith(prompts.VIDEO_MARK) and "[1:05] Steel beams carry the load." in result
+    assert source.asked == [VIDEO_ID] and fetch.urls == []  # only the ID, never the link; never the fetcher
+    assert documents(store) == 0  # no document: the captions are never stored
+    logged = store.tool_calls(current.message.id)[0]
+    assert logged.result == prompts.VIDEO_STUB and logged.ok
+    assert current.untrusted and current.allowed_links == [VIDEO_LINK]
+
+
+async def test_the_kept_link_is_the_users_own_never_gemmas(store: Store) -> None:
+    # a planted line can make Gemma pass the video's ID with more in the link: that link is never kept or allowed
+    tools, source, _, _ = video_tools(store)
+    current = turn(store, f"summarise ({VIDEO_LINK}).")
+    crafted = f"https://www.youtube.com/watch?v={VIDEO_ID}&x=https://evil.example/login"
+    result = await tools.call(current, "read_link", json.dumps({"url": crafted}))
+    assert result.startswith(prompts.VIDEO_MARK) and source.asked == [VIDEO_ID]
+    assert "evil.example" not in result and current.allowed_links == [VIDEO_LINK]
+    later = turn(store, "and about steel?", ts=T0 + 200_000)
+    assert tools.video_hint(later.message) == prompts.VIDEO_KEPT.format(link=VIDEO_LINK, minutes=10)
+    await tools.call(later, "read_link", json.dumps({"url": crafted}))
+    assert later.allowed_links == [VIDEO_LINK]
+
+
+async def test_after_a_video_nothing_is_saved_forgotten_or_set(store: Store) -> None:
+    reminders = Reminders(store, TZ, clock=lambda: T0 / 1000)
+    tools, _, _, _ = video_tools(store, reminders=reminders)
+    current = turn(store, f"what does he say? {VIDEO_LINK}")
+    await tools.call(current, "read_link", json.dumps({"url": VIDEO_LINK}))
+    saved = await tools.call(current, "remember", '{"fact": "About: The user studies bridges."}')
+    gone = await tools.call(current, "forget", '{"fact": "bridges"}')
+    reminder = await tools.call(current, "set_reminder", json.dumps({"at": "09:00", "text": "watch the video"}))
+    assert saved.startswith("Not saved") and gone.startswith("Nothing forgotten")
+    assert reminder == prompts.REMINDER_OWN_WORDS and store.open_reminders(ME) == []
+
+
+async def test_a_video_link_must_be_in_the_current_message(store: Store) -> None:
+    tools, source, _, _ = video_tools(store)
+    current = turn(store, "summarise the video please")
+    assert await tools.call(current, "read_link", json.dumps({"url": VIDEO_LINK})) == prompts.VIDEO_REFUSED
+    assert source.asked == []
+
+
+def test_a_youtube_link_in_the_message_gets_codes_line(store: Store) -> None:
+    """Code's line for her prompt: the link as the user's message has it (without the punctuation around it), what
+    read_link reads and the link for the full transcript. It reads nothing; none on a call."""
+    tools, source, _, _ = video_tools(store)
+    current = turn(store, f"Please send me the full transcript of this video: ({VIDEO_LINK}).")
+    assert tools.video_hint(current.message) == prompts.VIDEO_IN_MESSAGE.format(link=VIDEO_LINK)
+    assert "read_link reads that video's captions" in tools.video_hint(current.message)
+    call = turn(store, f"{prompts.CALL_MARK} the full transcript of {VIDEO_LINK}", ts=T0 + 150_000)
+    assert tools.video_hint(call.message) == ""
+    assert source.asked == [] and documents(store) == 0
+
+
+def test_without_a_youtube_link_in_the_message_there_is_no_line(store: Store) -> None:
+    tools, _, _, _ = video_tools(store)
+    for number, words in enumerate(
+        (
+            "what's on today?",
+            "is youtube.com down? and youtu.be?",
+            "https://www.youtube.com/playlist?list=PL0123456789",
+            f"https://example.com/watch?v={VIDEO_ID}",
+            f"the video {VIDEO_ID}",
+            "https://vimeo.com/76979871",
+        )
+    ):
+        assert tools.video_hint(turn(store, words, ts=T0 + number).message) == ""
+
+
+async def test_a_kept_video_and_a_link_in_the_message_get_both_lines(store: Store) -> None:
+    tools, _, _, _ = video_tools(store)
+    await tools.call(turn(store, f"summarise {VIDEO_LINK}"), "read_link", json.dumps({"url": VIDEO_LINK}))
+    other = "https://www.youtube.com/watch?v=ZyXwVuTsR_-"
+    later = turn(store, f"and this one? {other}", ts=T0 + 200_000)
+    kept = prompts.VIDEO_KEPT.format(link=VIDEO_LINK, minutes=10)
+    assert tools.video_hint(later.message) == f"{kept}\n\n{prompts.VIDEO_IN_MESSAGE.format(link=other)}"
+
+
+async def test_a_follow_up_within_ten_minutes_uses_the_kept_captions(store: Store) -> None:
+    tools, source, _, clock = video_tools(store)
+    await tools.call(turn(store, f"summarise {VIDEO_LINK}"), "read_link", json.dumps({"url": VIDEO_LINK}))
+    later = turn(store, "what does he say about steel?", ts=T0 + 200_000)
+    # she passes the link from the earlier message, in any of its forms
+    result = await tools.call(later, "read_link", json.dumps({"url": f"https://www.youtube.com/watch?v={VIDEO_ID}"}))
+    assert result.startswith(prompts.VIDEO_MARK) and source.asked == [VIDEO_ID]  # from memory, not asked again
+    assert later.untrusted and later.allowed_links == [VIDEO_LINK]  # the user's own link stays tappable
+    assert tools.video_hint(later.message) == prompts.VIDEO_KEPT.format(link=VIDEO_LINK, minutes=10)
+    call = turn(store, f"{prompts.CALL_MARK} and on a call?", ts=T0 + 250_000)
+    assert tools.video_hint(call.message) == ""  # no video reading on a call
+    again = turn(store, f"and this one again {VIDEO_LINK}", ts=T0 + 300_000)
+    await tools.call(again, "read_link", json.dumps({"url": VIDEO_LINK}))
+    assert source.asked == [VIDEO_ID]  # sent again within the time: still from memory
+    clock.now += 601
+    late = turn(store, "and about concrete?", ts=T0 + 900_000)
+    assert await tools.call(late, "read_link", json.dumps({"url": VIDEO_LINK})) == prompts.VIDEO_REFUSED
+
+
+async def test_the_kept_video_is_per_account_and_conversation(store: Store) -> None:
+    tools, source, _, _ = video_tools(store)
+    await tools.call(turn(store, f"summarise {VIDEO_LINK}"), "read_link", json.dumps({"url": VIDEO_LINK}))
+    conv = store.current_conversation()
+    other = store.add_incoming(conv.id, STRANGER, T0 + 150_000, "text", "and what about steel?")
+    assert other is not None
+    stranger = Turn(store.message(other))
+    assert await tools.call(stranger, "read_link", json.dumps({"url": VIDEO_LINK})) == prompts.VIDEO_REFUSED
+    store.end_conversation(conv.id)  # /new
+    fresh = turn(store, "what about steel?", ts=T0 + 200_000)
+    assert await tools.call(fresh, "read_link", json.dumps({"url": VIDEO_LINK})) == prompts.VIDEO_REFUSED
+    assert source.asked == [VIDEO_ID]
+
+
+async def test_no_video_is_read_on_a_call(store: Store) -> None:
+    tools, source, _, _ = video_tools(store)
+    await tools.call(turn(store, f"summarise {VIDEO_LINK}"), "read_link", json.dumps({"url": VIDEO_LINK}))
+    call = turn(store, f"{prompts.CALL_MARK} what did the video say about steel?", ts=T0 + 200_000)
+    assert await tools.call(call, "read_link", json.dumps({"url": VIDEO_LINK})) == prompts.VIDEO_NOT_ON_CALL
+    assert source.asked == [VIDEO_ID]
+
+
+async def test_a_video_that_cannot_be_read_says_why_and_is_not_kept(store: Store) -> None:
+    tools, source, _, _ = video_tools(store, FakeCaptions(error="no_captions"))
+    current = turn(store, f"summarise {VIDEO_LINK}")
+    result = await tools.call(current, "read_link", json.dumps({"url": VIDEO_LINK}))
+    assert result == "Could not read the video: This video has no captions."
+    await tools.call(current, "read_link", json.dumps({"url": VIDEO_LINK}))
+    assert source.asked == [VIDEO_ID, VIDEO_ID]
+
+
+async def test_other_youtube_links_go_to_the_fetcher_as_before(store: Store) -> None:
+    tools, source, fetch, _ = video_tools(store)
+    channel = "https://www.youtube.com/@example"
+    current = turn(store, f"who is this? {channel}")
+    assert (await tools.call(current, "read_link", json.dumps({"url": channel}))).startswith("Page content")
+    assert fetch.urls == [channel] and source.asked == []
+
+
+async def test_learn_link_refuses_a_video(store: Store) -> None:
+    tools, source, fetch, _ = video_tools(store)
+    current = turn(store, f"learn from this {VIDEO_LINK}")
+    assert await tools.call(current, "learn_link", json.dumps({"url": VIDEO_LINK})) == prompts.VIDEO_LEARN_REFUSED
+    assert source.asked == [] and fetch.urls == [] and documents(store) == 0
+
+
+async def test_a_long_video_sends_codes_note_first(store: Store) -> None:
+    segments = tuple((n * 5.0, f"the beam carries the load {n}") for n in range(1_200))  # 1 h 40 min
+    long = Captions(segments=segments, language="en", generated=True, length=6_000.0, cut=False)
+    parts = split(long)
+    gemma = FakeGemma(*(text(f"- [{stamp(part.start)}] note {n}") for n, part in enumerate(parts)))
+    tools, _, _, _ = video_tools(store, FakeCaptions(long), gemma)
+    sent: list[tuple[int, str]] = []
+
+    async def notify(message: Any, note: str) -> None:
+        sent.append((message.id, note))
+
+    tools.set_notify(notify)
+    current = turn(store, f"summarise {VIDEO_LINK}")
+    result = await tools.call(current, "read_link", json.dumps({"url": VIDEO_LINK}))
+    assert sent == [(current.message.id, reading_note(long, len(parts)))]
+    assert result.startswith(prompts.VIDEO_MARK) and "note 0" in result and prompts.VIDEO_GENERATED in result
+    assert len(gemma.calls) == len(parts)
+
+
+async def test_a_second_read_of_the_same_video_in_one_answer_reads_nothing_again(store: Store) -> None:
+    # a planted "read the link again for the details" must not make one answer run every part call again (5 times)
+    segments = tuple((n * 5.0, f"the beam carries the load {n}") for n in range(1_200))
+    long = Captions(segments=segments, language="en", generated=False, length=6_000.0, cut=False)
+    parts = split(long)
+    assert len(parts) == 3
+    gemma = FakeGemma(*(text(f"- [{stamp(part.start)}] note {n}") for n, part in enumerate(parts)))
+    tools, source, _, _ = video_tools(store, FakeCaptions(long), gemma)
+    sent: list[str] = []
+
+    async def notify(message: Any, note: str) -> None:
+        sent.append(note)
+
+    tools.set_notify(notify)
+    current = turn(store, f"summarise {VIDEO_LINK}")
+    first = await tools.call(current, "read_link", json.dumps({"url": VIDEO_LINK}))
+    full = f"https://www.youtube.com/watch?v={VIDEO_ID}"
+    again = [await tools.call(current, "read_link", json.dumps({"url": url})) for url in (VIDEO_LINK, full)]
+    assert first.startswith(prompts.VIDEO_MARK) and again == [prompts.VIDEO_READ_ABOVE] * 2
+    assert len(gemma.calls) == 3 and len(sent) == 1 and source.asked == [VIDEO_ID]
+    later = turn(store, "and about steel?", ts=T0 + 200_000)  # a new message: its own answer reads it again
+    gemma.add(*(text("- [0:00] steel") for _ in parts))
+    assert (await tools.call(later, "read_link", json.dumps({"url": VIDEO_LINK}))).startswith(prompts.VIDEO_MARK)
+    assert len(gemma.calls) == 6
+
+
+async def test_the_same_video_in_another_form_counts_as_the_users_link(store: Store) -> None:
+    """She may pass youtube.com/watch?v=ID for the youtu.be/ID the user sent: the same video, so it is read; a video
+    the message does not name is refused."""
+    tools, source, _, _ = video_tools(store)
+    current = turn(store, f"summarise youtu.be/{VIDEO_ID}, thanks")
+    full = f"https://www.youtube.com/watch?v={VIDEO_ID}"
+    assert (await tools.call(current, "read_link", json.dumps({"url": full}))).startswith(prompts.VIDEO_MARK)
+    other = "https://www.youtube.com/watch?v=ZyXwVuTsR_-"
+    assert await tools.call(current, "read_link", json.dumps({"url": other})) == prompts.VIDEO_REFUSED
+    assert source.asked == [VIDEO_ID] and current.allowed_links == [f"youtu.be/{VIDEO_ID}"]  # the user's own form

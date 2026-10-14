@@ -23,14 +23,15 @@ In scope, for this project's code:
 
 - the bridge (`src/local_assistant/`), including its configuration handling and slash commands;
 - the voice service (`tools/voice/`);
-- the device, calendar and call helpers (`tools/tapo/`, `tools/ical/`, and the build and patch in `tools/call-tunnel/`);
+- the device, calendar, YouTube and call helpers (`tools/tapo/`, `tools/ical/`, `tools/youtube/`, and the build and patch
+  in `tools/call-tunnel/`);
 - the scripts and the launchd templates in `scripts/` and `launchd/`.
 
 Out of scope, report them upstream:
 
-- signal-cli, RingRTC and the upstream signal-call-tunnel (see `THIRD_PARTY_NOTICES.md`);
+- signal-cli, RingRTC, the upstream signal-call-tunnel and youtube-transcript-api (see `THIRD_PARTY_NOTICES.md`);
 - Ollama and the Gemma model;
-- the Signal, Microsoft, Google, Spotify, Brave and TP-Link services and apps.
+- the Signal, Microsoft, Google, YouTube, Spotify, Brave and TP-Link services and apps.
 
 ## What the project tries to protect
 
@@ -95,9 +96,22 @@ The full threat model is in [setup_assistant.md, section 8](setup_assistant.md#8
 - Calendar access is read-only: Google calendars through their iCal address, Outlook calendars with `Calendars.Read`
   only (its own token request, never mail's token).
 - A Google calendar's secret iCal address is kept in a mode 0600 file, read only by the calendar helper.
-- Lights and plugs are reached on the home network only. A device change requested after outside text (a web page, mail,
-  a calendar entry, a project file or a photo) waits for the user's yes.
+- Lights and plugs are reached on the home network only. A device change requested after outside text (a web page,
+  YouTube captions, mail, a calendar entry, a project file or a photo) waits for the user's yes.
 - Text from outside sources is treated as data, never as instructions.
+- YouTube: only a video link in the user's current message is read, and only its 11-character video ID reaches the
+  YouTube helper, never the link; a video found by a web search is never read. The helper asks only
+  https://www.youtube.com (every request and redirect checked, at most 3 redirects), with no proxy settings, no
+  cookie file, no account and no key of its own (it uses the public key YouTube puts in the video's page); cookies
+  YouTube sets last only for that one run. It stops itself after 20 s, and the bridge stops it at 30 s. YouTube sees
+  the Mac's internet address, the video's ID and a user agent that names this helper (local-assistant youtube
+  helper). The captions are outside text (no saved facts, no reminders, device changes wait for a yes, links
+  defanged; only the user's own video link stays tappable, never one Gemma passed) and never stored: the tool log
+  keeps the link, as the user's message does, and a stub in place of the captions, and the last video's captions stay
+  in memory only, for 10 minutes. Her answer never holds the captions word for word: code leaves out each sentence
+  that copies 13 or more of their words in a row, or shorter stretches of 6 or more that together make up more than
+  30% of them, and adds the video's link. Nothing is transcribed. Logs hold outcome codes, character counts and
+  times, never the video's ID or its title.
 - Reminders and wake-up calls come only from the user's own words: setting or cancelling one is refused in code in an
   answer that read outside text, and for a shared audio file or a photo. She places a call only to an allowed account and
   only for a reminder the user set; the confirmation is written by code.
@@ -151,7 +165,22 @@ user: a copy taken then still works. In this order:
   published: no fixed version, no check of their files. By FluidAudio 0.15.8's code they are fetched only when a file
   is missing; that was not tested with the network off.
 - Health checks (`[health] extra_checks`) follow redirects; list only services you run.
-- A link quoted inside outside text (a mail, a page, the calendar, a photo, a shared audio file) reaches you only
+- YouTube's terms forbid automated access and downloading its content, captions included, with no exception for
+  personal use; the YouTube helper does both: accepted for personal use. YouTube blocks heavy use and cloud servers; two reads from a home
+  connection worked, repeated use is untested. No proxy is used, so a block stops video links until YouTube lifts it
+  (`/status` and doctor show it).
+- The YouTube helper relies on an undocumented YouTube endpoint, through youtube-transcript-api 1.2.4 (pinned): it
+  reads the video's page, then YouTube's internal player address with the key from that page, naming YouTube's
+  Android app as its client, then the caption track. YouTube can change any of these without notice, or ask for a
+  token that proves a request comes from its own app (reported for some caption tracks); reads then fail
+  ("unreadable answer" in doctor and `/status`) until a newer pinned version. A change at YouTube or a reworded bot
+  check can also look like an answer: every video then seems to have no captions, or to be private or removed, and
+  `/status` and doctor still show YouTube working. If videos that clearly have captions get either answer, suspect
+  YouTube, not the video. The helper also calls two internal steps of that version, to learn which captions YouTube
+  shows by default: check them whenever the pin changes. In the EU, YouTube may first show its cookie consent form:
+  shown on www.youtube.com, the library accepts it with a cookie for that one run; a redirect to consent.youtube.com
+  is refused by the host check and the read fails ("unreadable answer"). Untested live.
+- A link quoted inside outside text (a mail, a page, YouTube captions, the calendar, a photo, a shared audio file) reaches you only
   defanged (`example[.]com/login`) unless you sent it yourself, in language practice too; a bare domain with an
   uncommon ending stays as written.
   Check a link's address before you open it, as with any message.

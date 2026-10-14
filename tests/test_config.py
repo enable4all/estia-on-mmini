@@ -1205,3 +1205,12 @@ def test_her_own_signal_cli_and_java_come_from_the_release_when_it_has_them(
     chosen = dataclasses.replace(cfg, calls_java_home=Path("/Library/Java/x/Contents/Home"))
     assert chosen.java_home == Path("/Library/Java/x/Contents/Home")  # the config wins
     assert load_config(write(tmp_path, GOOD + 'signal_cli = "/opt/sc"\n')).signal_cli == "/opt/sc"
+
+
+def test_the_youtube_helper_is_always_there_with_its_own_environment() -> None:
+    """YouTube is always on with read_link (no switch): the helper's command and time limit are defaults."""
+    cfg = parse_config({"bot_number": "+306900000000", "allowed_acis": [ACI]})
+    python, isolated, helper = cfg.youtube_helper
+    assert python.endswith("tools/youtube/.venv/bin/python") and isolated == "-I"
+    assert helper.endswith("tools/youtube/helper.py")
+    assert cfg.youtube_helper_timeout == 30  # the helper stops itself after 20 s

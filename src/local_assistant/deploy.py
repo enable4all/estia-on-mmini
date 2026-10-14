@@ -448,7 +448,7 @@ class Deploy:
         interp = found[-1] if found else release / f"python/cpython-{PYTHON_SERIES}-…/bin/python{PYTHON_SERIES}"
         if not found and not self.dry:
             raise DeployError("uv installed no Python into the release")
-        for project in (release, release / "tools" / "tapo", release / "tools" / "ical"):
+        for project in (release, release / "tools" / "tapo", release / "tools" / "ical", release / "tools" / "youtube"):
             self.build_step(
                 [
                     self.uv,
@@ -484,6 +484,7 @@ class Deploy:
             (release / ".venv/bin/python", "import local_assistant.app, local_assistant.doctor"),
             (release / "tools/tapo/.venv/bin/python", "import kasa"),
             (release / "tools/ical/.venv/bin/python", "import icalendar, recurring_ical_events"),
+            (release / "tools/youtube/.venv/bin/python", "import youtube_transcript_api, requests"),
         )
         prefix = self.build_step([str(interp), "-I", "-c", "import sys; print(sys.prefix)"]).strip()
         if not self.dry and not os.path.realpath(prefix).startswith(os.path.realpath(release)):  # /tmp is a link

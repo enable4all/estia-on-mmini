@@ -1128,3 +1128,59 @@ def test_the_always_on_line_reads_the_service_file_under_the_root_it_checks(
     (root / "Library/LaunchDaemons/com.local-assistant.bridge.plist").write_bytes(b"x")
     always_on = by_part(run(write_config(home, MINIMAL), FakeProbe(home)))["Always on"]
     assert always_on.status == "ok"
+
+
+# YouTube: always on with read_link; doctor checks the helper is in place and names its version (from its files: no
+# network, the helper is not run), then what its last real read did
+
+
+def youtube_at(monkeypatch: pytest.MonkeyPatch, venv: Path) -> None:
+    def load(path: Path) -> Config:
+        return replace(load_config(path), youtube_helper=(str(venv / "bin" / "python"), "-I", "helper.py"))
+
+    monkeypatch.setattr(doctor, "load_config", load)
+
+
+def built_youtube(home: Path, version: str = "1.2.4") -> Path:
+    venv = home / "tools/youtube/.venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").write_text("#!/bin/sh\n")
+    (venv / f"lib/python3.13/site-packages/youtube_transcript_api-{version}.dist-info").mkdir(parents=True)
+    return venv
+
+
+def test_the_youtube_helper_is_checked_with_its_version(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    youtube_at(monkeypatch, built_youtube(home))
+    path = write_config(home, MINIMAL)
+    findings = run(path, FakeProbe(home))
+    youtube = by_part(findings)["YouTube"]
+    assert youtube.status == "untested" and youtube.text == "set up, not tested yet (youtube-transcript-api 1.2.4)"
+    recorded(path).ok("youtube")
+    assert by_part(run(path, FakeProbe(home)))["YouTube"].status == "ok"
+    assert exit_code(findings) == 0
+
+
+def test_a_missing_youtube_helper_is_a_warning_with_its_fix(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    youtube_at(monkeypatch, home / "no-such-venv")
+    findings = run(write_config(home, MINIMAL), FakeProbe(home))
+    youtube = by_part(findings)["YouTube"]
+    assert (youtube.status, youtube.text) == ("warn", "the YouTube helper is not set up: video links cannot be read")
+    assert youtube.fix == "cd tools/youtube && uv sync --frozen" and exit_code(findings) == 0
+
+
+def test_in_her_own_user_a_missing_youtube_helper_names_the_deploy(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # there the release's helper is built by the deploy: the uv line would fail in a root-owned release
+    youtube_at(monkeypatch, home / "no-such-venv")
+    probe = FakeProbe(home)
+    probe.own = True
+    youtube = by_part(run(write_config(home, MINIMAL), probe))["YouTube"]
+    assert youtube.status == "warn" and "cd tools/youtube" not in youtube.fix
+    assert youtube.fix.startswith("/usr/bin/sudo /usr/local/estia/bin/estia-deploy") and "--update-tools" in youtube.fix
+
+
+def test_a_failing_youtube_read_names_the_next_step(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    youtube_at(monkeypatch, built_youtube(home))
+    path = write_config(home, MINIMAL)
+    recorded(path).failed("youtube", "bad_answer")
+    youtube = by_part(run(path, FakeProbe(home)))["YouTube"]
+    assert youtube.status == "fail" and "tools/youtube" in youtube.fix

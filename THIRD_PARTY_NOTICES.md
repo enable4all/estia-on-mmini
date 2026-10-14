@@ -11,12 +11,14 @@ Components marked "installed" are fetched or built on your machine by the setup 
 | Component | Licence | How it is used |
 |---|---|---|
 | Bridge (`src/`) | MIT | This project's own code. Python standard library only at runtime. |
-| ruff, mypy, pytest, pytest-asyncio, uv_build | MIT / Apache-2.0 / MIT | Development tools only; not shipped. |
+| ruff, mypy, pytest, pytest-asyncio, uv_build, types-requests | MIT, MIT, MIT, Apache-2.0, MIT or Apache-2.0, Apache-2.0 | Development tools only; not shipped. |
 | python-kasa 0.11.0.1 | GPL-3.0-or-later | Installed only in `tools/tapo`'s own uv environment; not vendored. The bridge runs `tools/tapo/helper.py` as a separate process, and that helper imports python-kasa. The helper's own code stays MIT. If you distribute the helper together with python-kasa, python-kasa's GPL-3.0 terms apply to that combined distribution. |
 | aiohttp and the other `tools/tapo` dependencies | Apache-2.0 / BSD-3-Clause / MIT / MIT-0 / PSF-2.0 | Installed in `tools/tapo`'s environment. |
 | icalendar 7.3.0 | BSD-2-Clause | Installed in `tools/ical`'s environment; imported by the calendar helper. |
 | recurring-ical-events 3.8.2, x-wr-timezone 2.0.1 | LGPL-3.0-or-later | Installed in `tools/ical`'s environment; imported, unmodified. |
 | python-dateutil, six, tzdata, click | Apache-2.0 / BSD-3-Clause, MIT, Apache-2.0, BSD-3-Clause | Installed in `tools/ical`'s environment (dependencies). |
+| youtube-transcript-api 1.2.4 | MIT | Installed only in `tools/youtube`'s own uv environment; imported, unmodified, by the YouTube helper. Not vendored. It reads YouTube's undocumented caption endpoint (SECURITY.md, known gaps). |
+| requests 2.34.2, urllib3 2.8.0, idna 3.20, charset-normalizer 3.5.2, certifi 2026.7.22, defusedxml 0.7.1 | Apache-2.0, MIT, BSD-3-Clause, MIT, MPL-2.0, PSF-2.0 | Installed in `tools/youtube`'s environment (dependencies, pinned in its `uv.lock`); used unmodified. |
 | WhisperKit 1.1.1 | MIT (its NOTICES list swift-transformers, Apache-2.0) | Swift package used by `tools/voice`. |
 | FluidAudio 0.15.8 | Apache-2.0 (with its own third-party licence file) | Swift package used by `tools/voice`. |
 | swift-argument-parser 1.8.2 | Apache-2.0 | Swift package used by `tools/voice`. |
@@ -35,7 +37,8 @@ Components marked "installed" are fetched or built on your machine by the setup 
 | OpenJDK | GPL-2.0 with the Classpath Exception | Runtime only, for the JVM build of signal-cli; installed separately. |
 
 Online services used when you turn their features on (Signal, Microsoft Graph, Google Calendar iCal and Places/Routes,
-Spotify Web API, Brave Search, Ollama web search) are services, not software in this repository. Their own terms apply.
+Spotify Web API, Brave Search, Ollama web search), and YouTube for a video link you send, are services, not software
+in this repository. Their own terms apply. YouTube's terms forbid automated access: see SECURITY.md, known gaps.
 
 ## Copied or adapted code
 

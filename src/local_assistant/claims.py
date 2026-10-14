@@ -241,7 +241,7 @@ _SENTENCE_END = re.compile(r"(?<=[.!?…])\s+|(?<=[。！？])")
 _EMOJI = re.compile(r"^[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F\u200D]+\s*")  # ends the sentence before it
 
 
-def _sentences(line: str) -> list[str]:
+def sentences(line: str) -> list[str]:
     """A line's sentences; an emoji after a sentence's end belongs to it ("All set! 😊")."""
     sentences: list[str] = []
     for part in _SENTENCE_END.split(line.strip()):
@@ -341,15 +341,15 @@ def without_reminder_talk(text: str, *, saved: bool = False) -> str:
     sentences and line breaks stay; "" when nothing is left. `saved`: the answer saved a fact, so its "Noted: <fact>" is read without "Noted:"."""
     lines: list[str] = []
     for line in text.splitlines():
-        sentences = _sentences(line)
+        parts = sentences(line)
         kept = [
             sentence
-            for sentence in sentences
+            for sentence in parts
             if not _WORDS.search(sentence)
             and not _DONE_ALONE.match(sentence)
             and not claims_a_reminder(sentence, broad=True, saved=saved)
         ]
-        if kept or not sentences:
+        if kept or not parts:
             lines.append(" ".join(kept))
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 

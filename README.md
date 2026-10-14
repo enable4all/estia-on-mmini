@@ -56,6 +56,7 @@ In Signal, her profile reads Estia (AI), or the name set as `name` in the config
 | Lights and plugs | "Turn off the living room lamp" | Kasa devices on the home network, never through the TP-Link cloud |
 | The Mac | "How is the Mac doing?" | A few lines on its health. Real problems are reported without being asked. |
 | Photos | Send a photo with a question | An answer about the photo. The photo is deleted after the first answer. |
+| YouTube videos | Send a YouTube link, with or without a question | A summary from the video's captions, with the time of each main point. Follow-up questions by text about the last video, within 10 minutes, need no new link. The captions are never stored. |
 | Web search | "Who won the match last night?" | An answer that names the site and how recent it is, plus a Sources message |
 | Places and routes | "A good Italian place near me?" · "How long to the station by bike?" | Up to five places with rating, price and today's hours, or the time, distance and lines, with Google Maps links (once set up) |
 | Projects | "What's next on <project>?" | Open to-do items and recent changes from a project on the Mac. An extra, off by default. |
@@ -94,6 +95,16 @@ Each device has one rule: `normal`, `ask first` (waits for a yes, which must com
 ### Photos
 
 A photo, with or without a question: "what is this?", "what colour was it?". Up to four photos fit in one message. Follow-up questions within five minutes still see the photo. After that, the photo must be sent again. The file is deleted after the first answer.
+
+### YouTube videos
+
+A YouTube link, with or without a question: "what's the main point?", "what does it say about sleep?". The answer comes from the video's captions only, with the time of each main point, and says when YouTube generated the captions automatically (names and terms may be misheard). Only a link in your current message is read. A video found by a web search is named, never read.
+
+A long video is read in parts, up to its first 2 hours, after a note: "Reading a 1 h 40 min video: about 1 minute." Captions too long to read whole (more than 120,000 characters) are read up to there, and the note and her answer say how far. An answer is at most about 300 words and never holds the captions word for word: code leaves out any sentence of hers that copies 13 or more of their words in a row, or shorter stretches of 6 or more that together make up more than 30% of them, and adds the YouTube link. Asked for the full transcript, she gives the link.
+
+Follow-up questions by text about the last video, within 10 minutes of the first read, need no new link. One video is kept at a time: a new link replaces it. The captions are kept in memory only, never on disk, and are gone after those 10 minutes or at `/new`. They are never stored or learned from, and `/learn` refuses a video link. A video without captions is not read: nothing is transcribed. Calls never read a video, since a link cannot be spoken.
+
+Only YouTube's own site, www.youtube.com, is asked, with the video's ID (the 11-character code in the link), never the whole link. No account and no key of yours (the helper uses the public key YouTube puts in the video's page); cookies YouTube sets last only for that one read. Other YouTube addresses (a playlist, a channel, youtube-nocookie.com) are read as ordinary web pages, which hold little more than the title. YouTube's terms forbid automated access and downloading its content: a known gap, accepted for personal use ([SECURITY.md](SECURITY.md#known-accepted-gaps)).
 
 ### Web search, with sources
 
@@ -262,14 +273,14 @@ Paraphrased; real wording varies. The music example assumes Spotify is set up.
 - **A security step in setup.** Remote login (SSH) with keys only, no admin rule that skips your password, her files private, and her Registration Lock (a Signal PIN on her number): each shown with its state, and changed only on your yes (`scripts/harden.sh`). FileVault, automatic login, the screen lock and a few more are shown with their fix, never changed.
 - **The nuclear option.** `scripts/harden.sh --nuclear` adds the strictest settings: the Mac's firewall, stealth mode (its own question, default no), python3 and ruby (programs that run scripts) off the firewall's list of programs let in, and a login keychain that locks after 15 minutes and at sleep. It says first, plainly, that they may stop other services on this Mac: programs that other devices reach (a file share, a media server, a page you open from your laptop) stop answering them unless you allow each one; with stealth mode the Mac no longer answers ping, the usual "are you there?" check; with the keychain lock, macOS asks for your password more often. Each one is asked first and changed only on your yes, and it is never part of setup. The firewall question names the programs that listen for other devices now and asks about keeping each one; with the firewall on, doctor names a new one later, with the two commands that let it through. Without `--nuclear`, these settings are one neutral line in the security step and in doctor, never a warning. Nothing turns off what a Mac already has.
 - **Mail and calendars are read-only.** She never sends, moves, deletes or marks mail, and never changes a calendar event.
-- **Outside text is read as information, not as orders.** That covers web pages, search and map results, mail, calendar entries, project files, photos and shared audio files. Code rules reduce prompt injection (orders hidden in that text) but cannot rule it out. A device change after outside text waits for your yes, and device, profile and reminder changes have their own checks in code.
-- **Only your words teach her.** Facts come from what you say, or from a page you ask her to learn from with `/learn`. Mail, calendar entries, web and map results never teach her anything.
-- **Reminders come only from you.** She sets a reminder or a wake-up call only when you ask in your own words, never because a mail, a page, a calendar entry or a shared audio file says so. She calls only the allowed Signal accounts, and only for a reminder you set.
+- **Outside text is read as information, not as orders.** That covers web pages, YouTube captions, search and map results, mail, calendar entries, project files, photos and shared audio files. Code rules reduce prompt injection (orders hidden in that text) but cannot rule it out. A device change after outside text waits for your yes, and device, profile and reminder changes have their own checks in code.
+- **Only your words teach her.** Facts come from what you say, or from a page you ask her to learn from with `/learn`. Mail, calendar entries, YouTube captions, web and map results never teach her anything.
+- **Reminders come only from you.** She sets a reminder or a wake-up call only when you ask in your own words, never because a mail, a page, a video, a calendar entry or a shared audio file says so. She calls only the allowed Signal accounts, and only for a reminder you set.
 - **When the AI writes part of a message she starts, it sees only your words, your profile and the moment.** Never mail, calendar entries, the web or a page. The code decides when. Calendar notes are written by the code from the calendar, with no model. A text is not sent when it claims she did something, asks for a code or a password, or holds a link: any web address, with or without https:// or www., on any ending, such as "example.ch/x". The words that ask for a code or a password, and claims of a reminder or a call, are checked in all 11 languages. The other word checks read English; in other languages her rules and the AI test set carry the rest.
 - **A shared audio file is not your voice.** An audio file shared from another app counts as someone else's words. She can summarise it. She never learns from it, never counts it as your yes, and never switches a device because of it. A voice note forwarded inside Signal may still count as yours.
 - **Every device has a rule.** Each device is `normal`, `ask first` or `never off` (switching it off is refused). A device change in a message that is not about devices also waits for your yes.
 - **No shell.** The AI has no command line: it cannot type commands on the Mac. With Projects on, she reads only files git tracks in the folder you named, at the level you chose, never secret-like files such as `.env`.
-- **Chats, voice-note and call transcripts, memory and profile stay on the Mac.** They sit in one database on the Mac (`assistant.db`) until you delete it. Photos, voice audio and call audio are deleted after use. Mail bodies, web results and map results are never stored. Logs hold only what happened and when, never message text. Keys and config files are readable only by her own account (`_estia`), and your copies of keys stay in your login keychain.
+- **Chats, voice-note and call transcripts, memory and profile stay on the Mac.** They sit in one database on the Mac (`assistant.db`) until you delete it. Photos, voice audio and call audio are deleted after use. Mail bodies, YouTube captions, web results and map results are never stored. Logs hold only what happened and when, never message text. Keys and config files are readable only by her own account (`_estia`), and your copies of keys stay in your login keychain.
 - **Places stay rough.** For "near me", only an area rounded to about a kilometre goes to Google, or the location you sent. Your home address goes to Google when it is looked up once, and for routes from or to home. The address stays in the config file only: the database keeps the rounded area and a scrambled tag of the address, to notice when it changes, never the address itself. A Directions link to or from home names that rounded area, never the address. An address an earlier version kept in the database, in those rows or in a Directions link it sent, is removed at the next start. An answer that read your mail or your projects never sends anything to Google Maps.
 
 Known gaps are listed in [SECURITY.md](SECURITY.md#known-accepted-gaps).
@@ -287,6 +298,7 @@ The model always runs on the Mac. Outside services are reached only for Signal, 
 | Lights and plugs (home network) | Spotify, for music |
 | | Google Maps, for places and routes |
 | | Web pages: links you send her, and the top result of a Brave search |
+| | YouTube, for the captions of a video link you send |
 
 Setup also downloads the model (from ollama.com) and, for calls, signal-cli and the call helper's source code (from GitHub and crates.io). It runs Homebrew, the installer for Mac tools, with Homebrew's usage reports (analytics) off; brew commands you type yourself keep your own Homebrew setting.
 
@@ -305,7 +317,7 @@ The voice models come from Hugging Face, an online library of AI models. Whisper
    ├── Database (SQLite)  memory, history, mail headers
    ├── Gemma via Ollama   the AI model on the Mac, with its tools
    ├── Voice service      speech-to-text and text-to-speech (Neural Engine)
-   └── Helpers            lights and plugs, calendar, call audio
+   └── Helpers            lights and plugs, calendar, YouTube, call audio
 ```
 
 | Part | Where in the repo | How it runs |
@@ -314,6 +326,7 @@ The voice models come from Hugging Face, an online library of AI models. Whisper
 | Voice service | `tools/voice/` (Swift) | Always on, as `com.local-assistant.voice`, as `_estia`, reachable only from the Mac itself |
 | Device helper | `tools/tapo/` | Started per command, in its own Python environment |
 | Calendar helper | `tools/ical/` | Started per read, in its own Python environment |
+| YouTube helper | `tools/youtube/` | Started per video read, in its own Python environment |
 | Call helper | Build script, pins and patch in `tools/call-tunnel/` (built on your machine) | Started by signal-cli for each call |
 | Scripts | `scripts/` | Run, health check, install, the move into her own user, the security step, sign-ins and keys |
 | Her commands | `scripts/estia`, `scripts/estia-deploy`, installed in `/usr/local/estia/bin`, owned by root | `/usr/bin/sudo /usr/local/estia/bin/estia doctor`, `logs`, `check`, sign-ins and keys, as `_estia`; `/usr/bin/sudo /usr/local/estia/bin/estia-deploy` puts an update live |
@@ -343,6 +356,7 @@ An install from before her own user keeps the same files in your home (`~/.confi
 - Cloud model: a model Ollama runs on its own servers instead of the Mac. Estia refuses one.
 - Tool: an action the AI may take, such as checking the calendar or the lights.
 - Calendar link (iCal address): a private link to a calendar. Treat it like a password.
+- Captions: the words spoken in a video, written out with their times: by hand, or generated automatically by YouTube.
 - LaunchDaemon: a macOS background service that starts with the Mac.
 - `_estia`: her own hidden macOS account. She runs as it, and only it can read her data.
 - root: the Mac's all-powerful admin account.
@@ -368,6 +382,10 @@ An install from before her own user keeps the same files in your home (`~/.confi
 | "Mailbox <name> needs a new sign-in" | Microsoft ended the sign-in (password or MFA reset, or long unused) | Run `scripts/mail-login.sh <address>` again |
 | "Spotify needs a new sign-in" | Spotify sign-ins last about six months | Run `scripts/spotify-login.sh` |
 | "… isn't answering" for a device | Switched off at the wall, or a new network address | Check the plug. If its address changed, run `scripts/tapo-discover.sh`. |
+| She says a video has no captions | The video has none on YouTube | Nothing to fix: a video is never transcribed on the Mac |
+| She says every video has no captions, or that each one cannot be watched | YouTube may have changed, or be blocking this Mac with a check the helper does not recognise. `/status` and doctor still show YouTube working then | Try a video you know has captions. If it fails the same way, a newer pinned `tools/youtube` may be needed |
+| She says YouTube is refusing requests from this Mac, or `/status` shows "YouTube: failing since …: refused by the service" | YouTube blocks a Mac for a while after many requests or a bot check | Wait, then send the link again. No proxy is used, so there is no way around a block |
+| She says the YouTube helper is not set up, or doctor shows "! YouTube" | The YouTube helper's own Python environment is missing | Before her own user: run `cd tools/youtube && uv sync --frozen`. In her own user: run `/usr/bin/sudo /usr/local/estia/bin/estia-deploy`. If it says the root-run tools differ, read the diff, run `/usr/bin/sudo /usr/local/estia/bin/estia-deploy --update-tools`, then run `/usr/bin/sudo /usr/local/estia/bin/estia-deploy` again |
 | Replies stop | Signal's safety number changed | Confirm the number in Signal first. See `setup_assistant.md`, Operations. |
 | "A message came from a new linked device N and was held." | A device was linked to your Signal account | Yours: send `/devices ok N` from your phone. Not yours: remove it in Signal → Settings → Linked devices, then turn on Registration Lock for your number. |
 | The laptop cannot reach a program on the Mac (a page you open from your laptop, a file share) | The firewall is on (`scripts/harden.sh --nuclear`, an earlier security step, or your own choice) and does not let that program through: a Mac without a screen has nobody to click "Allow" | Run `/usr/bin/sudo /usr/local/estia/bin/estia doctor`: a "! Firewall: … cannot be reached from other machines" line gives the two commands that let a program you started through, with its full path. After a Homebrew update the path changes: run doctor again |
@@ -386,7 +404,7 @@ An install from before her own user keeps the same files in your home (`~/.confi
 | `/profile` | Numbered facts, with where each came from and when |
 | `/fix N new text` | Correct fact N in your own words. It keeps its number, and from then on it counts as yours |
 | `/forget N` or `/forget words` | Remove fact N, or the one fact containing the words (if several match, she lists them and asks for the number) |
-| `/learn <link>` | Learn about you from a page, and list what was saved |
+| `/learn <link>` | Learn about you from a page, and list what was saved. Not a YouTube link: captions are never kept |
 | `/status` | Model state, waiting messages, profile fill, last learning run, history size, Signal restarts, and each part's state: ✓ working (with the time), ○ set up but not tested yet, or ✗ failing (with the fix) |
 | `/voice auto`, `on` or `off` | Spoken answers to voice notes (auto, the default), to every answer, or never |
 | `/voice echo on` or `off` | Show what she heard before she answers a voice note |
@@ -456,8 +474,8 @@ Keys and sign-ins go through these scripts, never through chat and never into th
 ## Tests and checks
 
 - `scripts/doctor.sh` checks the setup on the Mac, read-only: before the first start and after each optional part. For a part that is set up, it shows what the bridge's last real use of it did: ✓ working (with the time), ○ set up but not tested yet, or ✗ failing (with the fix). A file in place is not enough for ✓.
-- Before every commit, `scripts/verify.sh` runs a privacy check (`scripts/privacy_scan.py`: no private files, keys, addresses, phone numbers, account IDs or home paths in the repo), then ruff (lint and format), mypy in strict mode and pytest. The tests run offline, with fakes for Signal, the voice service, the device helper and the model.
-- The helpers have their own tests: `tools/voice` has Swift tests (`swift test`), and `tools/tapo` and `tools/ical` have pytest suites (`uv run pytest -q`).
+- Before every commit, `scripts/verify.sh` runs a privacy check (`scripts/privacy_scan.py`: no private files, keys, addresses, phone numbers, account IDs or home paths in the repo), then ruff (lint and format), mypy in strict mode and pytest. The tests run offline, with fakes for Signal, the voice service, the device helper, the YouTube helper and the model.
+- The helpers have their own tests: `tools/voice` has Swift tests (`swift test`), and `tools/tapo`, `tools/ical` and `tools/youtube` have pytest suites (`uv run pytest -q`; the YouTube helper's tests run on recorded YouTube answers, with no network).
 - `uv run python -m evals.gemma_suite` runs test cases against the real model on your Mac. It uses the model in your config (`local-worker` when `model` is unset); `EVAL_MODEL=<tag>` runs another tag. A run passes when every safety case passes and at least 90% of the rest do. The model does not give the same answer every time, so run the suite twice before trusting a prompt change. `EVAL_LANGUAGE=nl` runs the safety cases and three language cases with the rule line for that language. `EVAL_NAME=<name>` gives her another name (default Estia). Without `EVAL_SOUL`, she has her built-in style, and two cases check it: a light joke when invited, none on a worry. `uv run python -m evals.gemma_suite practice` runs the language-practice cases, two per offered language (`practice_nl` runs Dutch's two); they are never part of a run without names.
 - For a phone walk-through, `docs/e2e-checklist.md` lists what to check from a real phone: texts, voice, calls, lights, mail, calendar, music, web search, languages, language practice, reminders and wake-up calls, and the messages she starts.
 - To check health without Signal, run `/usr/bin/sudo /usr/local/estia/bin/estia check` on the Mac (for example over SSH; `scripts/check.sh` before her own user). It covers the case where the bridge itself is down, since the bridge can't report its own outage. Other services can be watched with `[health] extra_checks`; none are watched by default.
@@ -473,6 +491,7 @@ Keys and sign-ins go through these scripts, never through chat and never into th
 | Kokoro | Text-to-speech in English, for voice notes and calls |
 | Supertonic-3 (through FluidAudio) | Text-to-speech in the other ten languages |
 | python-kasa | Talks to Kasa devices on the home network |
+| youtube-transcript-api | Reads a YouTube video's captions, in the YouTube helper |
 | Brave Search | Web search backup |
 | Google Places API (New) and Routes API | Places and routes |
 | Microsoft Graph | Read-only access to mail |

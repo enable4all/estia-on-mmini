@@ -97,6 +97,7 @@ async def start(
         "busy_note_seconds": 5.0,
         "typing_refresh_seconds": 0.05,
         "signal_attachments_dir": folder / "attachments",
+        "youtube_helper": (str(tmp_path / "no-youtube-helper"),),  # never the real one: it would ask www.youtube.com
     }
     options.update(settings)
     cfg = Config(bot_number="+306900000000", data_dir=tmp_path / "data", log_dir=tmp_path / "logs", **options)
@@ -907,7 +908,8 @@ def test_an_outlook_calendar_is_read_through_its_own_graph(tmp_path: Path) -> No
         assert isinstance(outlook, OutlookReader) and outlook._status is app.part_status
         assert app.mail_sync is not None and outlook._graph is not app.mail_sync._graph  # never mail's Graph
         assert outlook._graph._scope == CALENDAR_SCOPES
-        assert [line.label for line in part_lines(cfg, {}, 0)] == ["Mail (family)", "Calendar", "Calendar (work)"]
+        labels = [line.label for line in part_lines(cfg, {}, 0)]
+        assert labels == ["Mail (family)", "Calendar", "Calendar (work)", "YouTube"]
     finally:
         store.close()
 
@@ -931,9 +933,10 @@ async def test_status_tells_what_each_part_last_did(tmp_path: Path) -> None:
             Fetcher(),
             clock=lambda: now,
         )
-        assert (await app.status()).parts == ("Calendar: set up, not tested yet",)
+        untested = "YouTube: set up, not tested yet"  # always on with read_link
+        assert (await app.status()).parts == ("Calendar: set up, not tested yet", untested)
         await app._status_lines()  # reads the calendar for real
-        assert (await app.status()).parts == ("Calendar: working, last read 11:40",)
+        assert (await app.status()).parts == ("Calendar: working, last read 11:40", untested)
         assert read_part_status(cfg.data_dir / "status.json") == {"calendar": Record(ok=now)}  # doctor reads this
     finally:
         store.close()
@@ -3910,5 +3913,69 @@ async def test_a_practice_call_turn_while_the_model_is_paused_says_codes_line(
         app.call_started(ME)
         turn = await app.call_turn(ME, "Ik woon in Utrecht.", lambda: None, practice=True)
         assert (turn.text, turn.code_text) == ("", prompts.MODEL_PAUSED_SPOKEN)
+    finally:
+        await stop(harness)
+
+
+# YouTube links: /learn refuses them; a long video's note comes before the answer (and no busy note); /new drops the
+# kept captions
+
+YOUTUBE = Path(__file__).parent / "fakes" / "fake_youtube_helper.py"
+VIDEO_LINK = "https://youtu.be/AbCdEfGhI_-"
+
+
+def youtube_helper(tmp_path: Path, seconds: float) -> tuple[str, ...]:
+    """The fake YouTube helper with made-up captions of `seconds` (a segment every 5 s)."""
+    state = tmp_path / "youtube.json"
+    segments = [[n * 5.0, f"the beam carries the load {n}"] for n in range(int(seconds / 5))]
+    answer = {"ok": True, "language": "en", "generated": False, "length": seconds, "cut": False, "segments": segments}
+    state.write_text(json.dumps(answer))
+    return (sys.executable, str(YOUTUBE), str(state))
+
+
+async def test_the_harness_never_runs_the_real_youtube_helper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # a test that sends a video link with the default settings must never reach www.youtube.com
+    harness = await start(tmp_path, monkeypatch, FakeGemma())
+    try:
+        command = " ".join(harness.app.cfg.youtube_helper)
+        assert "tools/youtube" not in command and not Path(harness.app.cfg.youtube_helper[0]).exists()
+    finally:
+        await stop(harness)
+
+
+async def test_learn_refuses_a_video_link(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class NoFetcher(Fetcher):
+        def fetch(self, url: str) -> Page:
+            raise AssertionError("a video link reached the fetcher")
+
+    harness = await start(tmp_path, monkeypatch, FakeGemma(), fetcher=NoFetcher())
+    try:
+        deliver(harness.folder, f"/learn {VIDEO_LINK}", T0)
+        await until(lambda: sent(harness.folder) == [prompts.VIDEO_LEARN_COMMAND])
+        assert harness.gemma.calls == []
+    finally:
+        await stop(harness)
+
+
+async def test_a_long_videos_note_comes_first_and_no_busy_note(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    slow: asyncio.Future[Completion] = asyncio.get_running_loop().create_future()
+    gemma = FakeGemma(tool("read_link", url=VIDEO_LINK), slow, text("- [20:00] notes"), text("- [40:00] notes"))
+    gemma.add(text("A lecture on beams [0:00]."))
+    harness = await start(
+        tmp_path, monkeypatch, gemma, busy_note_seconds=0.3, youtube_helper=youtube_helper(tmp_path, 6_000)
+    )
+    try:
+        deliver(harness.folder, f"summarise {VIDEO_LINK}", T0)
+        note = "Reading a 1 h 40 min video: about 1 minute."
+        await until(lambda: sent(harness.folder) == [note])
+        await asyncio.sleep(0.5)  # past the busy note's time: the video's note replaced it
+        slow.set_result(text("- [0:00] notes"))
+        await until(lambda: sent(harness.folder) == [note, "A lecture on beams [0:00]."])
+        assert len(gemma.calls) == 5  # the tool call, three parts, the answer
+        logged = harness.app.store.tool_calls()[0]
+        assert logged.result == prompts.VIDEO_STUB
+        assert harness.app.videos.held() == 1  # kept for a follow-up
+        deliver(harness.folder, "/new", T0 + 1)
+        await until(lambda: harness.app.videos.held() == 0)  # /new: gone from memory
     finally:
         await stop(harness)

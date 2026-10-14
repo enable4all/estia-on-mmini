@@ -596,6 +596,8 @@ def _fix_saved(cfg: Config, folder: Path, part: str, reason: str) -> float | Non
             return _changed(Path(cfg.calendar_helper[0]))
         case "devices", "helper_missing":
             return _changed(Path(cfg.tapo_helper[0]))
+        case "youtube", "helper_missing":
+            return _changed(Path(cfg.youtube_helper[0]))
     return None
 
 
@@ -724,7 +726,27 @@ def _optional_parts(cfg: Config, folder: Path, probe: Probe, states: _States) ->
             if _private_file(cfg.spotify_token_path)
             else Finding("fail", "Spotify", "not signed in yet", "scripts/spotify-login.sh")
         )
+    found.append(_youtube(cfg, states, own=probe.moved()))  # always on, with read_link
     return found
+
+
+def _youtube(cfg: Config, states: _States, *, own: bool = False) -> Finding:
+    """The YouTube helper in place, with the library's version from its own files (nothing is run, no network), then
+    what its last real read did. Missing is a warning: only video links are affected. In her own user a deploy builds
+    it in the release (`own`), else the uv line."""
+    python = Path(cfg.youtube_helper[0])
+    if not python.exists():
+        return Finding(
+            "warn",
+            "YouTube",
+            "the YouTube helper is not set up: video links cannot be read",
+            prompts.DOCTOR_YOUTUBE_DEPLOY_FIX.format(deploy=ownuser.DEPLOY_CMD)
+            if own
+            else "cd tools/youtube && uv sync --frozen",
+        )
+    found = sorted(python.parents[1].glob("lib/python*/site-packages/youtube_transcript_api-*.dist-info"))
+    version = found[-1].name.removeprefix("youtube_transcript_api-").removesuffix(".dist-info") if found else ""
+    return states.finding("youtube", f"youtube-transcript-api {version}" if version else "")
 
 
 def _calendar(cfg: Config, folder: Path, source: CalendarSource, states: _States) -> Finding:

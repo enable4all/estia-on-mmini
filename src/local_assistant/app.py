@@ -92,6 +92,7 @@ from local_assistant.spotify_auth import SpotifyAuthError, SpotifyTokens, login
 from local_assistant.store import Attachment, Message, MessageKind, MessageStatus, Store
 from local_assistant.timefmt import iso_to_epoch, local_hhmm
 from local_assistant.tools import Tools, project_schemas, tool_schemas
+from local_assistant.video import CaptionHelper, VideoReader, video_id
 from local_assistant.voice import (
     VoiceClient,
     VoiceError,
@@ -471,6 +472,12 @@ class App:
             clock=clock,
             extra_lines=self._status_lines,
         )
+        # YouTube links in a message: their captions through tools/youtube (always on with read_link), the last video
+        # kept in memory for 10 minutes per account; a long one read in parts by Gemma
+        self.videos = VideoReader(
+            CaptionHelper(cfg.youtube_helper, cfg.youtube_helper_timeout, status=self.part_status), gemma
+        )
+        self._busy: dict[int, asyncio.Task[None]] = {}  # each answer's busy note, until it is sent or not needed
         self.tools = Tools(
             store,
             self.profile,
@@ -486,6 +493,7 @@ class App:
             web=self.web,
             maps=self.maps,
             reminders=self.reminders,
+            videos=self.videos,
             base_schemas=tool_schemas(
                 host_label=cfg.host_label, checks=[check.label for check in cfg.health_extra_checks]
             ),
@@ -520,6 +528,7 @@ class App:
         )
         self.tools.set_consolidate(self.profiler.consolidate_for)
         self.tools.set_learn_page(self.profiler.learn_page)
+        self.tools.set_notify(self._tool_note)
         voice_client = self.voice or self._call_voice  # the same service: the one asked whether it has a language
         self.commands = Commands(
             store,
@@ -527,7 +536,7 @@ class App:
             self.context,
             cfg.timezone,
             self.status,
-            self.profiler.request_soon,
+            self._on_new,
             learn=self._learn_command,
             voice=self.voice is not None,
             set_voice=self._set_voice,
@@ -1216,6 +1225,7 @@ class App:
             return
         typing = asyncio.create_task(self._typing_loop(message.peer_aci))
         busy = asyncio.create_task(self._busy_note(message))
+        self._busy[message.id] = busy
         text: str
         notes: list[str] = []
         kind: MessageKind
@@ -1300,6 +1310,7 @@ class App:
         finally:
             typing.cancel()
             busy.cancel()
+            self._busy.pop(message.id, None)
             self._drop_attachments(message.id)  # photos live only until answered
             with contextlib.suppress(SignalError, NotAllowedError):
                 await self.signal.typing(message.peer_aci, stop=True)
@@ -1547,8 +1558,23 @@ class App:
             initiative=tuple(self.initiative.status_lines()) if self.initiative else (),
         )
 
+    def _on_new(self) -> None:
+        """/new: learn from the closing conversation soon; the kept video's captions go (memory only)."""
+        self.profiler.request_soon()
+        self.videos.clear()
+
+    async def _tool_note(self, message: Message, text: str) -> None:
+        """Code's note during an answer (before a long video is read): sent at once, never in Gemma's history; it
+        says what takes the time, so the busy note is not needed."""
+        busy = self._busy.get(message.id)
+        if busy is not None:
+            busy.cancel()
+        await self._send(self.store.add_outgoing(message.conversation_id, message.peer_aci, "note", text, message.id))
+
     async def _learn_command(self, url: str, message: Message) -> str:
         """/learn <link>: read the page, extract the facts about the user (one structured Gemma call), report."""
+        if video_id(url) is not None:  # /learn keeps the page it reads; a video's captions are never kept
+            return prompts.VIDEO_LEARN_COMMAND
         try:
             page = await self._fetch(url)
         except FetchError as exc:

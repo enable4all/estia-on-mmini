@@ -16,3 +16,7 @@ fi
 if [[ -f tools/ical/pyproject.toml ]]; then
   (cd tools/ical && uv run --frozen -q pytest -q && uv run --frozen -q mypy)
 fi
+# and the YouTube helper (youtube-transcript-api, requests)
+if [[ -f tools/youtube/pyproject.toml ]]; then
+  (cd tools/youtube && uv run --frozen -q pytest -q && uv run --frozen -q mypy)
+fi

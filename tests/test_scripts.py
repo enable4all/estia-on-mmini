@@ -786,3 +786,18 @@ def test_share_projects_without_her_user_changes_nothing(tmp_path: Path) -> None
     (tmp_path / "home" / "dev").mkdir(parents=True)
     done = run_script("share-projects.sh", env=owner_env(tmp_path, stubs))
     assert done.returncode == 1 and "does not exist yet" in done.stdout
+
+
+def test_every_python_helper_is_synced_tested_and_built() -> None:
+    """Each helper in its own uv environment (tools/<name>/pyproject.toml): run.sh syncs it, verify.sh runs its tests
+    and mypy, and estia-deploy builds it into the release and checks that it imports."""
+    run, verify = (ROOT / "scripts/run.sh").read_text(), (ROOT / "scripts/verify.sh").read_text()
+    deploy = (ROOT / "src/local_assistant/deploy.py").read_text()
+    helpers = sorted(path.parent.name for path in (ROOT / "tools").glob("*/pyproject.toml"))
+    assert {"tapo", "ical", "youtube"} <= set(helpers)
+    for name in helpers:
+        assert f"(cd tools/{name} && uv sync --frozen --quiet)" in run, name
+        assert f"(cd tools/{name} && uv run --frozen -q pytest -q && uv run --frozen -q mypy)" in verify, name
+        assert f'release / "tools" / "{name}"' in deploy and f'release / "tools/{name}/.venv/bin/python"' in deploy, (
+            name
+        )

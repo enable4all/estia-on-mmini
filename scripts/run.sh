@@ -11,6 +11,7 @@ cd "$(dirname "$0")/.."
 uv sync --frozen --quiet
 (cd tools/tapo && uv sync --frozen --quiet)  # the device helper's own environment (python-kasa)
 (cd tools/ical && uv sync --frozen --quiet)  # the calendar helper's own environment (icalendar)
+(cd tools/youtube && uv sync --frozen --quiet)  # the YouTube helper's own environment (youtube-transcript-api)
 if pgrep -f '\.venv/bin/local-assistant' >/dev/null; then  # one signal-cli per account: never two bridges
   echo "a bridge is already running (the daemon? stop it with: /usr/bin/sudo launchctl bootout system/com.local-assistant.bridge)" >&2
   exit 1
