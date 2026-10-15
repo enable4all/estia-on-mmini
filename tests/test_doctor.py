@@ -336,6 +336,8 @@ def test_the_profile_picture_is_estias_e_your_own_or_none(home: Path) -> None:
     assert own == Finding("ok", "Profile picture", "her.png")
     none = by_part(run(write_config(home, MINIMAL + 'avatar = ""\n'), probe))["Profile picture"]
     assert none.status == "ok" and none.text.startswith("none")
+    letter = by_part(run(write_config(home, MINIMAL + 'name = "Tiffany"\n'), probe))["Profile picture"]
+    assert letter == Finding("ok", "Profile picture", "her letter, t. (docs/brand/letters/t.png)")  # owner, 15 Oct
 
 
 def test_a_picture_that_cannot_be_used_is_a_warning_not_a_failure(home: Path) -> None:

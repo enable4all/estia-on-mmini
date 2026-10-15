@@ -163,7 +163,8 @@ sets the PIN as her own user, and starts her again (2.10). The lock lapses after
 
 The bridge sets the bot's profile name to her name and "(AI)" on its first start: "Estia (AI)", or with the config's
 `name` (2.4) that name, set again after a rename. It sets her profile picture the same way, from the config's `avatar`
-(2.4): Estia's e. when it is left out, your own picture when it names one, none with `avatar = ""`. The picture is sent
+(2.4): when it is left out, Estia's e., or with another name its first letter, a to z, with the orange full stop
+("t." for ours, Tiffany; any other first letter keeps the e.); your own picture when it names one; none with `avatar = ""`. The picture is sent
 once, and again only after the file changes; if the file cannot be used or Signal refuses it, the log says so and the
 next start tries again. The move into her own user copies your picture into her config folder (2.7, step 5).
 
@@ -202,7 +203,8 @@ Edit the file:
    voice that goes with it into the `[voice]` lines: `af_heart`, or `am_michael` for a male name (a name you type asks
    "Female or male voice?"). The other ten languages keep Supertonic's voice F1 for now.
    `avatar`: her Signal profile picture, a PNG or JPEG of at most 5 MB (a full path, `~/` allowed). Left out, it is
-   Estia's e. (`docs/brand/estia-avatar.png`); `avatar = ""` sends none. Keep your own picture outside the repo folder;
+   Estia's e. (`docs/brand/estia-avatar.png`), or with another name its first letter, a to z, with the orange full stop
+   (`docs/brand/letters/<letter>.png`, "t." for ours, Tiffany); `avatar = ""` sends none. Keep your own picture outside the repo folder;
    the move into her own user copies it into her config folder (2.7, step 5).
    The file is checked when the bridge starts, not when the config is read: one that is missing, unreadable, too large
    or not a PNG or JPEG never stops the bridge. It sends nothing, Signal keeps the picture it has, and the log and

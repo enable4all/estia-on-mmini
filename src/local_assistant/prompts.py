@@ -1941,6 +1941,7 @@ SETUP_NAME_CHOSEN = (  # {voice}: the Kokoro voice written into the config's [vo
 # doctor's Profile picture line ({file}: the picture's file name; {path}, {problem}: why it cannot be used; {name}: hers)
 DOCTOR_PICTURE_ESTIA = "Estia's e. (docs/brand/estia-avatar.png)"
 DOCTOR_PICTURE_OWN = "{file}"
+DOCTOR_PICTURE_LETTER = "her letter, {letter}. (docs/brand/letters/{letter}.png)"  # a name other than Estia
 DOCTOR_PICTURE_NONE = "none set (Signal keeps the one it has)"
 DOCTOR_PICTURE_BAD = "{path}: {problem}; {name} runs without it (Signal keeps the one it has)"
 DOCTOR_PICTURE_FIX = 'set avatar in the config to a PNG or JPEG of at most 5 MB (or "" for none), then restart'

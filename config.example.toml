@@ -11,7 +11,8 @@ allowed_acis = ["00000000-0000-0000-0000-000000000000"]
 # its own: 1-20 letters, spaces or hyphens (ours is called Tiffany).
 name = "Estia"
 # Her Signal profile picture: a PNG or JPEG of at most 5 MB (a full path, ~ allowed), sent when the bridge starts and
-# again only after the file changes. Left out: Estia's e. (docs/brand/estia-avatar.png); "" for none. Keep your own
+# again only after the file changes. Left out: Estia's e. (docs/brand/estia-avatar.png), or with another name its
+# first letter, a to z, with the orange full stop (docs/brand/letters/); "" for none. Keep your own picture
 # outside the repo folder: a missing or unusable file is skipped (she runs on, Signal keeps the picture it has).
 #avatar = "~/Pictures/her-picture.png"
 # The one language she listens and speaks in: en, es, it, ko, pt, nl, pl, de, ja, ru or fr (GUIDE.md, Languages).
@@ -180,7 +181,7 @@ disk_free_min_percent = 10
 #tunnel = "~/Library/Application Support/local-assistant/vendor/signal-call-tunnel/signal-call-tunnel/target/release/signal-call-tunnel"
 #socket_dir = "~/Library/Application Support/local-assistant/calls"   # default; ~/.la-calls if a long home folder makes this too long. Set by hand: under 65 characters (Unix sockets)
 #speed = 1.05                 # Kokoro speed on calls (voice notes keep [voice] speed)
-#end_of_turn_seconds = 1.8    # a pause this long ends your turn (laid back: room to think)
+#end_of_turn_seconds = 2.8    # a pause this long ends your turn (laid back: room to think)
 #idle_prompt_seconds = 90     # "Take your time, I'm here." after this much silence
 #idle_hangup_seconds = 600    # then goodbye
 #max_call_minutes = 60

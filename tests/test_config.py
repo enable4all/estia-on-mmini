@@ -584,7 +584,7 @@ def test_calls_section_with_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert cfg.call_tunnel == vendor / "signal-call-tunnel/signal-call-tunnel/target/release/signal-call-tunnel"
     assert cfg.calls_java_home is None  # not set: found with /usr/libexec/java_home when the bridge starts
     assert cfg.call_socket_dir == cfg.data_dir / "calls"
-    assert (cfg.calls_speed, cfg.calls_end_of_turn_seconds) == (1.05, 1.8)
+    assert (cfg.calls_speed, cfg.calls_end_of_turn_seconds) == (1.05, 2.8)  # owner, 15 Oct: a second more
     assert (cfg.calls_idle_prompt_seconds, cfg.calls_idle_hangup_seconds, cfg.calls_max_minutes) == (90, 600, 60)
     assert cfg.calls_summary
 
@@ -886,6 +886,32 @@ def test_the_signal_avatar_is_estias_e_until_set() -> None:
     assert REPO_AVATAR.is_file()
     assert parse_config(BASE).avatar == REPO_AVATAR
     assert Config("+306900000000", frozenset({ACI})).avatar is None
+
+
+LETTERS = REPO_AVATAR.parent / "letters"
+
+
+def test_a_name_other_than_estia_gets_its_letter_with_the_orange_stop() -> None:
+    """Owner, 15 Oct: a name other than Estia shows its first letter, a to z, with Estia's orange full stop ("t." for
+    Tiffany); a picture the user set always wins, "" still means none, and any other first letter keeps the e."""
+    assert parse_config(BASE | {"name": "Tiffany"}).avatar == LETTERS / "t.png"
+    assert parse_config(BASE | {"name": "maya"}).avatar == LETTERS / "m.png"
+    assert parse_config(BASE | {"name": "ESTIA"}).avatar == REPO_AVATAR
+    assert parse_config(BASE | {"name": "Élodie"}).avatar == REPO_AVATAR  # not a to z: the e.
+    assert parse_config(BASE | {"name": "Tiffany", "avatar": ""}).avatar is None
+    assert parse_config(BASE | {"name": "Tiffany", "avatar": "/Users/alex/me.png"}).avatar == Path("/Users/alex/me.png")
+
+
+def test_every_letter_is_there_in_ink_with_an_orange_stop() -> None:
+    """docs/brand/source/letters.py drew them: the letter in ink, the stop in enable4all's orange, 512 px."""
+    import string
+    import struct
+
+    for letter in string.ascii_lowercase:
+        svg = (LETTERS / f"{letter}.svg").read_text(encoding="utf-8")
+        assert svg.count("<path ") == 2 and 'fill="#1c1a17"' in svg and 'fill="#ff5c35"' in svg, letter
+        png = (LETTERS / f"{letter}.png").read_bytes()
+        assert png[:8] == b"\x89PNG\r\n\x1a\n" and struct.unpack(">II", png[16:24]) == (512, 512), letter
 
 
 def test_without_the_repos_avatar_there_is_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

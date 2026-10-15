@@ -58,6 +58,7 @@ from local_assistant.config import (
     DEFAULT_NAME,
     DEFAULT_STYLE,
     INTERRUPT_NEW,
+    LETTER_AVATARS,
     OWNER_HOME,
     AvatarError,
     CalendarSource,
@@ -567,6 +568,8 @@ def _picture(cfg: Config) -> Finding:
         return Finding("warn", "Profile picture", text, prompts.DOCTOR_PICTURE_FIX)
     if path == DEFAULT_AVATAR:
         return Finding("ok", "Profile picture", prompts.DOCTOR_PICTURE_ESTIA)
+    if path.parent == LETTER_AVATARS:  # her name's first letter (owner, 15 Oct)
+        return Finding("ok", "Profile picture", prompts.DOCTOR_PICTURE_LETTER.format(letter=path.stem))
     return Finding("ok", "Profile picture", prompts.DOCTOR_PICTURE_OWN.format(file=path.name))
 
 

@@ -34,6 +34,7 @@ STYLES = ("hearth", "playful")
 DEFAULT_STYLE = "hearth"
 # the Signal profile picture until the config's `avatar` names another ("" for none): Estia's e., when the repo has it
 DEFAULT_AVATAR = CODE_ROOT / "docs" / "brand" / "estia-avatar.png"
+LETTER_AVATARS = CODE_ROOT / "docs" / "brand" / "letters"  # a.png to z.png: a name's first letter, the orange stop
 AVATAR_MAX_BYTES = 5_000_000
 _IMAGE_STARTS = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff")  # PNG, JPEG
 _NUMBER = re.compile(r"^\+[0-9]{8,15}$")
@@ -385,7 +386,7 @@ class Config:
     calls_tunnel: Path | None = None  # default: data_dir / "vendor" / ...
     calls_socket_dir: Path | None = None  # default: data_dir / "calls", or ~/.la-calls when that is too long
     calls_speed: float = 1.05
-    calls_end_of_turn_seconds: float = 1.8
+    calls_end_of_turn_seconds: float = 2.8  # owner, 15 Oct: a second more than 1.8, room to think
     calls_idle_prompt_seconds: float = 90
     calls_idle_hangup_seconds: float = 600
     calls_max_minutes: float = 60
@@ -599,7 +600,7 @@ def parse_config(raw: dict[str, object]) -> Config:
         timezone=tz,
         host_label=_host_label(raw),
         name=_name(raw),
-        avatar=_avatar(raw),
+        avatar=_avatar(raw, _name(raw)),
         language=_language(raw),
         ollama_base_url=strings["ollama_base_url"],
         model=_model(strings["model"]),
@@ -722,12 +723,24 @@ def check_name(value: object) -> str:
     return name
 
 
-def _avatar(raw: dict[str, object]) -> Path | None:
-    """The Signal profile picture: a full path (~ allowed); "" for none; left out: Estia's e. from the repo, if it is
-    there. Only the setting's form is checked here: the file is checked where it is used (`read_avatar`, at the
-    bridge's start and in doctor), so a picture that was moved or deleted never stops the bridge."""
+def default_avatar(name: str) -> Path | None:
+    """The picture for an `avatar` left out (owner, 15 Oct): for a name other than Estia, its first letter, a to z,
+    with Estia's orange full stop ("t." for ours, Tiffany, docs/brand/letters, drawn by docs/brand/source/letters.py); else,
+    and for any other first letter, Estia's e. None when the repo's file is not there."""
+    letter = name[:1].lower()
+    if name.casefold() != DEFAULT_NAME.casefold() and len(letter) == 1 and "a" <= letter <= "z":
+        picture = LETTER_AVATARS / f"{letter}.png"
+        if picture.is_file():
+            return picture
+    return DEFAULT_AVATAR if DEFAULT_AVATAR.is_file() else None
+
+
+def _avatar(raw: dict[str, object], name: str) -> Path | None:
+    """The Signal profile picture: a full path (~ allowed); "" for none; left out: `default_avatar` for her name.
+    Only the setting's form is checked here: the file is checked where it is used (`read_avatar`, at the bridge's
+    start and in doctor), so a picture that was moved or deleted never stops the bridge."""
     if "avatar" not in raw:
-        return DEFAULT_AVATAR if DEFAULT_AVATAR.is_file() else None
+        return default_avatar(name)
     value = raw["avatar"]
     if not isinstance(value, str):
         raise ConfigError('avatar must be the path of a PNG or JPEG file, or "" for none')
@@ -1270,7 +1283,7 @@ def _calls_settings(calls: object, *, voice: bool) -> _CallsSettings:
         raise ConfigError("calls.speed must be between 0.7 and 1.5")
     numbers: dict[str, float] = {}
     for key, default, low, high in (
-        ("end_of_turn_seconds", 1.8, 0.5, 5.0),
+        ("end_of_turn_seconds", 2.8, 0.5, 5.0),
         ("idle_prompt_seconds", 90, 10, 3600),
         ("idle_hangup_seconds", 600, 30, 7200),
         ("max_call_minutes", 60, 1, 240),

@@ -67,7 +67,10 @@ def test_the_notices_credit_the_fonts_and_name_no_brand_we_do_not_use() -> None:
 def test_the_tagline_is_a_thinking_partner_living_at_home() -> None:
     """The owner's tagline, the same in the README's opening line, the package and the logo's lockup."""
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "\n**A private AI thinking partner living at home, on your own Mac.** " in readme
+    assert "\n**An insanely secure AI thinking partner living at home, on your own Mac.** " in readme
+    assert (
+        "\n## Security\n\nInsanely secure, and every claim can be checked in the open-source code.\n" in readme
+    )  # owner, 15 Oct
     assert "thinking partner living at home, on your own Mac" in (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     lockup = (ROOT / "docs" / "brand" / "source" / "lockup.py").read_text(encoding="utf-8")
     assert '"A THINKING PARTNER LIVING AT HOME"' in lockup
@@ -423,7 +426,7 @@ def test_a_spoken_project_name_is_documented() -> None:
 
 def test_the_readme_links_the_website_under_its_tagline() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    tagline = readme.index("\n**A private AI thinking partner")
+    tagline = readme.index("\n**An insanely secure AI thinking partner")
     assert readme.index("\nWebsite: [estia.fun](https://estia.fun)\n") > tagline
     assert "Estia started as Tiffany, our own thinking partner, before" in readme
     assert "our own assistant" not in readme
@@ -1039,7 +1042,7 @@ def test_the_guide_says_a_slash_command_is_spoken() -> None:
 # front page, or GUIDE.md, the rest, as its guide-page drift test reads them (the two files together)
 SITE_README = (
     "git clone https://github.com/enable4all/estia-on-mmini.git ~/estia && cd ~/estia",
-    "**A private AI thinking partner living at home, on your own Mac.**",
+    "**An insanely secure AI thinking partner living at home, on your own Mac.**",
     "Website: [estia.fun](https://estia.fun)",
     '<img src="docs/brand/estia-hero-light.png" alt="A stone garden seen from above, its gravel raked in rings around a '
     'Mac mini"',
@@ -1188,6 +1191,53 @@ SITE_README = (
     "(… · /quiet to pause)",
     "One of the messages she starts herself",
     "what is set up, something to try, and what stays on the Mac.",
+    # the site's pins after push 3 and push 4 (dev-60, 15 Oct): documents, CalDAV, Hue, calls, the list, levels, quiet hours, the evening note, the styles
+    "An answer from your PDFs that names the document and the page.",
+    "Apple's PDFKit gives a page's text; a scanned page, with no text of its own, is read by Apple's Vision.",
+    "In your home, her account adds files only to `~/Estia-KB`, and never deletes or changes yours.",
+    "A PDF is read by Apple's PDFKit and Vision in a helper program that runs as her account: a PDF made to attack the reader reaches only that program and her account, never yours.",
+    "With Documents on, her document tools read only her index of the PDFs in `~/Estia-KB`.",
+    "With Documents on, the text of your PDFs is kept in that database until a PDF leaves the folder.",
+    "Mail, calendar entries, YouTube captions, web and map results never teach her anything. Neither do documents.",
+    "| Reading your PDFs (Apple's PDFKit and Vision), with Documents on |",
+    '`/docs` says "I cannot read your Estia-KB folder right now"',
+    "it makes `~/Estia-KB` when missing), then send the PDF again",
+    "Real scans (skewed, noisy, stamped) are untested.",
+    "documents use Apple's PDFKit and Vision (tested on macOS 27 only)",
+    "and iCloud, Fastmail or Nextcloud calendars through CalDAV",
+    "its requests only read events, never create, change or delete them",
+    "| | iCloud, Fastmail or your Nextcloud, for CalDAV calendars (read-only) |",
+    "Philips Hue lights are reached only through the Hue Bridge on the home network, never through Philips' cloud: on, off, brightness and whites, no colours.",
+    "Hue lights are untested on a real Hue Bridge so far",
+    "nothing is sent to a bridge that shows another certificate",
+    "a Hue Bridge (the square one or the Bridge Pro)",
+    'A quick "stop", "wait" or "but" always counts.',
+    '"I have to go" or "I\'m hanging up" in English',
+    '"What can you do?" is answered from a list of the parts set up in this install, each in one line with one example',
+    "A part with levels names them and the current one",
+    "She answers from it in any language, in texts; calls leave it out",
+    "`/help` shows the same list, word for word",
+    "The Mac's security has two levels: hardened, set by the security step",
+    "and nuclear, the hardened level with the Mac's firewall on and python3 and ruby off its list",
+    "Doctor names the level the Mac is at.",
+    "In quiet hours (22:00 to 08:00 by default) both wait until the morning",
+    "Security notes, such as a new linked device on her account or a paused model, are never held.",
+    "Three short questions at 21:00, or the time you pick: what went well, what is still open, one thing for tomorrow. The same words each evening, written by the code, never by the AI.",
+    "Example: `/evening on` (off until you do)",
+    "Evening. What went well today? What is still open? One thing for tomorrow?",
+    "(evening note · /evening off to stop)",
+    "Reply if you like, or not: nothing follows. `/evening off` stops it",
+    '`/evening on` in Signal, or `evening = "21:00"` in `[initiative]`',
+    "`/evening 20:30` moves it, `/evening off` stops it",
+    "Her built-in style is hearth: steady, kind and frank. Short answers, one concern when a plan looks risky, a joke only when asked for fun or on banter. The other built-in style, playful, adds a light joke now and then; setup asks which.",
+    "Never a joke when you are worried or something serious is going on",
+    "On a call, neither jokes unless the caller jokes or asks for one (in the tests, hearth joked on 1 call of 25, playful on 2 of 8).",
+    "**`soul.md`, a style of your own.** It replaces the built-in style entirely",
+    "She reads `soul.md` but never edits it: no command and no tool writes it.",
+    "which built-in style she has (hearth, or playful)",
+    "(left out: hearth)",
+    "picked in setup or with `style` under `[personality]` in the config",
+    "calm, kind and practical instead",
 )
 SITE_LANGUAGES = (
     "English",
@@ -1236,6 +1286,11 @@ SITE_SECURITY = (
     "The model always runs on the Mac. A cloud model, which Ollama runs on its own servers, is refused:",
     "a made-up example is enough.",
     "the security step removes such a rule.",
+    # the site's pins after push 3 (dev-60, 15 Oct)
+    "PROPFIND and REPORT (any other request is refused in code)",
+    "CalDAV is untested live with iCloud, Fastmail and Nextcloud",
+    "a PDF that exploits a flaw in PDFKit or Vision could run code as her, with her keys and data.",
+    "can be opened by her account once it knows the name",
 )
 SITE_SETUP = (  # setup_assistant.md (was SITE_GUIDE: GUIDE.md is the README's body now)
     "When a release changes a root-run tool (`scripts/estia`, `scripts/estia-deploy`, `deploy.py`, `ownuser.py`, "
@@ -1244,6 +1299,13 @@ SITE_SETUP = (  # setup_assistant.md (was SITE_GUIDE: GUIDE.md is the README's b
     "The model always runs on the Mac.",
     "no fixed version and no check of their files.",
     "Yours: send `/devices ok N` from your phone.",
+)
+SITE_AGENTS = (  # AGENTS.md sentences the site quotes (dev-60, 15 Oct)
+    "turns markup into Signal's text styles",
+    '"- " and "* " line starts "• "',
+)
+SITE_PROMPTS = (  # src/local_assistant/prompts.py text the site quotes (dev-60, 15 Oct): a prompt change tells the site
+    "Asked for fun or a joke, or when the user banters: end with one short joke or pun",
 )
 
 
@@ -1273,6 +1335,12 @@ def site_misses(root: Path) -> list[str]:
     if "\n## Known accepted gaps\n" not in (root / "SECURITY.md").read_text(encoding="utf-8"):
         missing.append("SECURITY.md: ## Known accepted gaps (the site links #known-accepted-gaps)")
     missing += [f"setup_assistant.md: {said}" for said in SITE_SETUP if said not in guide]
+    agents, prompts = (
+        (root / "AGENTS.md").read_text(encoding="utf-8"),
+        (root / "src/local_assistant/prompts.py").read_text(encoding="utf-8"),
+    )
+    missing += [f"AGENTS.md: {said}" for said in SITE_AGENTS if said not in agents]
+    missing += [f"src/local_assistant/prompts.py: {said}" for said in SITE_PROMPTS if said not in prompts]
     upgrade = re.search(r"^\| Upgrade \|(.+)$", (root / "setup_assistant.md").read_text(encoding="utf-8"), re.MULTILINE)
     deploy = "In her own user: `git pull` in your checkout, then `/usr/bin/sudo /usr/local/estia/bin/estia-deploy`"
     if not upgrade or deploy not in upgrade.group(1):

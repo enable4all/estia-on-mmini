@@ -3,12 +3,13 @@
 Estia's mark is the enable4all "e.": a lower-case e in ink and an orange full stop inside a white circle. `../estia-mark.svg` is enable4all's own file (enable4all-hub, `public/brand/enable4all-mark.svg`), byte for byte; nothing here redraws it. Its "e" and dot are outlines from Manrope ExtraBold (SIL Open Font License 1.1), as enable4all's brand notes say, so the file needs no font. The logo and the README artwork are drawn by these scripts:
 
 - `mark.py`: takes the circle and the e. from `../estia-mark.svg`; writes the mark as it is and the Signal avatar (the e. on full-bleed white, which Signal crops round). Standard library only.
+- `letters.py`: the Signal avatars for a name other than Estia, `../letters/a.png` to `z.png` (and `.svg`): the first letter, lower case, in ink with the orange full stop, from Shippori Mincho B1 SemiBold, one scale for every letter (the one at which "t." is 50 units tall).
 - `wordmark.py`: text as outlines.
 - `lockup.py`: the mark beside the name, "estia" in lower case, with the line "A thinking partner living at home".
 - `hero.py`: the stone garden whose stone is a Mac mini (unchanged from the first artwork).
 - `palette.py`: the colours.
 
-Palette: sumi ink `#1c1a17`, washi paper `#f2ede3`, night `#1b1a18`, white for the avatar, and brushed aluminium `#e4e6e8` → `#979ca2` for the Mac mini. The mark keeps enable4all's colours from its file: ink `#111210`, orange `#ff5c35` for the full stop, and a thin `#c9c8bd` edge that keeps the circle visible on a white page.
+Palette: sumi ink `#1c1a17`, washi paper `#f2ede3`, night `#1b1a18`, white for the avatar, and brushed aluminium `#e4e6e8` → `#979ca2` for the Mac mini. The hero garden (since 15 Oct, the owner's pick: more fun and happy) is a sun-yellow rake `#ffb627` on warm white `#fffdf7`, the rings around the Mac in rainbow colours, enable4all's orange first (`#ff5c35`, `#ffb627`, `#2bb39a`, `#3b82f6`, `#8b5cf6`), a step brighter on the dark garden. The mark keeps enable4all's colours from its file: ink `#111210`, orange `#ff5c35` for the full stop, and a thin `#c9c8bd` edge that keeps the circle visible on a white page.
 
 To rebuild them:
 
@@ -17,7 +18,7 @@ To rebuild them:
 
 ```sh
 uv run --no-project python mark.py                                          # needs no font
-uv run --no-project --with fonttools --with uharfbuzz python lockup.py      # also hero.py
+uv run --no-project --with fonttools --with uharfbuzz python lockup.py      # also hero.py and letters.py
 uv run --no-project --with resvg-py python render.py out/*.svg              # SVG to PNG
 ```
 
@@ -28,5 +29,7 @@ uv run --no-project --with resvg-py python render.py out/*.svg              # SV
 ```sh
 for f in out/*.svg out/*.png; do cp "$f" "../estia-$(basename "$f")"; done
 ```
+
+The letters go to `out/letters/`; render them with `render.py out/letters/*.svg` and copy both kinds to `../letters/` as they are (`cp out/letters/* ../letters/`).
 
 `tests/test_brand.py` checks that the mark is still enable4all's file, and that `mark.py` and `hero.py` rebuild the committed mark, avatar and hero exactly.

@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from palette import ALU_DARK, ALU_LIGHT, ALU_MID, PAPER
+from palette import ALU_DARK, ALU_LIGHT, ALU_MID, GARDEN_DARK, GARDEN_LIGHT, RINGS_DARK, RINGS_LIGHT
 
 W, H = 1280, 640
 FIELD = (34.0, 34.0, 1246.0, 606.0)  # the gravel field: x0, y0, x1, y1
@@ -83,11 +83,18 @@ def mini(dark: bool) -> str:
     )
 
 
+def rgb(colour: str) -> str:
+    """'#rrggbb' as feColorMatrix's three 0-1 fractions."""
+    return "  ".join(f"0 0 0 0 {int(colour[i : i + 2], 16) / 255:.3f}" for i in (1, 3, 5))
+
+
 def hero(*, dark: bool = False) -> str:
+    """The garden: a sun-yellow rake on warm white (dark: on night), the rings around the Mac in rainbow colours,
+    enable4all's orange first, each with a soft glint; the Mac mini in aluminium in the middle (owner, 15 Oct)."""
     rng = random.Random(5)
-    ground = PAPER if not dark else "#1b1a18"
-    groove, glint = ("#8a8276", "#fffcf4") if not dark else ("#0c0b0a", "#4d4841")
+    garden, rings = (GARDEN_DARK, RINGS_DARK) if dark else (GARDEN_LIGHT, RINGS_LIGHT)
     paths = rake(rng)
+    straight, around = paths[:-RINGS], paths[-RINGS:]
     defs = (
         '<defs><filter id="soft" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="7"/></filter>'
         f'<linearGradient id="top" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="{ALU_LIGHT}"/>'
@@ -99,19 +106,27 @@ def hero(*, dark: bool = False) -> str:
         '<feColorMatrix values="0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.14 0"/>'
         '<feComposite in2="SourceGraphic" operator="in"/></filter>'
         '<filter id="sand" x="0" y="0" width="100%" height="100%"><feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" seed="2"/>'
-        '<feColorMatrix values="0 0 0 0 0.45  0 0 0 0 0.42  0 0 0 0 0.38  0 0 0 0.08 0"/></filter></defs>'
+        f'<feColorMatrix values="{rgb(garden["sand"])}  0 0 0 0.16 0"/></filter></defs>'
     )
-    joined = " ".join(paths)
+
+    def strokes(group: list[str], colour: str) -> str:
+        joined = " ".join(group)
+        return (
+            f'<path d="{joined}" stroke="{garden["glint"]}" stroke-width="1.1" transform="translate(1.0 1.4)"/>'
+            f'<path d="{joined}" stroke="{colour}" stroke-width="1.4"/>'
+        )
+
+    body = strokes(straight, garden["rake"]) + "".join(
+        strokes([p], rings[i % len(rings)]) for i, p in enumerate(around)
+    )
     fx0, fy0, fx1, fy1 = FIELD
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}">{defs}'
-        f'<rect width="{W}" height="{H}" fill="{ground}"/>'
+        f'<rect width="{W}" height="{H}" fill="{garden["ground"]}"/>'
         f'<rect x="{fx0}" y="{fy0}" width="{fx1 - fx0}" height="{fy1 - fy0}" rx="6" filter="url(#sand)"/>'
-        f'<rect x="{fx0}" y="{fy0}" width="{fx1 - fx0}" height="{fy1 - fy0}" rx="6" fill="none" stroke="{groove}" '
+        f'<rect x="{fx0}" y="{fy0}" width="{fx1 - fx0}" height="{fy1 - fy0}" rx="6" fill="none" stroke="{garden["rake"]}" '
         'stroke-opacity="0.7" stroke-width="1.4"/>'
-        f'<g fill="none" stroke-linecap="round">'
-        f'<path d="{joined}" stroke="{glint}" stroke-width="1.1" transform="translate(1.0 1.4)"/>'
-        f'<path d="{joined}" stroke="{groove}" stroke-width="1.2"/></g>'
+        f'<g fill="none" stroke-linecap="round">{body}</g>'
         f"{mini(dark)}"
         "</svg>"
     )

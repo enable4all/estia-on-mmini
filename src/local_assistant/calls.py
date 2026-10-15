@@ -144,7 +144,7 @@ class Host(Protocol):
 @dataclass(frozen=True)
 class CallSettings:
     socket_dir: Path
-    end_of_turn_s: float = 1.8
+    end_of_turn_s: float = 2.8
     idle_prompt_s: float = 90.0
     idle_hangup_s: float = 600.0
     max_s: float = 3600.0

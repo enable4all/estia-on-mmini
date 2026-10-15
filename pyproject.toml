@@ -1,7 +1,7 @@
 [project]
 name = "local-assistant"
 version = "0.1.0"
-description = "Estia: a private AI thinking partner living at home, on your own Mac, reached only through Signal (local model via Ollama)"
+description = "Estia: an insanely secure AI thinking partner living at home, on your own Mac, reached only through Signal (local model via Ollama)"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
