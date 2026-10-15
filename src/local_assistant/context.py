@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -30,10 +31,12 @@ _TRACE_RESULT_CHARS = 300
 
 
 def without_fake_notices(text: str) -> str:
-    """Drop paragraphs that look like the bridge's own notices. Used on Gemma's new answers (it may imitate
-    them) and on stored replies (before the fix, notices were sent inside the reply text)."""
+    """Drop paragraphs that look like the bridge's own notices, in any markup ("**Profile changes**": code's is bold).
+    Used on Gemma's new answers (it may imitate them) and on stored replies (before the fix, notices were sent inside
+    the reply text)."""
     paragraphs = text.split("\n\n")
-    kept = [p for p in paragraphs if not p.lstrip().lower().startswith(("profile changes", "(while we were quiet"))]
+    notices = ("profile changes", "(while we were quiet")
+    kept = [p for p in paragraphs if not p.lstrip(" \t\n#*_~").lower().startswith(notices)]
     return "\n\n".join(kept)
 
 
@@ -48,7 +51,15 @@ def _text_of(content: Any) -> str:
     return str(content or "")
 
 
-_OUTSIDE_TEXT = frozenset({"read_link", "search_history"})
+_OUTSIDE_TEXT = frozenset({"read_link", "search_history", "search_documents", "read_document"})
+
+# code's mark on today's agenda lines (calendar_tools._mark), right after the times: true only when it was read, so a
+# replay keeps the times and drops the mark ("(in 6 h)" from 09:00 is wrong at 14:30); a title's own words stay
+_AGENDA_MARK = re.compile(
+    r"^(- [^\n]*?(?:\d{2}:\d{2}|\(\d{2}:\d{2}(?:–\d{2}:\d{2})? [^()\n]+\)))"  # the times, a trip's zone time last
+    r" \((?:over|now(?:, until \d{2}:\d{2})?|in \d+ (?:min|h(?: \d+ min)?))\)",
+    re.MULTILINE,
+)
 
 
 def _short_result(call: ToolCallRecord) -> str:
@@ -58,9 +69,10 @@ def _short_result(call: ToolCallRecord) -> str:
     if call.name in _OUTSIDE_TEXT or (call.name.startswith("project_") and call.name != "project_list"):
         # outside text is never replayed: a line planted in it could otherwise act on a later "thanks"
         return f"({call.name} result not repeated here: outside text; read it again if it is needed)"
-    if len(call.result) <= _TRACE_RESULT_CHARS:
-        return call.result
-    return call.result[:_TRACE_RESULT_CHARS] + " …"
+    result = _AGENDA_MARK.sub(r"\1", call.result) if call.name == "calendar_agenda" else call.result
+    if len(result) <= _TRACE_RESULT_CHARS:
+        return result
+    return result[:_TRACE_RESULT_CHARS] + " …"
 
 
 class ContextBuilder:
@@ -156,10 +168,14 @@ class ContextBuilder:
             return f"{prompts.SOUL_HEADER.format(name=self.name)}\n{soul.text}"
         return f"{prompts.DEFAULT_STYLE_HEADER.format(name=self.name)}\n{prompts.DEFAULT_STYLE}"
 
-    def system_prompt(self, conversation: Conversation, rules: str | None = None, glance: str = "") -> str:
+    def system_prompt(
+        self, conversation: Conversation, rules: str | None = None, glance: str = "", *, call: bool = False
+    ) -> str:
         """The rules (or `rules`, for one answer: a practice turn), then the style (below the rules); then the profile
-        and the summary; on a call, last, the call's glance (code's counts at its start: `glance`)."""
-        parts = [self._rules if rules is None else rules, self.style(), self.snapshot()]
+        and the summary; on a call, last, the call's glance (code's counts at its start: `glance`). `call`: a call's
+        turn, whose rules leave out the list of what she can do (prompts.without_capabilities)."""
+        chosen = self._rules if rules is None else rules
+        parts = [prompts.without_capabilities(chosen) if call else chosen, self.style(), self.snapshot()]
         if conversation.summary:
             parts.append(f"EARLIER IN THIS CONVERSATION (summary)\n{conversation.summary}")
         if glance:  # last: the same for the whole call, so the prompt cache keeps everything above it
@@ -188,13 +204,15 @@ class ContextBuilder:
         *,
         rules: str | None = None,
         glance: str = "",
+        call: bool = False,
     ) -> list[dict[str, Any]]:
         """System prompt, then the conversation. Earlier tool calls are replayed after the message that caused
         them: without them Gemma saw "remember X" → "Noted: X" and learned it could skip the remember call.
         Photos (data URIs per message id) are only given for the message being answered (Hermes: images are
         turn-scoped); in history a photo message is its "[photo] caption" text. `rules`: other rules for this answer
-        only (a practice turn); the style and the profile stay below them. `glance`: a call's counts at its start."""
-        system = self.system_prompt(conversation, rules, glance)
+        only (a practice turn); the style and the profile stay below them. `glance`: a call's counts at its start.
+        `call`: a call's turn (its rules without the list of what she can do)."""
+        system = self.system_prompt(conversation, rules, glance, call=call)
         built: list[dict[str, Any]] = [{"role": "system", "content": system}]
         window = self.window(conversation)
         newest = max((message.id for message in window if message.direction == "in"), default=None)

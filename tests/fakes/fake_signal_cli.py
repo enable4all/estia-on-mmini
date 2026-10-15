@@ -16,6 +16,8 @@ Environment:
   FAKE_SIGNAL_CODE         the SMS code verify takes (default 111111)
   FAKE_SIGNAL_PIN          verify needs this registration-lock PIN too (unset: none)
 
+A send's textStyle is checked as signal-cli 0.14.9 checks it ("start:length:STYLE"; an error fails the send).
+
 register and verify work as in signal-cli 0.14.9: only in multi-account mode (started without -a), with the number in
 an "account" param.
 
@@ -30,6 +32,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import shutil
 import sys
 import threading
@@ -55,6 +58,21 @@ def registration(method: str, params: dict[str, Any]) -> dict[str, Any]:
     if pin and params.get("pin") != pin:
         return {"error": {"code": -1, "message": "Verification failed! This number is locked with a pin."}}
     return {"result": {}}
+
+
+STYLES = ("BOLD", "ITALIC", "SPOILER", "STRIKETHROUGH", "MONOSPACE")
+
+
+def text_style_error(value: Any) -> str | None:
+    """signal-cli 0.14.9's check of a send's textStyle (one string or a list): each "start:length:STYLE", STYLE one of
+    its five names in upper case; one bad entry fails the whole send. It never compares a range with the text."""
+    for entry in value if isinstance(value, list) else [value]:
+        match = re.fullmatch(r"(\d+):(\d+):(.+)", str(entry))
+        if match is None:
+            return f"Invalid textStyle syntax ({entry}) expected 'start:length:STYLE'"
+        if match.group(3) not in STYLES:
+            return f"Invalid style: {match.group(3)}"
+    return None
 
 
 def main() -> None:
@@ -118,6 +136,12 @@ def main() -> None:
         if method == "subscribeReceive":
             write({"jsonrpc": "2.0", "result": 0, "id": request_id})
             subscribed.set()
+        elif (
+            method == "send"
+            and "textStyle" in request.get("params", {})
+            and (problem := text_style_error(request["params"]["textStyle"]))
+        ):
+            write({"jsonrpc": "2.0", "error": {"code": -1, "message": problem}, "id": request_id})
         elif method == "send":
             if send_error and (not fail_for or fail_for in request.get("params", {}).get("recipient", [])):
                 write(

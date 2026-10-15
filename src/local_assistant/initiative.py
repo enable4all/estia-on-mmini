@@ -51,7 +51,7 @@ from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from local_assistant import prompts
-from local_assistant.claims import claims_a_reminder
+from local_assistant.claims import claims_a_reminder, shown
 from local_assistant.config import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_NAME,
@@ -100,6 +100,14 @@ KEEP_LOG_S = 365 * 86_400.0
 KEEP_FOLLOWUPS_S = 30 * 86_400.0
 QUIET_KEY = "initiative:quiet"  # set (when) while /quiet pauses her messages; "" otherwise
 ENABLED_KEY = "initiative:enabled"  # "on" or "off" from the user's typed /initiative; unset: the config decides
+
+
+def is_enabled(store: Store, configured: bool) -> bool:
+    """Whether she may start messages: the user's /initiative on or off (the state table), else the config's value."""
+    saved = store.get_state(ENABLED_KEY)
+    return saved == "on" if saved in ("on", "off") else configured
+
+
 ANNOUNCED_KEY = "initiative_announced"  # when the announcement (or a fresh install's welcome) told about them
 PLAN_KEY = "initiative:improvise_plan"  # this week's slots for the improvised note (JSON: week, times, tries)
 LOOKBACK_KEY = "initiative:lookback_week"  # the ISO week whose look back went out or was skipped
@@ -227,29 +235,32 @@ def claims_an_action(text: str) -> bool:
 
 
 def check_text(text: str, *, limit: int, allowed: frozenset[str] | set[str] = frozenset(), questions: int = 1) -> str:
-    """ "" when Gemma's text may be sent, else a fixed word for what is wrong. `allowed`: words of the user's own
-    input, which may come back (a check-in about "email Sam" may say "email")."""
+    """ "" when Gemma's text may be sent, else a fixed word for what is wrong. Each check reads the text as written and
+    as the phone shows it (`claims.shown`: the markers gone, so "**evil**.com" is the link and "I **booked**" the claim
+    the phone joins). `allowed`: words of the user's own input, which may come back (a check-in about "email Sam" may
+    say "email")."""
     if not text.strip():
         return "empty"
     if len(text) > limit:
         return "length"
-    visible = text.replace("‍", "")  # the joiner inside some emoji is no hidden text
+    visible = text.replace("\u200d", "")  # the joiner inside some emoji is no hidden text
     if strip_control_tokens(visible) != visible:
         return "token"
-    if _COMMAND.search(text):
+    forms = tuple(dict.fromkeys((text, shown(text))))
+    lowered = tuple(form.replace("’", "'").casefold() for form in forms)
+    if any(_COMMAND.search(form) for form in forms):
         return "footer"
-    if has_link(text) or _EMAIL.search(text):
+    if any(has_link(form) or _EMAIL.search(form) for form in forms):
         return "link"
-    if _PHONE.search(text) or _IBAN.search(text) or _DIGITS.search(text):
+    if any(_PHONE.search(form) or _IBAN.search(form) or _DIGITS.search(form) for form in forms):
         return "number"
-    lowered = text.replace("’", "'").casefold()
-    if claims_an_action(text):
+    if any(claims_an_action(form) for form in forms):
         return "claim"
-    if _SECRETS.search(lowered):
+    if any(_SECRETS.search(form) for form in lowered):
         return "secret"
-    if any(word not in allowed for word in _SOURCES.findall(lowered)):
+    if any(word not in allowed for form in lowered for word in _SOURCES.findall(form)):
         return "source"
-    if _GUILT.search(lowered):
+    if any(_GUILT.search(form) for form in lowered):
         return "guilt"
     if len(_QUESTION.findall(text)) > questions:  # "??" is one question
         return "questions"
@@ -560,8 +571,7 @@ class Initiative:
     @property
     def enabled(self) -> bool:
         """Whether she may start messages: the user's /initiative on or off, else the config (opt-in)."""
-        saved = self._store.get_state(ENABLED_KEY)
-        return saved == "on" if saved in ("on", "off") else self.settings.enabled
+        return is_enabled(self._store, self.settings.enabled)
 
     def set_enabled(self, on: bool) -> str:
         """/initiative on and /initiative off (typed by the user only): the reply, in code's words. Turning them on

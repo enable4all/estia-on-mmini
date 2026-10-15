@@ -37,9 +37,11 @@
   <true/>
   <key>ThrottleInterval</key>
   <integer>30</integer>
+  <!-- its output: launchd opens these as root, so they are in a root-owned folder she cannot change (a link of hers
+       is never followed); the file is hers, and she empties it through the open file launchd gives her -->
   <key>StandardOutPath</key>
-  <string>@RUN_HOME@/Library/Logs/local-assistant/launchd.log</string>
+  <string>@LOG_DIR@/launchd.log</string>
   <key>StandardErrorPath</key>
-  <string>@RUN_HOME@/Library/Logs/local-assistant/launchd.log</string>
+  <string>@LOG_DIR@/launchd.log</string>
 </dict>
 </plist>

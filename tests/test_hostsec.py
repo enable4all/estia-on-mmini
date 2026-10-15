@@ -2,6 +2,7 @@
 
 import json
 import os
+import time
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -234,6 +235,93 @@ def test_passwordless_sudo_rules(tmp_path: Path) -> None:
     assert hostsec.sudoers(FakeHost(tmp_path), contents={}).status == "ok"
 
 
+MACOS_LISTING = (
+    "Matching Defaults entries for alex on mini:\n"
+    '    env_reset, env_keep+=BLOCKSIZE, env_keep+="COLORFGBG COLORTERM", env_keep+=__CF_USER_TEXT_ENCODING,\n'
+    '    env_keep+="CHARSET LANG LANGUAGE LC_ALL LC_COLLATE", lecture_file=/etc/sudo_lecture\n'
+    "\n"
+    "User alex may run the following commands on mini:\n"
+    "    (ALL) ALL\n"
+)
+
+
+def test_sudo_as_macos_sets_it_up_asks_your_password() -> None:
+    check = hostsec.sudo_listing(MACOS_LISTING)
+    assert (check.key, check.status, check.part, check.unread) == ("sudoers", "ok", "Passwordless sudo", False)
+
+
+@pytest.mark.parametrize(
+    ("added", "named"),
+    [
+        ("    (ALL) NOPASSWD: ALL\n", "1 sudo rule runs without your password (NOPASSWD)"),
+        ("    (root) NOPASSWD: /usr/bin/true, /bin/ls\n    (ALL) NOPASSWD: ALL\n", "2 sudo rules run without"),
+    ],
+)
+def test_a_rule_without_your_password_is_named_wherever_it_is(added: str, named: str) -> None:
+    """sudo -l lists what applies to you from /etc/sudoers and /etc/sudoers.d alike (a %admin rule added with
+    visudo too): never read from one folder only."""
+    check = hostsec.sudo_listing(MACOS_LISTING + added)
+    assert check.status == "warn" and named in check.text and "any program you run" in check.text
+    assert "/usr/bin/sudo /usr/sbin/visudo" in check.fix and check.apply == ()  # never removed from /etc/sudoers here
+    assert "(ALL)" not in check.text  # kinds and counts, never the rules
+
+
+@pytest.mark.parametrize(
+    ("default", "named"),
+    [
+        ("timestamp_type=global", "one sudo sign-in counts for every program of yours (timestamp_type=global)"),
+        ("!tty_tickets", "one sudo sign-in counts for every program of yours (!tty_tickets)"),
+        ("!authenticate", "sudo asks no password at all (!authenticate)"),
+    ],
+)
+def test_defaults_that_skip_or_share_your_password_are_named(default: str, named: str) -> None:
+    listing = MACOS_LISTING.replace("lecture_file=/etc/sudo_lecture", f"lecture_file=/etc/sudo_lecture, {default}")
+    check = hostsec.sudo_listing(listing)
+    assert check.status == "warn" and named in check.text
+    command_specific = (
+        MACOS_LISTING + f"\nRunas and Command-specific defaults for alex:\n    Defaults!/bin/sh {default}\n"
+    )
+    assert named in hostsec.sudo_listing(command_specific).text
+
+
+def test_a_listing_that_is_not_sudos_is_not_read() -> None:
+    for listing in ("", "sudo: unable to resolve host\n"):
+        check = hostsec.sudo_listing(listing)
+        assert check.status == "warn" and check.unread and "could not be read" in check.text
+
+
+def test_your_sudo_is_read_without_your_password(tmp_path: Path) -> None:
+    """As you, with no password: sudo -n -k -l lists your rules only when one of them runs without the password
+    (sudo's listpw default) or none needs one; "a password is required" means no rule skips it. -k ignores your
+    cached sign-in, so a sudo used a minute ago proves nothing."""
+    argv = f"{SUDO} -n -k -l"
+    required = hostsec.owner_sudo(FakeHost(tmp_path, {argv: (1, "sudo: a password is required\n")}))
+    assert required.status == "ok" and "no sudo rule runs without your password" in required.text
+    listed = hostsec.owner_sudo(FakeHost(tmp_path, {argv: (0, MACOS_LISTING + "    (ALL) NOPASSWD: ALL\n")}))
+    assert listed.status == "warn" and "NOPASSWD" in listed.text
+    odd = hostsec.owner_sudo(FakeHost(tmp_path, {argv: (1, "sudo: unknown user\n")}))
+    assert odd.status == "warn" and odd.unread
+    dry = FakeHost(tmp_path, {argv: (1, "sudo: a password is required\n")})
+    dry.dry_run = True  # a dry run never runs sudo, not even to list
+    assert hostsec.owner_sudo(dry).unread and dry.asked == []
+
+
+def test_passwordless_sudo_keeps_the_mac_from_the_hardened_level(tmp_path: Path) -> None:
+    """Her own user holds only while no sudo rule skips your password: with one, the level is not hardened."""
+    home = hardened_home(tmp_path)
+    checks = hostsec.level_checks(level_host(tmp_path), home, "+306900000000")
+    assert hostsec.security_level(checks) == "hardened"  # sudo not read (her bridge): the level as before
+    passwordless = hostsec.sudo_listing(MACOS_LISTING + "    (ALL) NOPASSWD: ALL\n")
+    assert hostsec.security_level([*checks, passwordless]) == ""
+    line = hostsec.level_check([*checks, passwordless])
+    assert line.status == "warn" and "Passwordless sudo" in line.text
+    assert hostsec.security_level([*checks, hostsec.sudo_listing(MACOS_LISTING)]) == "hardened"
+    assert hostsec.security_level([*checks, hostsec.sudo_listing("")]) is None  # not read: no level claimed
+    found = doctor_checks(level_host(tmp_path), home, "+306900000000", sudo=passwordless)
+    assert [check.key for check in found][-2:] == ["sudoers", "security_level"]
+    assert found[-1].status == "warn"
+
+
 def test_other_admin_accounts_are_named(tmp_path: Path) -> None:
     answers = {f"{hostsec.DSCL} . -read /Groups/admin GroupMembership": (0, "GroupMembership: root alex sam\n")}
     check = hostsec.admins(FakeHost(tmp_path, answers), owner="alex")
@@ -338,6 +426,34 @@ def account(signal: Path, number: str, path: str, pin: str | None) -> None:
     (data / path).write_text(json.dumps({"version": 9, "registrationLockPin": pin, "number": number}))
 
 
+@pytest.mark.parametrize("swap", ["accounts.json", "111111"])
+@pytest.mark.parametrize("kind", ["fifo", "link"])
+def test_her_signal_account_files_are_read_never_through_a_link_or_a_fifo(tmp_path: Path, swap: str, kind: str) -> None:
+    """The move's preflight reads your accounts.json and the account file it names as root: a FIFO swapped in must
+    not hang root, and a link of yours is never followed (review 15 Oct, 6)."""
+    account(tmp_path, "+306900000000", "111111", "731904")
+    target = tmp_path / "data" / swap
+    elsewhere = tmp_path / "elsewhere.json"
+    elsewhere.write_bytes(target.read_bytes())
+    target.unlink()
+    if kind == "fifo":
+        os.mkfifo(target)
+    else:
+        target.symlink_to(elsewhere)
+    started = time.monotonic()
+    assert hostsec.signal_account(tmp_path, "+306900000000") is None
+    assert hostsec.registration_lock_state(tmp_path, "+306900000000") == "unknown"
+    assert time.monotonic() - started < 5
+
+
+def test_an_account_file_named_by_a_path_is_never_read(tmp_path: Path) -> None:
+    account(tmp_path, "+306900000000", "111111", "731904")
+    data = tmp_path / "data"
+    listed = {"accounts": [{"path": str(data / "111111"), "number": "+306900000000"}], "version": 2}
+    (data / "accounts.json").write_text(json.dumps(listed))
+    assert hostsec.signal_account(tmp_path, "+306900000000") is None
+
+
 def test_registration_lock_is_read_and_its_pin_never_returned(tmp_path: Path) -> None:
     account(tmp_path, "+306900000000", "111111", "731904")
     account(tmp_path, "+306900000001", "222222", None)
@@ -367,6 +483,7 @@ def test_the_doctor_checks_have_their_keys_and_never_print_the_pin(tmp_path: Pat
         "filevault",
         "data_modes",
         "registration_lock",
+        "security_level",
     ]
     found = by_key(checks)
     assert found["registration_lock"].status == "ok" and found["filevault"].status == "ok"
@@ -805,3 +922,116 @@ def test_a_program_in_a_temporary_folder_gets_no_command_that_opens_the_firewall
     assert check.text == "serve on port 9000 cannot be reached from other machines"
     assert "--add" not in check.fix and "--unblockapp" not in check.fix
     assert "temporary folder" in check.fix
+
+
+# owner, 14 Oct: the Mac's security has two levels, named in every text a person reads: hardened (setup's security
+# step) and nuclear (scripts/harden.sh --nuclear); never "default"
+REMOTE_OFF = {f"{hostsec.LAUNCHCTL} print-disabled system": (0, '\t"com.openssh.sshd" => disabled\n')}
+
+
+# the firewall's list as --nuclear leaves it: no interpreter may take incoming connections
+NO_INTERPRETER = "Total number of apps = 1 \n1 : /usr/bin/python3 \n             (Block incoming connections)\n"
+
+
+def level_host(
+    root: Path,
+    *,
+    firewall: str = DISABLED,
+    remote: dict[str, tuple[int, str]] = REMOTE_OFF,
+    apps: str = NO_INTERPRETER,
+) -> FakeHost:
+    answers = {**fw(firewall, STEALTH_OFF, apps), **remote, f"{FDESETUP} status": (0, "FileVault is On.\n")}
+    return FakeHost(root, answers)
+
+
+def hardened_home(tmp_path: Path, pin: str | None = "731904") -> Path:
+    home = tmp_path / "home"
+    her_files(home)
+    account(home / ".local/share/signal-cli", "+306900000000", "111111", pin)
+    for written in (home / ".local/share/signal-cli/data").iterdir():
+        written.chmod(0o600)  # private, as the security step leaves them
+    return home
+
+
+@pytest.mark.parametrize(
+    ("firewall", "pin", "level"),
+    [(ENABLED, "731904", "nuclear"), (DISABLED, "731904", "hardened"), (ENABLED, None, ""), (DISABLED, None, "")],
+)
+def test_the_security_level_is_read_from_what_the_security_step_sets(
+    tmp_path: Path, firewall: str, pin: str | None, level: str
+) -> None:
+    """hardened: SSH with keys only or off, her files private, her Registration Lock; nuclear: that, the firewall on
+    and no interpreter on its list."""
+    home = hardened_home(tmp_path, pin)
+    checks = hostsec.level_checks(level_host(tmp_path, firewall=firewall), home, "+306900000000")
+    keys = ["firewall", "ssh_password", "data_modes", "registration_lock", "firewall_apps"]
+    assert [check.key for check in checks] == keys
+    assert hostsec.security_level(checks) == level
+
+
+def test_the_firewall_alone_is_not_nuclear(tmp_path: Path) -> None:
+    """Review of 14 Oct: a firewall the owner turned on with python3 still on its list is the hardened level."""
+    home = hardened_home(tmp_path)
+    for apps in (APPS, None):  # python3 allowed; the list not readable
+        host = level_host(tmp_path, firewall=ENABLED, apps=APPS)
+        if apps is None:
+            host.answers[f"{SOCKETFILTERFW} --listapps"] = (1, "")
+        checks = hostsec.level_checks(host, home, "+306900000000")
+        assert hostsec.security_level(checks) == "hardened"
+        line = hostsec.level_check(checks)
+        assert line.status == "ok" and line.text.startswith("hardened")
+        assert "python3 and ruby off the firewall's list" in line.text and "scripts/harden.sh --nuclear" in line.text
+
+
+def test_a_setting_that_could_not_be_read_gives_no_level(tmp_path: Path) -> None:
+    """Review of 14 Oct: her Signal account file not readable (doctor as the owner) is no proof of "not hardened"."""
+    home = hardened_home(tmp_path)
+    (home / ".local/share/signal-cli/data/accounts.json").write_text("{broken")
+    checks = hostsec.level_checks(level_host(tmp_path, firewall=ENABLED), home, "+306900000000")
+    assert hostsec.security_level(checks) is None
+    line = hostsec.level_check(checks)
+    assert (line.status, line.text) == ("warn", "not read: Registration Lock could not be read")
+
+
+def test_a_setting_read_as_not_held_wins_over_one_not_read(tmp_path: Path) -> None:
+    home = hardened_home(tmp_path)
+    (home / ".local/share/signal-cli/data/accounts.json").write_text("{broken")
+    sshd(tmp_path, MAIN, MACOS)  # Remote Login on, passwords allowed
+    checks = hostsec.level_checks(level_host(tmp_path, remote=REMOTE_ON), home, "+306900000000")
+    assert hostsec.security_level(checks) == ""
+
+
+def test_ssh_with_passwords_is_not_hardened(tmp_path: Path) -> None:
+    home = hardened_home(tmp_path)
+    sshd(tmp_path, MAIN, MACOS)  # Remote Login on, passwords allowed
+    checks = hostsec.level_checks(level_host(tmp_path, firewall=ENABLED, remote=REMOTE_ON), home, "+306900000000")
+    assert hostsec.security_level(checks) == ""
+
+
+@pytest.mark.parametrize(
+    ("firewall", "pin", "status", "words"),
+    [
+        (ENABLED, "731904", "ok", "nuclear"),
+        (DISABLED, "731904", "ok", "hardened"),
+        (DISABLED, None, "warn", "not hardened yet"),
+    ],
+)
+def test_doctor_names_the_security_level_last(
+    tmp_path: Path, firewall: str, pin: str | None, status: str, words: str
+) -> None:
+    home = hardened_home(tmp_path, pin)
+    line = doctor_checks(level_host(tmp_path, firewall=firewall), home, "+306900000000")[-1]
+    assert (line.key, line.part, line.status) == ("security_level", "Security level", status)
+    assert line.text.startswith(words)
+    assert "default" not in (line.text + line.fix).lower()
+    if status == "warn":
+        assert "Registration Lock" in line.text and "scripts/harden.sh" in line.fix and "hardened" in line.fix
+    else:
+        assert "hardened" in line.text and "nuclear" in line.text  # both levels named, the current one first
+    if words == "nuclear":
+        assert "stealth mode and the keychain lock do not count" in line.text
+
+
+def test_the_neutral_line_names_the_nuclear_level() -> None:
+    assert hostsec.NUCLEAR_LINE.startswith("the nuclear level: the firewall,")
+    assert "default" not in hostsec.NUCLEAR_LINE

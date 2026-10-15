@@ -79,7 +79,7 @@ def test_a_cloud_model_is_kept_from_its_first_time_and_named_in_status(tmp_path:
     assert found.model_cloud == NOW and found.model_paused is None
     (line,) = part_status.security_lines(found, NOW, TZ, model="local-worker")
     assert line.state == "failing" and line.text.startswith("✗ answers paused since 11:40")
-    assert "cloud model" in line.text and "Ollama's servers" in line.text and "create local-worker" in line.fix
+    assert "cloud model" in line.text and "Ollama's servers" in line.text and "scripts/setup.sh" in line.fix
     status.model_cloud(False)
     assert part_status.read_security(path).model_cloud is None
 
@@ -120,6 +120,15 @@ def test_reading_keeps_only_known_parts_reasons_and_numbers(tmp_path: Path) -> N
         "mail:family": Record(ok=NOW),
         "web": Record(failed=NOW, reason="error"),
     }
+
+
+def test_a_program_not_hers_at_the_voice_address_has_its_own_reason_and_fix() -> None:
+    """Finding 41: the bridge sends nothing to a program of another account at 127.0.0.1:8150; doctor and /status say
+    so and how to find it, never "no answer" with the voice installer."""
+    assert part_status.reason_text("not_hers") == "another program holds its address: nothing sent"
+    fix = part_status.fix_for("voice", "not_hers")
+    assert "/usr/bin/sudo /usr/sbin/lsof -nP -iTCP:8150 -sTCP:LISTEN" in fix
+    assert "/usr/bin/sudo /usr/local/estia/bin/estia start voice" in fix
 
 
 def test_reasons_are_fixed_short_categories(tmp_path: Path) -> None:
@@ -227,9 +236,41 @@ def test_each_part_has_its_label_verb_and_fix() -> None:
     assert youtube.fix.startswith("cd tools/youtube && uv sync --frozen") and "a deploy builds it" in youtube.fix
     assert "a newer" in describe("youtube", Record(failed=NOW, reason="bad_answer"), NOW, TZ).fix
     assert describe("youtube", Record(failed=NOW, reason="refused"), NOW, TZ).fix.startswith("wait")
-    for part in ("voice", "calendar", "calendar:work", "devices", "web", "places", "spotify", "mail:home", "youtube"):
+    assert describe("documents", Record(ok=old), NOW, TZ).line() == "Documents: working, last read 6 Oct 11:40"
+    shared = describe("documents", Record(failed=NOW, reason="not_shared"), NOW, TZ)
+    assert shared.text == "failing since 11:40: the folder cannot be read"
+    assert "scripts/share-documents.sh" in shared.fix and "sudo" not in shared.fix
+    built = describe("documents", Record(failed=NOW, reason="helper_missing"), NOW, TZ)
+    assert built.fix == "cd tools/documents && swift build -c release (in her own user a deploy builds it: see doctor)"
+    parts = ("voice", "calendar", "calendar:work", "devices", "web", "places", "spotify", "mail:home", "youtube")
+    for part in (*parts, "documents"):
         for reason in get_args(Reason):
             assert describe(part, Record(failed=NOW, reason=reason), NOW, TZ).fix  # always a next step
+
+
+def test_macos_refusing_documents_names_estia_kb_only_when_the_folder_is_elsewhere() -> None:
+    """/status and doctor: "use your ~/Estia-KB" for a folder that already is ~/Estia-KB would go in a circle."""
+    refused = {"documents": Record(failed=NOW, reason="os_refused")}
+
+    def fix(folder: str) -> str:
+        cfg = Config(
+            bot_number="+306900000000",
+            allowed_acis=frozenset({ME}),
+            documents_enabled=True,
+            documents_folder=Path(folder),
+        )
+        (line,) = [line for line in lines(cfg, refused, NOW) if line.label == "Documents"]
+        return line.fix
+
+    elsewhere = fix("/Users/alex/Documents/papers")
+    assert elsewhere == prompts.PART_FIXES["documents/os_refused"] and "use your ~/Estia-KB" in elsewhere
+    kb = fix("/Users/alex/Estia-KB")
+    assert kb == prompts.PART_FIXES["documents/os_refused/estia_kb"] and "use your" not in kb
+    assert kb.startswith("macOS refuses ~/Estia-KB itself (unexpected): bridge.log names the refusal (EPERM)")
+    assert describe("documents", refused["documents"], NOW, TZ, estia_kb=True).fix == kb
+    assert fix("/Users/Shared/Estia-KB") == elsewhere  # not a home
+    shared = Record(failed=NOW, reason="not_shared")  # every other reason keeps its fix
+    assert describe("documents", shared, NOW, TZ, estia_kb=True).fix == describe("documents", shared, NOW, TZ).fix
 
 
 def test_times_are_shown_in_the_configured_zone() -> None:
@@ -250,6 +291,7 @@ def test_lines_cover_each_enabled_part_in_order() -> None:
         web_enabled=True,
         maps_enabled=True,
         spotify_client_id="0123456789abcdef0123456789abcdef",
+        documents_enabled=True,
     )
     found = lines(cfg, {"mail:work": Record(ok=NOW)}, NOW)
     assert [line.label for line in found] == [
@@ -262,6 +304,7 @@ def test_lines_cover_each_enabled_part_in_order() -> None:
         "Places",
         "Spotify",
         "YouTube",
+        "Documents",
     ]
     assert found[2].text == "working, last read 11:40" and found[1].state == "untested"
     plain = Config(bot_number="+306900000000", allowed_acis=frozenset({ME}))
@@ -285,6 +328,26 @@ def test_each_calendar_is_a_part_of_its_own(tmp_path: Path) -> None:
         "calendar:work": Record(ok=NOW),
         "calendar:school-days": Record(failed=NOW, reason="no_consent"),
     }
+
+
+def test_a_caldav_calendar_has_its_own_reasons_and_fixes() -> None:
+    lost = describe("calendar:family", Record(failed=NOW, reason="no_password"), NOW, TZ)
+    assert (lost.text, lost.fix) == (
+        "failing since 11:40: app-specific password not saved",
+        "scripts/set-calendar-password.sh family",
+    )
+    refused = describe("calendar:family", Record(failed=NOW, reason="password_refused"), NOW, TZ)
+    assert refused.text == "failing since 11:40: user name or password refused"
+    assert refused.fix.startswith("a new app-specific password, then scripts/set-calendar-password.sh family")
+    missing = describe("calendar:family", Record(failed=NOW, reason="no_calendar"), NOW, TZ)
+    assert missing.text == "failing since 11:40: no calendar by that name"
+    assert "caldav and calendar in config.toml" in missing.fix
+    assert describe("calendar", Record(failed=NOW, reason="no_password"), NOW, TZ).fix == (
+        "scripts/set-calendar-password.sh"  # the calendar named calendar: its password is CALDAV_PASSWORD
+    )
+    assert describe("calendar", Record(failed=NOW, reason="password_refused"), NOW, TZ).fix == (
+        "a new app-specific password, then scripts/set-calendar-password.sh (or check user in config.toml)"
+    )  # no name: no double space where it would be
 
 
 def test_a_named_calendar_has_its_label_and_its_own_fixes() -> None:
@@ -397,3 +460,18 @@ def test_security_lines_say_what_is_wrong_and_the_next_step() -> None:
     assert '7. Operations, "Safety number changed"' in safety.fix and "compare" in safety.fix
     assert account.text.startswith("✗ 3 devices") and "removeDevice" in account.fix
     assert model.text.startswith("✗ answers paused since 11:40") and "local-worker" in model.text
+
+
+@pytest.mark.parametrize(
+    ("reason", "text", "fix"),
+    [
+        ("not_paired", "Hue Bridge not paired yet", "scripts/hue-pair.sh"),
+        ("hue_key", "Hue Bridge refused its key", "scripts/hue-pair.sh"),
+        ("certificate", "Hue Bridge certificate changed: nothing sent", "if the bridge was replaced or reset"),
+        ("no_light", "a light is not on the Hue Bridge", "scripts/tapo-discover.sh lists the bridge's lights"),
+    ],
+)
+def test_a_hue_bridge_problem_names_its_own_fix(reason: str, text: str, fix: str) -> None:
+    line = describe("devices", Record(failed=NOW - 300, reason=reason), NOW, TZ)
+    assert line.state == "failing" and line.text.endswith(f": {text}") and fix in line.fix
+    assert "TP-Link" not in line.text + line.fix  # the Hue Bridge's pairing is not the TP-Link login

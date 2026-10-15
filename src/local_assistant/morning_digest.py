@@ -1,4 +1,5 @@
-"""The morning digest (09:15 by default, every day): the calendar on top, then the mail digest.
+"""The morning digest (09:15 by default, every day): the date, the calendar on top, then the mail, each section under
+a bold heading with a blank line between (markup, sent as Signal's text styles).
 
 It owns the schedule, the catch-up until noon after downtime and the once-a-day key (the key the mail
 digest used before, so the day of the update never gets a second digest). The calendar part has 30
@@ -16,13 +17,21 @@ from datetime import datetime
 
 from local_assistant.calendar_tools import UNAVAILABLE, CalendarTools
 from local_assistant.config import Config
-from local_assistant.mail_digest import LAST_DIGEST_KEY, MailDigest
+from local_assistant.mail_digest import EMPTY, LAST_DIGEST_KEY, MailDigest
 from local_assistant.store import Store
 
 log = logging.getLogger(__name__)
 
 DIGEST_DAY_KEY = "mail:digest_day"  # kept from the mail digest: the day the digest went out
 MISSED_UNTIL_HOUR = 12
+_SECTIONS = ("Calendar", "Mail")
+
+
+def _named(block: str) -> str:
+    """A section of one line ("Mail: nothing needs you today.") with its name in bold, as the other sections' headings
+    are; the tools and the call's glance keep the plain line."""
+    name, colon, rest = block.partition(": ")
+    return f"**{name}**: {rest}" if colon and name in _SECTIONS and "\n" not in block else block
 
 
 class MorningDigest:
@@ -82,12 +91,20 @@ class MorningDigest:
         log.info("morning digest sent")
 
     async def compose(self) -> str:
-        if self._calendar is None:
-            return self._mail.compose() if self._mail is not None else ""
-        mail = self._mail.compose(header="Mail:") if self._mail is not None else None  # first: its actions end now
+        """The date in bold, the calendar's blocks, then a block per mailbox, a blank line between them (markup: sent
+        as Signal's text styles). A section of one line ("Calendar: not available right now") has its name in bold
+        like the others' headings. Mail alone with nothing to show is its one line."""
+        mail = self._mail.digest_part() if self._mail is not None else None  # first: its actions end now
+        if mail is not None:
+            head, gap, rest = mail.partition("\n\n")  # a block of mailboxes not read may follow
+            mail = _named(head) + gap + rest
+        if self._calendar is None and mail in (None, _named(EMPTY)):
+            return mail or ""
         local = datetime.fromtimestamp(self._clock(), self._tz)
-        parts = [f"{local:%a} {local.day} {local:%b}", await self._calendar_block()]
-        return "\n".join([*parts, mail] if mail is not None else parts)
+        parts = [f"**{local:%a} {local.day} {local:%b}**"]
+        if self._calendar is not None:
+            parts.append(_named(await self._calendar_block()))
+        return "\n\n".join([*parts, mail] if mail is not None else parts)
 
     async def _calendar_block(self) -> str:
         assert self._calendar is not None

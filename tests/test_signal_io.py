@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import sys
 from collections.abc import Callable
@@ -84,6 +85,54 @@ async def test_send_returns_signal_timestamp(fake_dir: Path) -> None:
         await client.stop()
 
 
+async def test_text_styles_go_out_as_signal_clis_text_style(fake_dir: Path) -> None:
+    client = make_client()
+    await client.start()
+    try:
+        await client.send(ME, "Today\n• 09:30 Dentist", styles=("0:5:BOLD",))
+        await client.send(ME, "plain")
+        first, second = [r["params"] for r in requests(fake_dir) if r["method"] == "send"]
+        assert first == {"recipient": [ME], "message": "Today\n• 09:30 Dentist", "textStyle": ["0:5:BOLD"]}
+        assert second == {"recipient": [ME], "message": "plain"}  # no styles: the request as before
+    finally:
+        await client.stop()
+
+
+@pytest.mark.parametrize("bad", ["0:6:BOLD", "0:5:bold", "0:5:UNDERLINE", "0-5-BOLD", "3:0:ITALIC"])
+async def test_a_style_signal_cli_would_refuse_is_never_sent(fake_dir: Path, bad: str) -> None:
+    """signal-cli fails the whole send on one bad entry (and never checks a range against the text): the text goes out
+    without styles instead."""
+    client = make_client()
+    await client.start()
+    try:
+        assert await client.send(ME, "hello", styles=("0:1:BOLD", bad)) > 0
+        send = next(r for r in requests(fake_dir) if r["method"] == "send")
+        assert send["params"] == {"recipient": [ME], "message": "hello"}
+    finally:
+        await client.stop()
+
+
+@pytest.mark.parametrize(
+    ("styles", "error"),
+    [
+        (["0:5:bold"], "Invalid style"),
+        (["0-5-BOLD"], "Invalid textStyle syntax"),
+        ("0:5:WAVY", "Invalid style"),
+    ],
+)
+async def test_the_fake_refuses_text_styles_as_signal_cli_does(
+    fake_dir: Path, styles: str | list[str], error: str
+) -> None:
+    client = make_client()
+    await client.start()
+    try:
+        with pytest.raises(SignalError, match=error):
+            await client.request("send", {"recipient": [ME], "message": "hello", "textStyle": styles})
+        assert await client.request("send", {"recipient": [ME], "message": "hello", "textStyle": "0:5:BOLD"})
+    finally:
+        await client.stop()
+
+
 async def test_a_voice_note_is_an_attachment_with_the_voice_note_flag(fake_dir: Path, tmp_path: Path) -> None:
     note = tmp_path / "answer.m4a"
     note.write_bytes(b"\x00\x00\x00\x1cftypM4A " + bytes(100))
@@ -95,6 +144,24 @@ async def test_a_voice_note_is_an_attachment_with_the_voice_note_flag(fake_dir: 
         assert send["params"] == {"recipient": [ME], "attachments": [str(note)], "voiceNote": True}
         with pytest.raises(NotAllowedError):
             await client.send_voice_note(STRANGER, note)
+    finally:
+        await client.stop()
+
+
+async def test_a_document_goes_as_a_data_link_attachment_with_its_name(fake_dir: Path) -> None:
+    """signal-cli 0.14.9's send takes "attachments": paths or RFC 2397 data links with a filename parameter (URL
+    decoded): the PDF's bytes go inline, so signal-cli opens no file of the folder (no link to follow)."""
+    data = b"%PDF-1.7\nPets are allowed.\n"
+    client = make_client()
+    await client.start()
+    try:
+        assert await client.send_document(ME, data, "2026-10-14 Lease (2).pdf") > 0
+        send = next(r for r in requests(fake_dir) if r["method"] == "send")
+        encoded = base64.b64encode(data).decode()
+        link = f"data:application/pdf;filename=2026-10-14%20Lease%20%282%29.pdf;base64,{encoded}"
+        assert send["params"] == {"recipient": [ME], "attachments": [link]}
+        with pytest.raises(NotAllowedError):
+            await client.send_document(STRANGER, data, "lease.pdf")
     finally:
         await client.stop()
 

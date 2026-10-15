@@ -151,6 +151,8 @@ def test_upgrade_to_v6_keeps_sorting_records_finds_correspondents_and_reads_sent
     store._conn.executescript(  # back to version 5 as it was first built
         "BEGIN; DROP TABLE reminders; DROP TABLE followups; DROP TABLE initiative_log;"  # nor any later version
         " DROP TABLE known_devices; ALTER TABLE messages DROP COLUMN source_device;"
+        " DROP TABLE doc_pages_fts; DROP TABLE doc_pages; DROP TABLE doc_files;"
+        " ALTER TABLE attachments DROP COLUMN filename;"
         " ALTER TABLE messages DROP COLUMN footer; ALTER TABLE conversations DROP COLUMN kind;"
         f" DROP TABLE mail_correspondents; DROP INDEX mail_triage_created; ALTER TABLE mail_triage RENAME TO t;"
         f" {MIGRATION_V5}"

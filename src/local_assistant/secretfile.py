@@ -4,8 +4,8 @@ The value comes only from stdin (the wrapper asks with a hidden prompt when stdi
 command line is refused. Only these files and keys:
 
     web.env       BRAVE_API_KEY, OLLAMA_API_KEY, GOOGLE_MAPS_API_KEY
-    calendar.env  CALENDAR_ICS_URL[_NAME] (a Google iCal address; CALENDAR_SAVED_AT[_NAME] is set next to it),
-                  CALENDAR_SAVED_AT[_NAME]
+    calendar.env  CALENDAR_ICS_URL[_NAME] (a Google iCal address) and CALDAV_PASSWORD[_NAME] (a CalDAV calendar's
+                  app-specific password), each with CALENDAR_SAVED_AT[_NAME] set next to it; CALENDAR_SAVED_AT[_NAME]
     tapo.env      TAPO_USERNAME, TAPO_PASSWORD
 
 Only that key is replaced; the other lines stay, in one atomic write in her own folder
@@ -30,7 +30,7 @@ from local_assistant.ownuser import HOME, ROLE_GROUP, ROLE_USER
 _NAME = r"(_[A-Z0-9][A-Z0-9_]{0,19})?"
 ALLOWED: dict[str, re.Pattern[str]] = {
     "web.env": re.compile(r"^(BRAVE_API_KEY|OLLAMA_API_KEY|GOOGLE_MAPS_API_KEY)$"),
-    "calendar.env": re.compile(rf"^CALENDAR_(ICS_URL|SAVED_AT){_NAME}$"),
+    "calendar.env": re.compile(rf"^(CALENDAR_(ICS_URL|SAVED_AT)|CALDAV_PASSWORD){_NAME}$"),
     "tapo.env": re.compile(r"^(TAPO_USERNAME|TAPO_PASSWORD)$"),
 }
 ICAL = re.compile(r"^https://calendar\.google\.com/calendar/ical/\S+\.ics$")
@@ -100,11 +100,12 @@ def merged(text: str, values: dict[str, str]) -> str:
 
 
 def save(folder: Path, file: str, key: str, value: str, *, now: float | None = None) -> None:
-    """Replace `key` (and a calendar address's saved time) in her `file`, 0600, in one rename."""
+    """Replace `key` (and a calendar address's or password's saved time) in her `file`, 0600, in one rename."""
     check(file, key, value)
     values = {key: value}
-    if key.startswith("CALENDAR_ICS_URL"):
-        values[key.replace("CALENDAR_ICS_URL", "CALENDAR_SAVED_AT", 1)] = str(int(now or time.time()))
+    for secret in ("CALENDAR_ICS_URL", "CALDAV_PASSWORD"):
+        if key.startswith(secret):
+            values[key.replace(secret, "CALENDAR_SAVED_AT", 1)] = str(int(now or time.time()))
     try:
         dir_fd = _open_folder(folder)
     except OSError as exc:

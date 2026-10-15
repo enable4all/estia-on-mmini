@@ -1120,7 +1120,7 @@ async def test_set_reminder_saves_and_leaves_the_confirmation_to_code(store: Sto
     result = await tools.call(current, "set_reminder", json.dumps({"at": "2026-10-09 07:00", "text": "call mum"}))
     assert result.startswith("Set as #1 for Fri 9 Oct 07:00;")
     assert current.reminder_set and current.reminder_notes == [
-        'Reminder set (#1): Fri 9 Oct 07:00 · "call mum". /reminders to see or cancel.\n'
+        '**Reminder set** (#1): Fri 9 Oct 07:00 · "call mum". /reminders to see or cancel.\n'
         "Only this note means a reminder is set."  # the first one only
     ]
     assert current.reminder_spoken == ["Reminder set for Friday 9 October, 07:00."]
@@ -1181,7 +1181,7 @@ async def test_codes_confirmation_shows_the_date_it_understood(store: Store) -> 
     current = turn(store, "remind me on 20 May at 9 to renew the passport")
     result = await tools.call(current, "set_reminder", json.dumps({"at": "2026-05-20 09:00", "text": "passport"}))
     assert result.startswith("Set as #1 for Thu 20 May 2027 09:00;")
-    assert current.reminder_notes[0].startswith("Reminder set (#1): Thu 20 May 2027 09:00 · ")
+    assert current.reminder_notes[0].startswith("**Reminder set** (#1): Thu 20 May 2027 09:00 · ")
 
 
 async def test_a_repeating_reminder_from_a_day_long_past_is_refused(store: Store) -> None:
@@ -1430,6 +1430,14 @@ async def test_a_video_link_must_be_in_the_current_message(store: Store) -> None
     current = turn(store, "summarise the video please")
     assert await tools.call(current, "read_link", json.dumps({"url": VIDEO_LINK})) == prompts.VIDEO_REFUSED
     assert source.asked == []
+
+
+def test_the_youtube_line_says_the_link_opens_the_video_never_the_transcript() -> None:
+    """Owner, 14 Oct: the link opens the video, so she never calls it the full transcript. The line still ends with
+    the link given instead (with the link earlier in the line, she named the link 2 of 5 times; at the end, 5 of 5)."""
+    line = prompts.VIDEO_IN_MESSAGE.format(link=VIDEO_LINK)
+    assert "the link opens the video: never call it the transcript" in line
+    assert line.endswith(f"give this link instead: {VIDEO_LINK}") and line.count(VIDEO_LINK) == 1
 
 
 def test_a_youtube_link_in_the_message_gets_codes_line(store: Store) -> None:

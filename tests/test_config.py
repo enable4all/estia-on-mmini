@@ -159,6 +159,66 @@ def test_projects_are_an_extra_off_without_their_section() -> None:
     assert docs.projects_enabled and docs.projects_default == "docs"  # the owner's own config keeps working
 
 
+def test_documents_are_off_without_their_section() -> None:
+    """No [documents]: no folder is looked at and no document tool is offered; the section alone turns them on, with
+    the owner's ~/Estia-KB as an absolute path and a look every 60 minutes."""
+    assert not parse_config({"bot_number": "+306900000000", "allowed_acis": [ACI]}).documents_enabled
+    assert not Config(bot_number="+306900000000", allowed_acis=frozenset({ACI})).documents_enabled
+    on = parse_config({"bot_number": "+306900000000", "allowed_acis": [ACI], "documents": {}})
+    assert on.documents_enabled and on.documents_look_minutes == 60
+    assert on.documents_folder == Path.home() / "Estia-KB" and on.documents_folder.is_absolute()
+    assert on.documents_helper[0].endswith("tools/documents/.build/release/documents-helper")
+
+
+def test_the_documents_folder_and_how_often_she_looks(tmp_path: Path) -> None:
+    folder = tmp_path / "Estia-KB"
+    cfg = parse_config(
+        {
+            "bot_number": "+306900000000",
+            "allowed_acis": [ACI],
+            "documents": {"folder": str(folder), "look_minutes": 30},
+        }
+    )
+    assert (cfg.documents_folder, cfg.documents_look_minutes) == (folder, 30)
+    tilde = parse_config({**BASE, "documents": {"folder": "~/Estia-KB"}})
+    assert tilde.documents_folder == Path.home() / "Estia-KB"  # written out: an absolute path
+    owners = parse_config({**BASE, "documents": {"folder": "/Users/alex/Estia-KB"}})  # her config in her own user
+    assert owners.documents_folder == Path("/Users/alex/Estia-KB")  # the owner's folder, in full: any absolute path
+
+
+def test_estia_kb_is_that_name_directly_in_a_home_on_a_mac() -> None:
+    """One name for the documents folder (the share, the default, doctor), and one test for "this is ~/Estia-KB"."""
+    assert config_module.DOCUMENTS_FOLDER == "Estia-KB" and config_module.DOCUMENTS_FOLDER.lower() != "estia"
+    assert config_module.is_estia_kb(Path("/Users/alex/Estia-KB"))
+    for other in (
+        "/Users/alex/estia-kb",  # the share names Estia-KB, as written
+        "/Users/alex/Desktop/Estia-KB",
+        "/Users/Shared/Estia-KB",
+        "/Users/Estia-KB",  # privacy-ok: the folder in the place of a home, no user name
+        "/var/estia/Estia-KB",
+        "/Users/alex/Estia-KB/inner",
+    ):
+        assert not config_module.is_estia_kb(Path(other)), other
+
+
+@pytest.mark.parametrize(
+    ("documents", "message"),
+    [
+        ("yes", r"\[documents\] must be a table"),
+        ({"folder": "Estia-KB"}, "documents.folder must be an absolute path, like /Users/<you>/Estia-KB"),
+        ({"folder": ""}, "documents.folder must be an absolute path"),
+        ({"folder": 7}, "documents.folder must be an absolute path"),
+        ({"look_minutes": 0}, "documents.look_minutes"),
+        ({"look_minutes": 2000}, "documents.look_minutes"),
+        ({"look_minutes": True}, "documents.look_minutes"),
+        ({"look_minutes": "60"}, "documents.look_minutes"),
+    ],
+)
+def test_invalid_documents_values(documents: object, message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        parse_config({**BASE, "documents": documents})
+
+
 @pytest.mark.parametrize(
     ("extra", "message"),
     [
@@ -268,6 +328,53 @@ def test_tapo_section() -> None:
     )
     assert (cfg.tapo_helper_timeout, cfg.tapo_confirm_seconds) == (15, 120)
     assert cfg.tapo_helper[1:] == ("-I", cfg.tapo_helper[2]) and cfg.tapo_helper[2].endswith("tools/tapo/helper.py")
+
+
+HUE_LIGHT = "11111111-1111-4111-8111-111111111111"
+HUE_PLUG = "22222222-2222-4222-8222-222222222222"
+
+
+def test_hue_lights_name_the_bridges_light_id_and_no_host() -> None:
+    """A Hue light is reached through the paired bridge (its address is in hue.env), by the bridge's light id."""
+    devices = TAPO["devices"]
+    assert isinstance(devices, list)
+    tapo = {
+        "devices": [
+            devices[0],
+            {"name": "hall light", "brand": "hue", "light": HUE_LIGHT, "kind": "light", "rule": "ask first"},
+            {"name": "fan", "brand": "hue", "light": HUE_PLUG.upper(), "kind": "plug"},
+        ]
+    }
+    cfg = parse_config({"bot_number": "+306900000000", "allowed_acis": [ACI], "tapo": tapo})
+    assert cfg.tapo_devices == (
+        DeviceSpec("Living room lamp", "192.168.1.20", "light", "normal"),
+        DeviceSpec("hall light", "", "light", "ask first", brand="hue", light=HUE_LIGHT),
+        DeviceSpec("fan", "", "plug", "normal", brand="hue", light=HUE_PLUG),
+    )
+    assert [spec.brand for spec in cfg.tapo_devices] == ["kasa", "hue", "hue"]
+    # the brand by name, as the list of what she can do names it (a calendar's service's way)
+    assert [spec.service for spec in cfg.tapo_devices] == ["TP-Link", "Philips Hue", "Philips Hue"]  # Kasa and Tapo
+
+
+@pytest.mark.parametrize(
+    ("device", "message"),
+    [
+        ({"brand": "philips"}, "brand must be kasa or hue"),
+        ({"brand": "hue", "light": HUE_LIGHT}, "a Hue light has no host"),
+        ({"brand": "hue", "host": None}, "light must be"),
+        ({"brand": "hue", "host": None, "light": "1"}, "light must be"),  # CLIP v1 numbers are not ids
+        ({"brand": "hue", "host": None, "light": f"{HUE_LIGHT}/../x"}, "light must be"),
+        ({"light": HUE_LIGHT}, "only a Hue light has a light id"),
+        ({"brand": "hue", "host": None, "light": HUE_PLUG}, "unique"),
+    ],
+)
+def test_invalid_hue_values(device: dict[str, object], message: str) -> None:
+    devices = TAPO["devices"]
+    assert isinstance(devices, list)
+    first = {key: value for key, value in {**devices[0], **device}.items() if value is not None}
+    other = {"name": "fan", "brand": "hue", "light": HUE_PLUG, "kind": "plug"}
+    with pytest.raises(ConfigError, match=message):
+        parse_config({"bot_number": "+306900000000", "allowed_acis": [ACI], "tapo": {"devices": [first, other]}})
 
 
 def test_tapo_is_off_without_the_section() -> None:
@@ -382,6 +489,70 @@ def test_without_sources_the_calendar_is_the_one_google_calendar_as_before() -> 
 def test_invalid_calendar_sources(calendar: object, message: str) -> None:
     with pytest.raises(ConfigError, match=message):
         parse_config({"bot_number": "+306900000000", "allowed_acis": [ACI], "mail": MAIL, "calendar": calendar})
+
+
+def test_a_caldav_calendar_names_its_server_user_and_calendar() -> None:
+    sources = [
+        {"name": "family", "caldav": "https://caldav.icloud.com", "user": "alex@example.com", "calendar": " Family "},
+        {
+            "name": "calendar",
+            "caldav": "https://caldav.fastmail.com/dav/",
+            "user": "alex@example.com",
+            "calendar": "Cal",
+        },
+        {"name": "home", "caldav": "https://cloud.example.com/remote.php/dav", "user": "alex", "calendar": "Personal"},
+        {"name": "nas", "caldav": "https://nas.example.com:5006", "user": "alex", "calendar": "Home", "label": "NAS"},
+        {"name": "google"},
+        {"name": "work", "mailbox": "work"},
+    ]
+    cfg = parse_config(
+        {"bot_number": "+306900000000", "allowed_acis": [ACI], "mail": MAIL, "calendar": {"sources": sources}}
+    )
+    assert [(s.kind, s.service, s.secret_key, s.saved_key, s.ical_key) for s in cfg.calendars] == [
+        ("caldav", "iCloud", "CALDAV_PASSWORD_FAMILY", "CALENDAR_SAVED_AT_FAMILY", ""),
+        ("caldav", "Fastmail", "CALDAV_PASSWORD", "CALENDAR_SAVED_AT", ""),
+        ("caldav", "Nextcloud", "CALDAV_PASSWORD_HOME", "CALENDAR_SAVED_AT_HOME", ""),
+        ("caldav", "nas.example.com", "CALDAV_PASSWORD_NAS", "CALENDAR_SAVED_AT_NAS", ""),  # its own server: by name
+        ("google", "Google", "CALENDAR_ICS_URL_GOOGLE", "CALENDAR_SAVED_AT_GOOGLE", "CALENDAR_ICS_URL_GOOGLE"),
+        ("outlook", "Outlook", "", "", ""),
+    ]
+    family = cfg.calendars[0]
+    assert (family.caldav, family.user, family.calendar, family.shown) == (
+        "https://caldav.icloud.com",
+        "alex@example.com",
+        "Family",
+        "Family",
+    )
+    assert cfg.calendar_mailbox(family) is None
+
+
+@pytest.mark.parametrize(
+    ("source", "message"),
+    [
+        ({"caldav": "http://caldav.icloud.com"}, "x: caldav must be the server's https address"),
+        ({"caldav": "https://alex:pw@caldav.icloud.com"}, "x: caldav must be"),  # privacy-ok: a made-up login
+        ({"caldav": "https://caldav.icloud.com/?a=1"}, "x: caldav must be"),
+        ({"caldav": "caldav.icloud.com"}, "x: caldav must be"),
+        ({"caldav": 1}, "x: caldav must be"),
+        ({"user": ""}, "x: user must be"),
+        ({"user": "a\nb"}, "x: user must be"),
+        ({"calendar": " "}, "x: calendar must be"),
+        ({"calendar": "C" * 101}, "x: calendar must be"),
+        ({"mailbox": "work"}, "x: either a mailbox's calendar or a CalDAV one"),
+    ],
+)
+def test_invalid_caldav_calendars(source: dict[str, object], message: str) -> None:
+    caldav = {"name": "x", "caldav": "https://caldav.icloud.com", "user": "alex@example.com", "calendar": "Family"}
+    calendar = {"sources": [caldav | source]}
+    with pytest.raises(ConfigError, match=message):
+        parse_config({"bot_number": "+306900000000", "allowed_acis": [ACI], "mail": MAIL, "calendar": calendar})
+
+
+@pytest.mark.parametrize("source", [{"user": "alex"}, {"calendar": "Family"}, {"caldav": "https://caldav.icloud.com"}])
+def test_a_caldav_calendar_needs_all_three(source: dict[str, object]) -> None:
+    calendar = {"sources": [{"name": "x"} | source]}
+    with pytest.raises(ConfigError, match="x: a CalDAV calendar needs caldav, user and calendar"):
+        parse_config({"bot_number": "+306900000000", "allowed_acis": [ACI], "calendar": calendar})
 
 
 def test_a_microsoft_calendar_needs_the_mail_section() -> None:
@@ -630,14 +801,53 @@ def test_call_fillers_and_ringing() -> None:
         parse_config(base | {"calls": {"answer_after_seconds": 30}})
 
 
-def test_what_stops_her_on_a_call_is_loudness_unless_speech_is_chosen() -> None:
+# owner, 14 Oct: [calls] interrupt names what stops her in plain words, "only speech" (the default) or "any sound"; the
+# old barge = "speech" or "loudness" (and the short forms) is still read, and doctor suggests the new wording
+@pytest.mark.parametrize(
+    ("calls", "rule", "old"),
+    [
+        ({}, "speech", ""),  # the new default: only someone talking stops her
+        ({"interrupt": "only speech"}, "speech", ""),
+        ({"interrupt": "any sound"}, "loudness", ""),
+        ({"interrupt": "speech"}, "speech", 'interrupt = "speech"'),  # short forms: read, doctor says the new wording
+        ({"interrupt": "sound"}, "loudness", 'interrupt = "sound"'),
+        ({"barge": "speech"}, "speech", 'barge = "speech"'),  # the old key and its values
+        ({"barge": "loudness"}, "loudness", 'barge = "loudness"'),
+        ({"barge": "only speech"}, "speech", 'barge = "only speech"'),
+        ({"barge": "any sound"}, "loudness", 'barge = "any sound"'),
+    ],
+)
+def test_what_stops_her_on_a_call_is_only_speech_unless_any_sound_is_chosen(
+    calls: dict[str, object], rule: str, old: str
+) -> None:
     base: dict[str, object] = {"bot_number": "+306900000000", "allowed_acis": [ACI], "voice": {}}
-    assert parse_config(base | {"calls": {}}).calls_barge == "loudness"
-    assert parse_config(base).calls_barge == "loudness"  # no [calls]: the default all the same
-    assert parse_config(base | {"calls": {"barge": "speech"}}).calls_barge == "speech"
-    for wrong in ("vad", "Speech", "", True, 1):
-        with pytest.raises(ConfigError, match=r'calls\.barge must be "loudness" or "speech"'):
-            parse_config(base | {"calls": {"barge": wrong}})
+    cfg = parse_config(base | {"calls": calls})
+    assert (cfg.calls_barge, cfg.calls_interrupt_old, cfg.calls_barge_unread) == (rule, old, "")
+
+
+def test_interrupt_wins_over_an_old_barge_beside_it() -> None:
+    base: dict[str, object] = {"bot_number": "+306900000000", "allowed_acis": [ACI], "voice": {}}
+    cfg = parse_config(base | {"calls": {"interrupt": "any sound", "barge": "speech"}})
+    assert (cfg.calls_barge, cfg.calls_interrupt_old, cfg.calls_barge_unread) == ("loudness", "", 'barge = "speech"')
+    short = parse_config(base | {"calls": {"interrupt": "speech", "barge": "loudness"}})
+    assert (short.calls_barge, short.calls_interrupt_old, short.calls_barge_unread) == (
+        "speech",
+        'interrupt = "speech"',
+        'barge = "loudness"',
+    )
+
+
+def test_without_calls_the_rule_is_only_speech_all_the_same() -> None:
+    cfg = parse_config({"bot_number": "+306900000000", "allowed_acis": [ACI], "voice": {}})
+    assert (cfg.calls_barge, cfg.calls_interrupt_old) == ("speech", "")
+
+
+@pytest.mark.parametrize("key", ["interrupt", "barge"])
+@pytest.mark.parametrize("wrong", ["vad", "Speech", "loud", "", True, 1])
+def test_another_interrupt_value_is_a_config_error_in_the_new_words(key: str, wrong: object) -> None:
+    base: dict[str, object] = {"bot_number": "+306900000000", "allowed_acis": [ACI], "voice": {}}
+    with pytest.raises(ConfigError, match=r'calls\.interrupt must be "only speech" or "any sound"'):
+        parse_config(base | {"calls": {key: wrong}})
 
 
 BASE: dict[str, object] = {"bot_number": "+306900000000", "allowed_acis": [ACI]}
@@ -1108,6 +1318,7 @@ def test_every_user_path_follows_home(tmp_path: Path) -> None:
         "cfg = c.Config(bot_number='+306900000000', allowed_acis=frozenset())\n"
         "print(json.dumps([str(p) for p in (c.DEFAULT_CONFIG_PATH, cfg.data_dir, cfg.log_dir, cfg.db_path,"
         " cfg.signal_attachments_dir, cfg.web_keys_path, cfg.projects_root, cfg.mail_token_path, *cfg.watched_log_dirs,"
+        " cfg.documents_folder,"
         " c._default_call_socket_dir(Path('/x' * 40)))]))\n"
     )
     env = {**os.environ, "HOME": str(home)}
@@ -1172,6 +1383,17 @@ def test_a_model_digest_that_is_no_sha256_is_refused(value: object) -> None:
         parse_config(BASE | {"model_digest": value})
 
 
+def test_the_example_config_shows_documents_off_with_their_lines() -> None:
+    example = (Path(__file__).resolve().parents[1] / "config.example.toml").read_text(encoding="utf-8")
+    assert not parse_config(tomllib.loads(example)).documents_enabled  # commented out: off
+    lines = example.splitlines()
+    start = lines.index("#[documents]")
+    block = [line.lstrip("#").split("  #")[0] for line in lines[start : start + 3]]
+    on = parse_config(BASE | tomllib.loads("\n".join(block)))
+    assert on.documents_enabled and on.documents_look_minutes == 60 and on.documents_folder.is_absolute()
+    assert "scripts/share-documents.sh" in example
+
+
 def test_the_example_config_explains_retention_and_the_model_pin() -> None:
     example = (Path(__file__).resolve().parents[1] / "config.example.toml").read_text(encoding="utf-8")
     assert "#model_digest = " in example and "#[privacy]" in example and "#keep_days = " in example
@@ -1214,3 +1436,18 @@ def test_the_youtube_helper_is_always_there_with_its_own_environment() -> None:
     assert python.endswith("tools/youtube/.venv/bin/python") and isolated == "-I"
     assert helper.endswith("tools/youtube/helper.py")
     assert cfg.youtube_helper_timeout == 30  # the helper stops itself after 20 s
+
+
+def test_the_example_configs_caldav_calendar_parses() -> None:
+    example = (Path(__file__).resolve().parents[1] / "config.example.toml").read_text(encoding="utf-8")
+    lines = example.splitlines()
+    start = lines.index('#name = "home"') - 1
+    block = [line.lstrip("#").split("   #")[0] for line in lines[start : start + 5]]
+    calendar = tomllib.loads("\n".join(["[calendar]", *block]))["calendar"]
+    (source,) = parse_config(BASE | {"calendar": calendar}).calendars
+    assert (source.kind, source.service, source.calendar, source.secret_key) == (
+        "caldav",
+        "iCloud",
+        "Home",
+        "CALDAV_PASSWORD_HOME",
+    )

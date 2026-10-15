@@ -4,7 +4,7 @@ Thanks for looking at Estia. Keep changes small, tested and free of personal dat
 
 ## Set up
 
-- Requirements: see the **Requirements** section of [README.md](README.md).
+- Requirements: see the **Requirements** section of [GUIDE.md](GUIDE.md).
 - `uv sync` installs the bridge's development environment (Python 3.13).
 - `scripts/verify.sh` runs the privacy check (`scripts/privacy_scan.py`), ruff (lint and format), mypy in strict mode
   and pytest. Run it before every commit. To run the privacy check on every commit as well:

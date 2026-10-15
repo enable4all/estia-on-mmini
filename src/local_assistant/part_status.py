@@ -3,7 +3,8 @@
 The bridge records, per part, when its last real read or call worked and since when it fails, with a reason from a
 fixed list (`Reason`). Parts: each mailbox ("mail:<name>"), each calendar ("calendar" for the one named calendar,
 "calendar:<name>" for the others), the voice service, the device helper, web search, Google Places and Routes ("places"),
-Spotify and the YouTube helper ("youtube", always on). Calls are not a part of their own: they use the voice service.
+Spotify, the YouTube helper ("youtube", always on) and the documents folder with its helper ("documents"). Calls are not
+a part of their own: they use the voice service.
 
 The records live in <data_dir>/status.json (0600, replaced atomically) so doctor can read them without the bridge. The
 file holds part names, times, reasons and HTTP status numbers only: never message, mail, event, search or device text,
@@ -35,7 +36,7 @@ from typing import Any, Literal, get_args
 from zoneinfo import ZoneInfo
 
 from local_assistant import prompts
-from local_assistant.config import DEFAULT_CALENDAR, Config
+from local_assistant.config import DEFAULT_CALENDAR, Config, is_estia_kb
 from local_assistant.timefmt import local_when
 
 log = logging.getLogger(__name__)
@@ -55,13 +56,32 @@ Reason = Literal[
     "loading",
     "bad_answer",
     "no_consent",
+    "not_shared",
+    "os_refused",
+    "no_password",
+    "password_refused",
+    "no_calendar",
+    "not_paired",
+    "hue_key",
+    "certificate",
+    "no_light",
+    "not_hers",
     "error",
 ]
 State = Literal["untested", "working", "failing"]
 REASONS: frozenset[str] = frozenset(get_args(Reason))
 REASON_MAX_CHARS = 60
 WRITE_EVERY_SECONDS = 60.0  # an unchanged state is written at most this often
-PARTS = ("voice", "calendar", "devices", "web", "places", "spotify", "youtube")  # and "mail:<name>", "calendar:<name>"
+PARTS = (
+    "voice",
+    "calendar",
+    "devices",
+    "web",
+    "places",
+    "spotify",
+    "youtube",
+    "documents",
+)  # and "mail:<name>", "calendar:<name>"
 _NAMED = re.compile(r"^(?:mail|calendar):[a-z0-9][a-z0-9_-]{0,19}$")  # config.py's rule for mailbox and calendar names
 
 
@@ -226,11 +246,17 @@ def reason_text(reason: str, code: int = 0) -> str:
     return (f"{text} ({code})" if code else text)[:REASON_MAX_CHARS]
 
 
-def fix_for(part: str, reason: str, *, mailbox: str = "") -> str:
-    """The code-written next step for a failing part; `mailbox`: the mailbox name of an Outlook calendar."""
+def fix_for(part: str, reason: str, *, mailbox: str = "", estia_kb: bool = False) -> str:
+    """The code-written next step for a failing part; `mailbox`: the mailbox name of an Outlook calendar; `estia_kb`:
+    the documents folder already is the owner's ~/Estia-KB (a fix that moves it there would go in a circle)."""
     kind, _, name = part.partition(":")
-    fix = prompts.PART_FIXES.get(f"{kind}/{reason}") or prompts.PART_FIXES.get(reason) or prompts.PART_FIXES["error"]
-    return fix.format(name=name, mailbox=mailbox).strip()
+    fix = (
+        (prompts.PART_FIXES.get(f"{kind}/{reason}/estia_kb") if estia_kb else None)
+        or prompts.PART_FIXES.get(f"{kind}/{reason}")
+        or prompts.PART_FIXES.get(reason)
+        or prompts.PART_FIXES["error"]
+    )
+    return " ".join(fix.format(name=name, mailbox=mailbox).split())  # no double space where an empty name was
 
 
 def label_of(part: str) -> str:
@@ -244,11 +270,18 @@ def label_of(part: str) -> str:
 
 
 def describe(
-    part: str, record: Record | None, now: float, tz: ZoneInfo, *, saved: float | None = None, mailbox: str = ""
+    part: str,
+    record: Record | None,
+    now: float,
+    tz: ZoneInfo,
+    *,
+    saved: float | None = None,
+    mailbox: str = "",
+    estia_kb: bool = False,
 ) -> PartLine:
     """The part's state in words, for doctor and /status alike. `saved`: when the setup that fixes the recorded
     failure (a sign-in, key, address or helper) was saved, if known; saved after the failure, it is not tested yet.
-    `mailbox`: for an Outlook calendar, its mailbox's name (the fix names it)."""
+    `mailbox`: for an Outlook calendar, its mailbox's name (the fix names it). `estia_kb`: see `fix_for`."""
     kind, _, name = part.partition(":")
     label = (
         prompts.PART_LABELS[kind].format(name=name)
@@ -264,7 +297,7 @@ def describe(
     if current == "failing" and record.failed is not None:
         when = local_when(record.failed, now, tz)
         text = prompts.PART_FAILING.format(when=when, reason=reason_text(record.reason, record.code))
-        return PartLine(label, "failing", text, fix_for(part, record.reason, mailbox=mailbox))
+        return PartLine(label, "failing", text, fix_for(part, record.reason, mailbox=mailbox, estia_kb=estia_kb))
     verb = prompts.PART_VERBS.get(part.partition(":")[0], "used")
     return PartLine(label, "working", prompts.PART_WORKING.format(verb=verb, when=local_when(record.ok or 0, now, tz)))
 
@@ -280,6 +313,7 @@ def enabled_parts(cfg: Config) -> list[str]:
         ("places", cfg.maps_enabled),
         ("spotify", cfg.spotify_enabled),
         ("youtube", True),  # always on, with read_link: no switch
+        ("documents", cfg.documents_enabled),
     ):
         if enabled:
             parts.append(part)
@@ -291,10 +325,22 @@ def calendar_mailbox(cfg: Config, part: str) -> str:
     return next((s.mailbox for s in cfg.calendars if calendar_part(s.name) == part), "")
 
 
+def in_estia_kb(cfg: Config, part: str) -> bool:
+    """Whether `part` is documents and its folder already is the owner's ~/Estia-KB (`fix_for`)."""
+    return part == "documents" and is_estia_kb(cfg.documents_folder)
+
+
 def lines(cfg: Config, records: Mapping[str, Record], now: float) -> list[PartLine]:
     """One line per part that is turned on (/status)."""
     return [
-        describe(part, records.get(part), now, cfg.timezone, mailbox=calendar_mailbox(cfg, part))
+        describe(
+            part,
+            records.get(part),
+            now,
+            cfg.timezone,
+            mailbox=calendar_mailbox(cfg, part),
+            estia_kb=in_estia_kb(cfg, part),
+        )
         for part in enabled_parts(cfg)
     ]
 

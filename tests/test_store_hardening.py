@@ -21,8 +21,8 @@ def test_deleted_rows_are_overwritten_in_the_file(store: Store) -> None:
 
 
 def test_the_schema_has_the_device_table_and_the_messages_device(store: Store) -> None:
-    assert SCHEMA_VERSION == 9
-    assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 9
+    assert SCHEMA_VERSION == 10  # v10: the documents index (tests/test_store_documents.py)
+    assert store._conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     columns = {row[1] for row in store._conn.execute("PRAGMA table_info(known_devices)")}
     assert {"aci", "device", "first_seen", "last_seen", "source", "created_at", "updated_at"} <= columns
     assert "source_device" in {row[1] for row in store._conn.execute("PRAGMA table_info(messages)")}
@@ -30,8 +30,12 @@ def test_the_schema_has_the_device_table_and_the_messages_device(store: Store) -
 
 
 def _back_to(path: Path, version: int) -> None:
-    """The database as that version left it: v9 (the devices) gone, and for 7 also v8 (/babble's conversation kind)."""
+    """The database as that version left it: v10 (the documents index) and v9 (the devices) gone, and for 7 also v8
+    (/babble's conversation kind)."""
     conn = sqlite3.connect(path)
+    for table in ("doc_pages_fts", "doc_pages", "doc_files"):
+        conn.execute(f"DROP TABLE {table}")
+    conn.execute("ALTER TABLE attachments DROP COLUMN filename")
     conn.execute("DROP TABLE known_devices")
     conn.execute("ALTER TABLE messages DROP COLUMN source_device")
     if version < 8:
@@ -49,7 +53,7 @@ def test_upgrade_from_version_7_keeps_messages(tmp_path: Path) -> None:
     old.close()
     _back_to(path, 7)
     store = Store.open(path)
-    assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 9
+    assert store._conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     assert kept is not None and store.message(kept).text == "hello" and store.message(kept).source_device is None
     assert store.current_conversation().kind == "chat"  # v8 gave the old conversation its kind
     assert store.devices(ME) == []
@@ -71,7 +75,7 @@ def test_upgrade_from_version_8_keeps_practice_and_adds_the_devices(tmp_path: Pa
     assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'known_devices'").fetchone() is None
     conn.close()
     store = Store.open(path)
-    assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 9
+    assert store._conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     assert store.conversation(practice.id).kind == "practice" and store.current_conversation().id == chat.id
     assert said is not None and store.message(said).source_device is None
     assert store.devices(ME) == []

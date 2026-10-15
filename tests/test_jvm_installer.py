@@ -31,15 +31,24 @@ def release(path: Path) -> None:
         archive.addfile(info, io.BytesIO(launcher))
 
 
-def run(tmp_path: Path, *, key: str, signer: str, primary: str | None = None) -> subprocess.CompletedProcess[str]:
+def run(
+    tmp_path: Path,
+    *,
+    key: str,
+    signer: str,
+    primary: str | None = None,
+    signed_in: bool = True,
+    java: bool = True,
+) -> subprocess.CompletedProcess[str]:
     bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
+    bin_dir.mkdir(exist_ok=True)
     tarball = tmp_path / "release.tar.gz"
     release(tarball)
     stub(
         bin_dir,
         "gh",
         f'case "$1" in\n'
+        f"  auth) exit {0 if signed_in else 1} ;;\n"
         f'  release) cp "{tarball}" "signal-cli-{VERSION}.tar.gz"; echo sig > "signal-cli-{VERSION}.tar.gz.asc" ;;\n'
         f"  api) echo '-----BEGIN PGP PUBLIC KEY BLOCK-----' ;;\n"
         f"esac",
@@ -57,6 +66,9 @@ def run(tmp_path: Path, *, key: str, signer: str, primary: str | None = None) ->
         "exit 0",
     )
     stub(bin_dir, "brew", f'echo "{tmp_path / "brew"}"')
+    if java:
+        (tmp_path / "brew" / "opt" / "openjdk" / "bin").mkdir(parents=True, exist_ok=True)
+        stub(tmp_path / "brew" / "opt" / "openjdk" / "bin", "java", "exit 0")
     env = {
         "PATH": f"{bin_dir}:/usr/bin:/bin",
         "HOME": str(tmp_path / "home"),
@@ -103,6 +115,23 @@ def test_any_other_fingerprint_stops_before_unpacking(
     assert done.returncode == 1
     assert "fingerprint" in done.stderr
     assert not unpacked(tmp_path).exists()
+    assert not unpacked(tmp_path).parents[2].exists()  # nothing half-made: a run again is not blocked (finding 13)
+
+
+def test_a_missing_github_sign_in_is_named_before_anything_is_made(tmp_path: Path) -> None:
+    """gh not signed in: said first, with the command, and nothing is left behind (findings 13, 60)."""
+    done = run(tmp_path, key=PINNED, signer=PINNED, signed_in=False)
+    assert done.returncode == 1 and "gh auth login" in done.stderr
+    assert not (tmp_path / "vendor").exists()
+    again = run(tmp_path, key=PINNED, signer=PINNED)
+    assert again.returncode == 0, again.stderr
+    assert unpacked(tmp_path).is_file()
+
+
+def test_java_is_checked_before_the_download(tmp_path: Path) -> None:
+    done = run(tmp_path, key=PINNED, signer=PINNED, java=False)
+    assert done.returncode == 1 and "brew install openjdk" in done.stderr
+    assert not (tmp_path / "vendor").exists()
 
 
 def test_the_usage_stays_version_and_target_folder() -> None:

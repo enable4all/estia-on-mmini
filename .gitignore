@@ -32,6 +32,7 @@ dist/
 # brand sources: the font and renders stay local
 docs/brand/source/fonts/
 docs/brand/source/out/
+
 # internal working files (kept out of the public repo)
 docs/superpowers/
 todo.md

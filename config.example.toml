@@ -14,7 +14,7 @@ name = "Estia"
 # again only after the file changes. Left out: Estia's e. (docs/brand/estia-avatar.png); "" for none. Keep your own
 # outside the repo folder: a missing or unusable file is skipped (she runs on, Signal keeps the picture it has).
 #avatar = "~/Pictures/her-picture.png"
-# The one language she listens and speaks in: en, es, it, ko, pt, nl, pl, de, ja, ru or fr (README, Languages).
+# The one language she listens and speaks in: en, es, it, ko, pt, nl, pl, de, ja, ru or fr (GUIDE.md, Languages).
 # Only the starting value: a typed /language in Signal changes it later (and wins over this line).
 language = "en"
 ollama_base_url = "http://127.0.0.1:11434/v1"
@@ -34,7 +34,9 @@ digest_time = "09:15"           # the morning digest (calendar, then mail), ever
 #[privacy]
 #keep_days = 365
 
-# Health checks: alerts only for real problems, as Signal notes. The Mac is checked every interval_hours.
+# Health checks: alerts only for real problems, as Signal notes. The Mac is checked every interval_hours. In quiet hours
+# ([initiative] quiet_hours) an alert and its "back to normal" wait until they end; a problem that came and went
+# within them is one line in the morning.
 [health]
 interval_hours = 4              # how often the Mac is checked while all is fine
 confirm_minutes = 5             # a new problem is checked again after this long before it is reported
@@ -54,13 +56,26 @@ disk_free_min_percent = 10
 # setup asks (most people: no). Levels: summary (the README, open to-do items and recent commits), docs (also the
 # project's documents) and code (also its source code). Only files git tracks, never secret-like names such as .env,
 # never outside the folder you named. In her own user (_estia) root is your folder's absolute path (the move writes
-# it), and her user reads that folder read-only, nothing else in your home: scripts/share-projects.sh (as you, no sudo;
-# the move runs it). scripts/setup.sh --extras switches it on later. After a change: restart her.
+# it), and her user reads that folder read-only, nothing else in your home but ~/Estia-KB with [documents] (below):
+# scripts/share-projects.sh (as you, no sudo; the move runs it). scripts/setup.sh --extras switches it on later.
+# After a change: restart her.
 #[projects]
 #root = "~/dev"                 # the folder that holds the projects (git repositories directly in it)
 #default = "summary"            # every project: summary, docs or code
 #docs = []                      # single projects at level docs, e.g. ["my-project"]
 #code = []                      # single projects at level code
+
+# Documents (extra, off without [documents]; setup does not ask yet): the PDFs in your ~/Estia-KB and the PDFs you send
+# her on Signal (saved there), read on this Mac only (Apple's PDFKit, and Vision for scanned pages); Gemma is not used
+# in the look, the reading or the note. She looks at the folder every look_minutes outside quiet hours, and whenever you
+# ask about documents or type /docs; a new PDF found there gets a short note. Limits: 25 MB and 300 pages a document; 60
+# seconds to read it; one document at a time. Her user may list and read the folder and add files to it, never delete or
+# change yours: scripts/share-documents.sh (as you, no admin rights; --revoke takes it back). Write the folder out in
+# full: in her own user (_estia) a ~ is her home, not yours. The folder is directly in your home: macOS guards
+# Documents, Desktop and Downloads; a folder in your home needs no extra permission. After a change: restart her.
+#[documents]
+#folder = "/Users/<you>/Estia-KB"  # always your ~/Estia-KB, written in full (the share prints it)
+#look_minutes = 60                 # how often she looks at the folder: 5 to 1440 minutes
 
 # Mail, read-only (Microsoft Graph, delegated Mail.Read). Off without [mail]. Work or school (Microsoft 365) mailboxes only.
 # IDs come from the app registration (Microsoft Entra admin center, "Accounts in this organizational directory only"):
@@ -72,7 +87,7 @@ disk_free_min_percent = 10
 #client_id = "00000000-0000-0000-0000-000000000000"
 #reply_days = 7            # "needs a reply" window
 #keep_days = 30            # mail headers kept this long
-#sync_minutes = 5          # how often the headers are synced
+#sync_minutes = 5          # how often the headers are synced; a mailbox not read for 2 rounds gets a line in the digest
 #first_sync_days = 30      # how far back the first sync reads
 #prefilter = true          # newsletters, mailing lists and auto-replies sorted by their headers (no model)
 # Optional: AgentJev, a small local yes/no model you run yourself (github.com/malevrigns/agent-jev, Apache-2.0).
@@ -94,7 +109,8 @@ disk_free_min_percent = 10
 #max_spoken_chars = 1500     # longer answers are cut at a sentence: "The rest is in the text."
 #max_audio_bytes = 10000000  # voice notes up to 10 MB / 3 minutes
 
-# Lights and plugs on the home network (Kasa; Tapo untested), through tools/tapo with python-kasa. Off without [tapo].
+# Lights and plugs on the home network (Kasa; Tapo untested), through tools/tapo with python-kasa, and Philips Hue
+# lights through the Hue Bridge on the home network (untested on a real bridge so far). Off without [tapo].
 # List the devices: scripts/tapo-discover.sh. Older Kasa devices need no login; newer Kasa firmware and Tapo devices
 # need the TP-Link login (Tapo is untested). Save it with scripts/set-tapo-credentials.sh.
 # Names as in the app; fixed addresses through DHCP reservations; rule: normal, ask first or never off.
@@ -106,6 +122,15 @@ disk_free_min_percent = 10
 #host = "192.168.1.20"
 #kind = "light"          # light or plug
 #rule = "normal"
+# A Hue light: pair the bridge first with scripts/hue-pair.sh (its address, key and certificate go in hue.env, never
+# here); the light by the bridge's id for it, which scripts/hue-pair.sh and scripts/tapo-discover.sh list. Hue lights
+# take on, off, brightness and the whites, no colours.
+#[[tapo.devices]]
+#name = "hall light"
+#brand = "hue"           # kasa (when left out) or hue
+#light = "<the bridge's id for it>"
+#kind = "light"
+#rule = "normal"
 
 # Calendars, read-only. Off without [calendar]; an empty [calendar] turns on one Google calendar, read through its secret
 # iCal address (tools/ical; the address: scripts/set-calendar-url.sh, never here).
@@ -116,6 +141,8 @@ disk_free_min_percent = 10
 # (optional). A Google calendar's address: scripts/set-calendar-url.sh <name> (the one named "calendar" is the address
 # saved without a name). With mailbox (a [[mail.accounts]] name, each once): that mailbox's Outlook calendar, read with
 # Calendars.Read only (setup_assistant.md, "Calendar (once)": an administrator grants it, or scripts/mail-login.sh again).
+# With caldav, user and calendar: a CalDAV calendar (iCloud, Fastmail, Nextcloud), read only; calendar is its name as the
+# calendar app shows it; its app-specific password: scripts/set-calendar-password.sh <name>, never here.
 #[[calendar.sources]]
 #name = "calendar"
 #label = "Family"
@@ -125,6 +152,11 @@ disk_free_min_percent = 10
 #[[calendar.sources]]
 #name = "work"
 #mailbox = "work"
+#[[calendar.sources]]
+#name = "home"
+#caldav = "https://caldav.icloud.com"   # Fastmail: https://caldav.fastmail.com/dav/; Nextcloud: https://<host>/remote.php/dav
+#user = "alex@example.com"             # the Apple ID's email address (Fastmail and Nextcloud: the user name)
+#calendar = "Home"
 
 # Voice calls with her over Signal (needs [voice]; setup: setup_assistant.md "Calls (once)", tools/call-tunnel).
 # Off without [calls]; an empty [calls] uses the defaults below. With it the bridge runs the JVM build of signal-cli.
@@ -147,9 +179,11 @@ disk_free_min_percent = 10
 #answer_after_seconds = 5     # let it ring (about twice) before she answers
 #wake_call = true             # "call me" reminders place a Signal call (the text always comes first); false: texts only
 #max_calls_per_day = 3        # call reminders a day (a second try two minutes later belongs to the same one)
-#barge = "loudness"           # what stops her when you talk over her: "loudness" or "speech" (the voice service's
+#interrupt = "only speech"    # what stops her when you talk over her: "only speech" (the default: the voice service's
 #                             # speech detector, on the Mac: road noise rarely stops her; a whisper may not, a radio or
-#                             # a passenger talking does). The other rule is only counted, in the log at each call's end
+#                             # a passenger talking does; any loud sound until it is ready) or "any sound" (any loud
+#                             # sound). The other rule is only counted, in the log at each call's end. The older
+#                             # barge = "speech" or "loudness" still works; doctor shows the new wording
 
 # Reminders you set ("remind me at 17:00 to ...", /remind): on without this section. They come at night too and are never
 # paused: you set them. For anything that matters, keep your phone's own alarm (she runs on one Mac).
@@ -171,7 +205,9 @@ disk_free_min_percent = 10
 #max_per_day = 1              # all kinds together
 #followups_per_week = 2
 #improvise_per_week = 1       # raise it when they go well (/status counts replies and /quiet)
-#quiet_hours = "22:00-08:00"  # none of them then; "" for no quiet hours
+#quiet_hours = "22:00-08:00"  # none of them then, and the Mac's health alerts wait until they end;
+#                             # "" for no quiet hours for her messages (the health alerts and the voice-ready note
+#                             # still wait 22:00-08:00 then)
 #lookback_time = "Sun 19:00"
 #early_check = "20:00"        # the early-start note, when tomorrow starts before digest_time
 

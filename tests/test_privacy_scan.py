@@ -161,8 +161,21 @@ LEAKS = [
     ("secret value", "password: '" + "pw" * 9 + "'", "pwpw"),
     ("secret value", '"refresh_token": "' + "rT5" * 8 + '"', "rT5"),
     ("secret value", 'CLIENT_SECRET="' + "Cs_" * 6 + '"', "Cs_"),
+    ("secret value", "BRAVE_API_KEY=" + "BSAq7" * 5, "BSAq7"),  # the env files' own lines, unquoted
+    ("secret value", "export OLLAMA_API_KEY=" + "0f9e" * 8 + ".x" * 4, "0f9e"),
+    ("secret value", "TAPO_PASSWORD=" + "Hunt" + "er2-made-up", "Hunter2"),
+    ("secret value", "  HUE_KEY = " + "kY7" * 10, "kY7"),
+    ("secret value", "CALDAV_PASSWORD_FAMILY=" + "abcd-efgh-" + "ijkl-mnop", "ijkl"),
+    ("secret value", "# CALENDAR_ICS_URL_SCHOOL=" + "https://calendar.example/feed/" + "Zq" * 9, "ZqZq"),
+    ("secret value", "MY_SERVICE_TOKEN=" + "tk_" + "Lm8" * 6, "Lm8"),
     ("email address", "write to " + PRIVATE_EMAIL, "alex.smith"),
     ("email address", "Bob" + AT + "Work-Mail.nl", "Work-Mail"),
+    ("email address", "ical/" + "alex.smith" + "%40" + "gmail.com/public/basic.ics", "alex.smith"),  # encoded
+    (
+        "calendar address",
+        "https://calendar.google.com/calendar/ical/x/" + "private-" + "9f3b2c71a0d4e58b" * 2 + "/basic.ics",
+        "9f3b2c71",
+    ),
     ("phone number", "call " + "+31" + "612345678", "612345678"),
     ("phone number", "tel:" + "+44" + "7700900123", "7700900123"),
     ("uuid", "aci = " + "0a1b2c3d" + "-4e5f-4a6b-8c7d-" + "9e0f1a2b3c4d", "0a1b2c3d"),
@@ -170,6 +183,9 @@ LEAKS = [
     ("home path", "cd " + "/Users/" + "bob" + "/dev", "/bob"),
     ("home path", "'" + "/Users/" + "alexsmith" + "'", "alexsmith"),
     ("home path", "<string>" + "/Users/" + "bobby" + "</string>", "bobby"),
+    ("private address", "ping " + "192.168" + ".178.23.", "178.23"),
+    ("private address", 'host = "' + "172.20" + '.1.5"', "172.20"),
+    ("private address", "lamp at " + "10.1" + ".2.3", "10.1.2"),
 ]
 
 
@@ -202,6 +218,17 @@ FINE_LINES = [
     "risk-assessment-for-the-whole-long-project-plan",
     'token = os.environ["TOKEN"]; password = "short"; api_key = "{key}"',
     "sha256:5981c011b306781ce561e18e14230a14524a3d8109b97553666c942c18f31a96",
+    "BRAVE_API_KEY=<your key>",
+    "TAPO_PASSWORD=${TAPO_PASSWORD}",
+    "HUE_KEY=…",
+    "# BRAVE_API_KEY=..., OLLAMA_API_KEY=..., GOOGLE_MAPS_API_KEY=...",
+    '    keys.write_text("OLLAMA_API_KEY=secret-value-123")',
+    'LOOKED_KEY = "documents:looked_at"',
+    "CALENDAR_SAVED_AT_FAMILY=1760000000",
+    "https://calendar.google.com/calendar/ical/alex%40example.com/private-0123456789abcdef/basic.ics",
+    "https://calendar.google.com/calendar/ical/x/private-" + "0" * 32 + "/basic.ics",
+    "192.168.1.20 and 10.0.0.4, the docs' home network; 127.0.0.1, 8.8.8.8 and 203.0.113.9 are not private ones",
+    'networks ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"); version 1.10.20.3; 10.0.0.255',
 ]
 
 
@@ -311,6 +338,7 @@ name = "Brass Lamp Nine"
 host = "10.0.0.4"
 kind = "light"
 rule = "ask first"
+brand = "kasa"
 [calls]
 java_home = "/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home"
 [maps]
@@ -336,6 +364,7 @@ def test_setup_values_in_the_owner_config_are_not_private(repo: Repo, tmp_path: 
         "the personal mailbox\n"
         "voice service at http://127.0.0.1:8151, voice bf_emma\n"
         "a light, rule ask first\n"
+        "the kasa brand\n"
         "java in /opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home\n"
     )
     private = (
@@ -565,3 +594,56 @@ def test_a_note_says_when_her_own_user_holds_the_config(repo: Repo, tmp_path: Pa
     result = repo.scan()
     assert result.returncode == 0
     assert "your own config values were not checked" in result.stderr and "--config" in result.stderr
+
+
+# after the move her config is hers (/var/estia, 0700): she gives salted hashes of its private values, never the values
+
+
+def hashed(repo: Repo, config: Path, out: Path) -> Path:
+    result = repo.scan("--hash-values", str(config))
+    assert result.returncode == 0, result.stderr
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(result.stdout, encoding="utf-8")
+    return out
+
+
+def test_hashed_values_find_what_the_config_finds_without_holding_a_value(repo: Repo, tmp_path: Path) -> None:
+    config = tmp_path / "owner.toml"
+    config.write_text(SETUP_AND_PRIVATE_CONFIG, encoding="utf-8")
+    values = hashed(repo, config, tmp_path / "values.json")
+    text = values.read_text(encoding="utf-8")
+    for private in ("306900000017", "zephyrine", "Brass Lamp", "10.0.0.4", "Example Street", "Hallway"):
+        assert private.casefold() not in text.casefold()
+    repo.add(
+        "notes.txt",
+        "the bot is +306900000017\nmail from zephyrine.q" + AT + "corp.example\nturn on Brass Lamp Nine\n"
+        "ping 10.0.0.4.\nhome is 1 Example Street, Exampletown\nplay on Hallway Cube\n"
+        "10.0.0.41 and Brass Lamps are others\nthe Mac mini, Marigold, the personal mailbox\n",
+    )
+    result = repo.scan("--values", str(values))
+    keys = ["bot_number", "mail.accounts.address", "tapo.devices.name", "tapo.devices.host", "maps.home"]
+    keys.append("spotify.default_device")
+    assert findings(result) == [f"notes.txt:{n}: owner config value ({key})" for n, key in enumerate(keys, start=1)]
+
+
+def test_her_hashed_values_are_read_by_default_once_she_holds_the_config(repo: Repo, tmp_path: Path) -> None:
+    """In her own user: ~/.config/local-assistant/privacy-values.json, made as her, is checked by every scan."""
+    config = tmp_path / "her-config.toml"
+    config.write_text('[[tapo.devices]]\nname = "Brass Lamp Nine"\n', encoding="utf-8")
+    hashed(repo, config, repo.home / ".config" / "local-assistant" / "privacy-values.json")
+    (tmp_path / "root" / "var" / "estia").mkdir(parents=True)
+    repo.env["ESTIA_ROOT"] = str(tmp_path / "root")
+    repo.add("notes.txt", "turn on Brass Lamp Nine\n")
+    result = repo.scan()
+    assert findings(result) == ["notes.txt:1: owner config value (tapo.devices.name)"]
+    assert "not checked" not in result.stderr
+
+
+def test_the_note_says_how_she_gives_the_hashed_values(repo: Repo, tmp_path: Path) -> None:
+    (tmp_path / "root" / "var" / "estia").mkdir(parents=True)
+    repo.env["ESTIA_ROOT"] = str(tmp_path / "root")
+    repo.add("notes.txt", "fine\n")
+    note = repo.scan().stderr
+    assert "--hash-values" in note and "privacy-values.json" in note and "/usr/bin/sudo -u _estia" in note
+    # private from the start: the salt sits beside the hashes, and short values (numbers) fall to brute force
+    assert "umask 077 && mkdir -p ~/.config/local-assistant && " in note  # review 15 Oct, 9

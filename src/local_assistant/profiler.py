@@ -41,6 +41,10 @@ class LearnError(Exception):
     """Gemma's learning answer could not be used."""
 
 
+class CutOffError(LearnError):
+    """Gemma's learning answer was cut off at its token limit: asked again in halves (Profiler._learn_halves)."""
+
+
 class IdleHook(Protocol):
     """More idle work after learning, in the same pass (followups.FollowUps: plans the user stated)."""
 
@@ -171,19 +175,52 @@ class Profiler:
                 self._advance(messages[:1])
             return 0
         batch = self._batch(messages, self._batch_chars >> failures)  # half the size after each failure
+        skipped: list[int] = []  # the messages skipped in this pass, logged by count even when the pass then fails
         try:
-            return await self._learn_batch(batch)
-        except LearnError:
-            self._store.set_state(FAILURES_KEY, f"{after}:{failures + 1}")
+            return await self._learn_halves(batch, skipped)
+        except LearnError:  # a cut-off answer never comes here: the halves take it
+            pointer = self._store.get_state(LAST_LEARNED_KEY) or "0"  # a half done before the failure moved it
+            count = failures + 1 if pointer == str(after) else 1
+            self._store.set_state(FAILURES_KEY, f"{pointer}:{count}")
             raise
+        finally:
+            if skipped:
+                log.warning(
+                    "learning: %d messages skipped: the answer for each alone was cut off at the token limit",
+                    len(skipped),
+                )
 
-    async def _learn_batch(self, batch: list[Message]) -> int:
+    async def _learn_halves(self, batch: list[Message], skipped: list[int], effort: str = "high") -> int:
+        """Learn from `batch`. An answer cut off at its token limit while thinking (`effort` "high") is asked again
+        once, whole, without thinking: the cut-off may be thinking that runs on (setup_local_model.md), which halving
+        does not help. Cut off without thinking too, the answer itself is too long: it is asked again in two halves,
+        without thinking, down to one message (as the follow-ups' extraction does). One message whose answer is still
+        cut off alone without thinking is skipped (its id goes in `skipped`): the pointer moves past it, so no pass asks
+        for it again. Each half moves the pointer once it is done, so a Gemma error later keeps only the rest for the
+        next pass. At most 2n Gemma calls for n messages. Returns the profile changes."""
+        try:
+            return await self._learn_batch(batch, effort)
+        except CutOffError:
+            if effort != "none":
+                log.warning("learning: the answer was cut off while thinking; asking again without thinking")
+                return await self._learn_halves(batch, skipped, "none")
+            if len(batch) == 1:
+                with self._store.tx():
+                    self._advance(batch)
+                skipped.append(batch[0].id)
+                return 0
+        half = len(batch) // 2
+        log.warning("learning: the answer was cut off; asking again for %d and %d messages", half, len(batch) - half)
+        first = await self._learn_halves(batch[:half], skipped, "none")
+        return first + await self._learn_halves(batch[half:], skipped, "none")
+
+    async def _learn_batch(self, batch: list[Message], effort: str = "high") -> int:
         valid_ids = {message.id for message in batch}
         conversation: list[dict[str, Any]] = [
             {"role": "system", "content": prompts.PROFILER_RULES},
             {"role": "user", "content": self._learn_prompt(batch)},
         ]
-        operations = await self._ask_ops(conversation, valid_ids, effort="high")
+        operations = await self._ask_ops(conversation, valid_ids, effort=effort)
         with self._store.tx():
             result = self._profile.apply(operations, source_kind="chat")
             if not result.over_cap_by:
@@ -195,7 +232,7 @@ class Profiler:
                     "content": prompts.OVER_CAP.format(limit=self._profile.max_chars, over=result.over_cap_by),
                 }
             )
-            operations = await self._ask_ops(conversation, valid_ids, effort="high")
+            operations = await self._ask_ops(conversation, valid_ids, effort=effort)
             with self._store.tx():
                 result = self._profile.apply(operations, source_kind="chat")
                 self._advance(batch, _count(result))
@@ -350,7 +387,7 @@ class Profiler:
             json_schema=prompts.OPS_SCHEMA,
         )
         if completion.finish_reason == "length":
-            raise LearnError("the learning answer was cut off at the token limit")
+            raise CutOffError("the learning answer was cut off at the token limit")
         try:
             data = json.loads(completion.content)
         except json.JSONDecodeError as exc:

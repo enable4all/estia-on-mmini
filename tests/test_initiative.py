@@ -397,6 +397,35 @@ def test_more_asks_for_a_code_are_refused(words: str) -> None:
     assert check_text(words, limit=200) == "secret"
 
 
+@pytest.mark.parametrize(
+    "words",
+    [
+        "Go to **paypal-login**.com/verify",
+        "Visit *evil*.com today",
+        "Visit `evil`.com",
+        "Visit evil.**com** today",
+        "Mail bob@**evil**.com?",
+    ],
+)
+def test_a_link_split_by_markup_is_a_link(words: str) -> None:
+    """The phone shows the text without its markers (signal_text): a link split by them is read joined."""
+    assert check_text(words, limit=200) == "link"
+
+
+@pytest.mark.parametrize(
+    "words",
+    [
+        "**Reminder set** (#5): Tue 13 Oct 07:00.",
+        "I **will call you** at 07:00.",
+        "I've **set a reminder** for 07:00.",
+        "Your reminder is **set**",
+        "I **booked** the table for you.",
+    ],
+)
+def test_a_claim_in_markup_is_a_claim(words: str) -> None:
+    assert check_text(words, limit=200) == "claim"
+
+
 def test_the_users_own_mail_or_calendar_words_may_come_back() -> None:
     assert check_text("Did you email Sam in the end?", limit=200, allowed={"email", "sam"}) == ""
     assert check_text("Did you email Sam in the end?", limit=200) == "source"

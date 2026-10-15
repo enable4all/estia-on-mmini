@@ -4,12 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from local_assistant.mail_digest import EMPTY, MailDigest, MailNumbers
+from local_assistant.mail_digest import MailDigest, MailNumbers
 from local_assistant.morning_digest import DIGEST_DAY_KEY, MorningDigest
+from local_assistant.signal_text import plain
 from local_assistant.store import Store
 from tests.conftest import TZ
 from tests.test_calendar_tools import Home
-from tests.test_mail_digest import DIGEST_TIME, Clock, add, config
+from tests.test_mail_digest import DIGEST_TIME, Clock, add, config, stale_work
 
 
 class Sent(list[str]):
@@ -47,7 +48,7 @@ async def test_the_digest_is_sent_once_a_day_at_its_time(tmp_path: Path, store: 
     clock.now = DIGEST_TIME
     await digest.tick()
     await digest.tick()
-    assert sent == ["Mail: nothing needs you today."]
+    assert sent == ["**Mail**: nothing needs you today."]
     clock.now += 2 * 86_400  # Saturday too
     await digest.tick()
     assert len(sent) == 2
@@ -81,7 +82,7 @@ async def test_actions_come_once_since_the_previous_digest(tmp_path: Path, store
     assert "Pay the invoice." in sent[0]
     clock.now += 86_400
     await digest.tick()
-    assert sent[1] == "Mail: nothing needs you today."
+    assert sent[1] == "**Mail**: nothing needs you today."
 
 
 async def test_an_action_sorted_after_the_digest_comes_the_next_day(tmp_path: Path, store: Store) -> None:
@@ -89,7 +90,7 @@ async def test_an_action_sorted_after_the_digest_comes_the_next_day(tmp_path: Pa
     digest, sent = mail_only(tmp_path, store, clock)
     late = add(store, "g1", None, "", "2026-10-08T07:10:00+00:00", subject="Appointment")  # 09:10, not sorted yet
     await digest.tick()
-    assert sent == [EMPTY]
+    assert sent == ["**Mail**: nothing needs you today."]  # EMPTY, its name in bold in the digest
     store.set_mail_label(late, "action", "Confirm the dentist appointment.")
     store._conn.execute("UPDATE mail_messages SET labelled_at = '2026-10-08T07:30:00+00:00' WHERE id = ?", (late,))
     clock.now += 86_400
@@ -104,21 +105,40 @@ async def test_a_digest_that_failed_is_tried_again(
     digest, sent = mail_only(tmp_path, store, clock)
     mail = digest._mail
     assert mail is not None
-    compose = mail.compose
+    part = mail.digest_part
     tries: list[int] = []
 
-    def flaky(header: str | None = None) -> str:
+    def flaky() -> str:
         tries.append(1)
         if len(tries) == 1:
             raise sqlite3.OperationalError("database is locked")
-        return compose(header)
+        return part()
 
-    monkeypatch.setattr(mail, "compose", flaky)
+    monkeypatch.setattr(mail, "digest_part", flaky)
     with pytest.raises(sqlite3.OperationalError):
         await digest.tick()
     clock.now += 60
     await digest.tick()  # a minute later: still today's digest
-    assert sent == [EMPTY]
+    assert sent == ["**Mail**: nothing needs you today."]  # EMPTY, its name in bold in the digest
+
+
+async def test_a_mail_only_digest_has_its_date_and_a_block_per_mailbox(tmp_path: Path, store: Store) -> None:
+    clock = Clock(DIGEST_TIME)
+    digest, sent = mail_only(tmp_path, store, clock)
+    add(store, "g1", "reply", "Asks about November shipping.", "2026-10-06T07:00:00+00:00", account="work")
+    add(store, "g2", "urgent_reply", "Contract needs a signature today.", "2026-10-08T06:00:00+00:00")
+    await digest.tick()
+    assert sent == [
+        "**Thu 8 Oct**\n"
+        "\n"
+        "**Mail (family)**\n"
+        "Needs a reply:\n"
+        "1. Anna Smith: Contract needs a signature today. (today)\n"
+        "\n"
+        "**Mail (work)**\n"
+        "Needs a reply:\n"
+        "2. Anna Smith: Asks about November shipping. (2 d)"
+    ]
 
 
 async def test_the_digest_waits_for_the_first_mail_sync_after_a_start(tmp_path: Path, store: Store) -> None:
@@ -140,14 +160,19 @@ async def test_the_calendar_comes_first_then_the_mail(tmp_path: Path, store: Sto
     add(store, "g1", "reply", "Anna asks to move Friday's meeting.", "2026-10-09T06:00:00+00:00")
     await morning.tick()
     assert sent == [
-        "Fri 9 Oct\n"
-        "Calendar today:\n"
-        "- 09:30–10:00 Dentist (Prinsengracht 12)\n"
-        "Tomorrow: all day: Trip to Lisbon\n"
-        "Mail:\n"
+        "**Fri 9 Oct**\n"
+        "\n"
+        "**Today**\n"
+        "• 09:30–10:00 Dentist (Prinsengracht 12)\n"
+        "\n"
+        "**Tomorrow**\n"
+        "• All day: Trip to Lisbon\n"
+        "\n"
+        "**Mail (family)**\n"
         "Needs a reply:\n"
-        "1. [family] Anna Smith: Anna asks to move Friday's meeting. (today)"
+        "1. Anna Smith: Anna asks to move Friday's meeting. (today)"
     ]
+    assert plain(sent[0]).startswith("Fri 9 Oct\n\nToday\n• 09:30–10:00 Dentist")  # as the phone shows it
     assert morning._mail is not None
     assert morning._mail.compose().startswith("Mail, Fri 9 Oct:\nNeeds a reply:")  # the mail_digest tool: mail only
 
@@ -155,14 +180,14 @@ async def test_the_calendar_comes_first_then_the_mail(tmp_path: Path, store: Sto
 async def test_a_calendar_only_digest_does_not_wait_for_mail(tmp_path: Path, store: Store) -> None:
     morning, sent, _ = with_calendar(tmp_path, store, mail=False)
     await morning.tick()
-    assert sent == ["Fri 9 Oct\nCalendar today: nothing\nTomorrow: nothing"]
+    assert sent == ["**Fri 9 Oct**\n\n**Today**: nothing\n\n**Tomorrow**: nothing"]
 
 
 async def test_google_down_or_slow_never_holds_the_mail_back(tmp_path: Path, store: Store) -> None:
     morning, sent, home = with_calendar(tmp_path, store, seconds=0.05)
     home.fail("unreachable")
     await morning.tick()
-    assert sent == ["Fri 9 Oct\nCalendar: not available right now\nMail: nothing needs you today."]
+    assert sent == ["**Fri 9 Oct**\n\n**Calendar**: not available right now\n\n**Mail**: nothing needs you today."]
 
     async def hangs() -> str:
         await asyncio.sleep(3600)
@@ -184,4 +209,17 @@ async def test_a_broken_calendar_block_is_not_available(
 
     monkeypatch.setattr(home.tools, "digest_block", broken)
     await morning.tick()
-    assert sent == ["Fri 9 Oct\nCalendar: not available right now"]
+    assert sent == ["**Fri 9 Oct**\n\n**Calendar**: not available right now"]
+
+
+async def test_a_stale_mailbox_line_follows_the_mail_and_the_date_heading_comes_back(
+    tmp_path: Path, store: Store
+) -> None:
+    clock = Clock(DIGEST_TIME)
+    sent = Sent()
+    mail = MailDigest(store, config(tmp_path), MailNumbers(store, TZ, clock), clock=clock, status=stale_work(clock))
+    digest = MorningDigest(store, config(tmp_path), mail=mail, calendar=None, send=sent, clock=clock)
+    await digest.tick()
+    assert sent == [
+        "**Thu 8 Oct**\n\n**Mail**: nothing needs you today.\n\n[work] not read since Mon 09:10: needs sign-in."
+    ]

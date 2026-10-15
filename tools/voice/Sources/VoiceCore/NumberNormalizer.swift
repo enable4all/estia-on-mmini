@@ -15,17 +15,17 @@ public enum NumberNormalizer {
         // then bare decimals, then any remaining standalone integers.
         s = replace(s, #"\$([0-9][0-9,]*)(?:\.([0-9]{2}))?"#) { g in
             let dollars = intOf(g[1])
-            let cents = g.count > 2 ? intOf(g[2]) : 0
-            var out = cardinal(dollars) + " dollar" + (dollars == 1 ? "" : "s")
+            let cents = g.count > 2 ? intOf(g[2]) ?? 0 : 0
+            var out = spoken(g[1]) + " dollar" + (dollars == 1 ? "" : "s")
             if cents > 0 { out += " and " + cardinal(cents) + " cent" + (cents == 1 ? "" : "s") }
             return out
         }
-        s = replace(s, #"([0-9][0-9,]*)%"#) { g in cardinal(intOf(g[1])) + " percent" }
+        s = replace(s, #"([0-9][0-9,]*)%"#) { g in spoken(g[1]) + " percent" }
         s = replace(s, #"([0-9]+)\.([0-9]+)"#) { g in
             let frac = g[2].compactMap { Int(String($0)) }.map { ones[$0] }.joined(separator: " ")
-            return cardinal(intOf(g[1])) + " point " + frac
+            return spoken(g[1]) + " point " + frac
         }
-        s = replace(s, #"[0-9][0-9,]*"#) { g in cardinal(intOf(g[0])) }
+        s = replace(s, #"[0-9][0-9,]*"#) { g in spoken(g[0]) }
         return s
     }
 
@@ -47,8 +47,13 @@ public enum NumberNormalizer {
         return String(n)  // beyond range: leave as digits
     }
 
-    private static func intOf(_ s: String) -> Int {
-        Int(s.replacingOccurrences(of: ",", with: "")) ?? 0
+    /// A digit run in words, or as written when it is too large for Int (19 digits or more): never "zero".
+    private static func spoken(_ s: String) -> String {
+        intOf(s).map(cardinal) ?? s
+    }
+
+    private static func intOf(_ s: String) -> Int? {
+        Int(s.replacingOccurrences(of: ",", with: ""))
     }
 
     /// Regex replace where the replacement is computed from the match's capture groups

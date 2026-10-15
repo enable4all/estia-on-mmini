@@ -1,18 +1,21 @@
 """scripts/harden.sh: the Mac's security around her, one setting at a time.
 
 Each setting is shown with its state and one line on why it matters. What can be applied is applied only on a yes, and
-sudo is asked once, before the first change (sudo's own cached sign-in; fixed argv, never a shell). The default step:
+sudo is asked once, before the first change (sudo's own cached sign-in; fixed argv, never a shell). The hardened level:
 SSH goes to keys only only when Remote Login is on and your authorized_keys holds a key: a drop-in file, checked with
-`sshd -t` and taken back if sshd refuses it; this session stays open. A passwordless sudo rule is offered for removal
-only while sudo also works with your password. Her files are made private. What only you can change (FileVault,
+`sshd -t` and taken back if sshd refuses it; this session stays open. Passwordless sudo is read from what sudo lists
+for you (/etc/sudoers and /etc/sudoers.d alike; with your password also the Defaults that share one sign-in with every
+program of yours); a file in /etc/sudoers.d holding only such rules is offered for removal only while sudo also works
+with your password, anything else is shown with its visudo fix. Her files are made private. What only you can change (FileVault,
 automatic login, the screen lock, security responses, other admins, Tailscale) is shown with its fix, never applied.
 The Registration Lock for her number is set in a short maintenance window: she is stopped, the PIN goes to signal-cli
 over JSON-RPC on stdin (never argv, never printed), and she is started again. The phone checklist comes last.
 
-`--nuclear` adds the firewall (each program that listens for other machines now is named, and may keep answering),
-stealth mode (its own question), python3 and ruby off the firewall's list, and the keychain lock, after saying first
-that they may stop other services on this Mac. Without it they are one neutral line. Nothing here turns any of them
-off again: what a Mac already has stays.
+`--nuclear`, the nuclear level, adds the firewall (each program that listens for other machines now is named, and may
+keep answering), stealth mode (its own question), python3 and ruby off the firewall's list, and the keychain lock, after
+saying first that they may stop other services on this Mac. Without it they are one neutral line. Nothing here turns
+any of them off again: what a Mac already has stays. The run says its level first and ends with where doctor names the
+level the Mac reached (hostsec.security_level).
 
 `--set-pin` and `--her-checks` are the helpers that run as her own user (_estia) when she has one: the PIN on stdin.
 """
@@ -55,13 +58,18 @@ QUESTIONS = {
 }
 NUCLEAR_KEYS = ("firewall", "stealth", "firewall_apps", "keychain")  # only with --nuclear
 NUCLEAR_WARNING = (
-    "--nuclear, the nuclear option: the strictest settings. They may stop other services on this Mac:",
+    "--nuclear, the nuclear option: the strictest settings, the nuclear level. They may stop other services on this "
+    "Mac:",
     "  • Programs that other machines reach (a file share, a media server, a page you open from your laptop) stop "
     "answering them unless you allow each one; the ones listening now are asked about.",
     "  • With stealth mode, the Mac no longer answers ping.",
     "  • With the keychain lock, macOS asks for your password more often (keychain prompts).",
     "Each one is asked first and changed only on your yes. Nothing here turns a setting off again.",
 )
+# the run's level, said first, and where the level reached is named (owner, 14 Oct: by name, never "default")
+LEVEL_HARDENED = f"Security level: {hostsec.HARDENED} (the security step; {hostsec.NUCLEAR_LEVEL} is the other level)."
+LEVEL_NUCLEAR = f"Security level: {hostsec.NUCLEAR_LEVEL} ({hostsec.HARDENED}, plus the settings above)."
+LEVEL_REACHED = "Doctor names the level reached: {doctor}"
 LOCK_NOTE = (
     "Registration Lock: a PIN Signal asks for before her number can be registered on another device. Store it in your "
     "password manager: without it and her data, the number is locked for 7 days."
@@ -267,8 +275,10 @@ class Harden:
         checkout: Path = REPO,
         sleep: Callable[[float], None] = time.sleep,
         nuclear: bool = False,
+        new_pin: bool = False,
     ) -> None:
         self.host = host
+        self.new_pin = new_pin  # a new Registration Lock PIN also while the lock is on (after a compromise)
         self.owner = owner
         self.owner_home = owner_home
         self.own_user = own_user
@@ -397,6 +407,19 @@ class Harden:
     # ---------------------------------------------------------------- sudoers
 
     def sudoers(self, check: Check) -> None:
+        """Passwordless sudo. With your password at hand (sudo asked), every rule and Default that applies to you is
+        read again (sudo -n -l: the sign-in settings too, which the first look cannot read). A file in /etc/sudoers.d
+        that holds only rules without the password is offered for removal while a rule with your password remains;
+        anything else (a rule in /etc/sudoers, a Default) keeps its visudo fix: never edited here."""
+        rules = ""
+        if self.sudo_ready:
+            code, rules = self.host.run([SUDO, "-n", "-l"], read_only=True)
+            full = hostsec.sudo_listing(rules) if code == 0 else check
+            if (full.status, full.text) != (check.status, check.text):
+                self.show(full)
+            check = full
+        if check.status == "ok":
+            return
         folder = self.host.path("/etc/sudoers.d")
         try:
             names = sorted(p.name for p in folder.iterdir() if p.is_file())
@@ -411,7 +434,8 @@ class Harden:
         check = hostsec.sudoers(self.host, contents=contents)
         if not check.apply:
             return
-        _, rules = self.host.run([SUDO, "-n", "-l"], read_only=True)
+        if not rules:
+            _, rules = self.host.run([SUDO, "-n", "-l"], read_only=True)
         with_password = any(
             line.strip().startswith("(") and line.strip().endswith(") ALL") and "NOPASSWD" not in line
             for line in rules.splitlines()
@@ -508,6 +532,7 @@ class Harden:
             for line in NUCLEAR_WARNING:
                 self.say(line)
             self.say("")
+        self.say(LEVEL_NUCLEAR if self.nuclear else LEVEL_HARDENED)
         self.say(
             "The Mac's security around her: each setting, why it matters, and on your yes the fix. "
             "sudo is asked once, before the first change."
@@ -525,7 +550,7 @@ class Harden:
         visible = [
             *strict,
             hostsec.ssh_password(self.host, key_home=self.owner_home),
-            hostsec.sudoers(self.host),
+            hostsec.owner_sudo(self.host),  # what sudo lists for you: /etc/sudoers and /etc/sudoers.d alike
         ]
         if not self.own_user:
             visible += [hostsec.data_modes(self.owner_home), hostsec.registration_lock_check(self.owner_home)]
@@ -540,7 +565,9 @@ class Harden:
         for check in [*visible, *shown_only]:
             self.show(check)
         if not self.nuclear:  # never a "!" or a "✗": one neutral line
-            self.show(Check("nuclear", "info", "Nuclear option", hostsec.NUCLEAR_LINE))
+            self.show(
+                Check("nuclear", "info", "Nuclear level", hostsec.NUCLEAR_LINE.removeprefix("the nuclear level: "))
+            )
         listening = hostsec.listeners(self.host) if self.nuclear else []
         accepted = [
             check
@@ -559,7 +586,7 @@ class Harden:
             if check.key == "firewall":
                 self.keep_listening(listening)
         sudoers = next(check for check in visible if check.key == "sudoers")
-        if sudoers.status != "ok" and (self.sudo_ready or sudoers.apply):
+        if sudoers.status != "ok" or self.sudo_ready:
             self.sudoers(sudoers)
         her = [check for check in visible if check.key in ("data_modes", "registration_lock")]
         if self.own_user and self.sudo_ready:
@@ -574,10 +601,11 @@ class Harden:
             if private and self.offer(QUESTIONS["data_modes"], check.apply) and (self.root_free(check) or self.sudo()):
                 self.apply(check)
             no_account = check.text.startswith(hostsec.NO_ACCOUNT)
-            if check.key == "registration_lock" and check.status != "ok" and not no_account:
+            if check.key == "registration_lock" and (check.status != "ok" or self.new_pin) and not no_account:
                 wants_lock = True
         if wants_lock or (self.dry_run and self.own_user):
             self.registration_lock()
+        self.say(LEVEL_REACHED.format(doctor=ownuser.ESTIA + " doctor" if self.own_user else "scripts/doctor.sh"))
         self.say("")
         for line in PHONE_CHECKLIST:
             self.say(line)
@@ -608,6 +636,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="also the firewall, stealth mode, python3 and ruby off the firewall's list and the keychain lock "
         "(may stop other services on this Mac)",
+    )
+    parser.add_argument(
+        "--new-pin",
+        action="store_true",
+        help="offer a new Registration Lock PIN also while the lock is on (after a compromise: the old one may be known)",
     )
     parser.add_argument("--set-pin", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--her-checks", action="store_true", help=argparse.SUPPRESS)
@@ -641,6 +674,7 @@ def main(argv: list[str] | None = None) -> int:
         hidden=hidden,
         say=lambda text: print(text, flush=True),
         nuclear=args.nuclear,
+        new_pin=args.new_pin,
     )
     return step.run()
 

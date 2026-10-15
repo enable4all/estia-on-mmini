@@ -30,9 +30,10 @@ FollowUpStatus = Literal["open", "sent", "done", "cancelled", "expired"]
 InitiativeKind = Literal["followup", "calendar", "early_start", "lookback", "improvise", "announce"]
 InitiativeOutcome = Literal["sending", "sent", "unknown", "skipped", "failed"]
 ConversationKind = Literal["chat", "practice"]
+DocSource = Literal["folder", "signal"]  # found in the documents folder, or saved there from a Signal message
 COUNTED: tuple[InitiativeOutcome, ...] = ("sending", "sent", "unknown")  # what counts toward the caps
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 SCHEMA_V1 = """
 CREATE TABLE conversations (
@@ -317,6 +318,51 @@ CREATE TABLE known_devices (
 ALTER TABLE messages ADD COLUMN source_device INTEGER;
 """
 
+# v10: documents ([documents]): the PDFs of the documents folder, keyed by their path in it, size and change time
+# (an unchanged file is never read twice), with why one could not be read and the pages skipped; each page's text in a
+# full-text index. AUTOINCREMENT: a number /docs shows is never reused. An attachment keeps the name it was sent with
+# (a PDF the user sends is saved under it).
+MIGRATION_V10 = """
+CREATE TABLE doc_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    path TEXT NOT NULL UNIQUE,
+    size INTEGER NOT NULL,
+    mtime_ns INTEGER NOT NULL,
+    pages INTEGER NOT NULL DEFAULT 0,
+    skipped TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL CHECK (source IN ('folder', 'signal')),
+    announced INTEGER NOT NULL DEFAULT 0,
+    found_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE doc_pages (
+    id INTEGER PRIMARY KEY,
+    file_id INTEGER NOT NULL REFERENCES doc_files (id) ON DELETE CASCADE,
+    page INTEGER NOT NULL,
+    ocr INTEGER NOT NULL DEFAULT 0,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (file_id, page)
+);
+CREATE VIRTUAL TABLE doc_pages_fts USING fts5 (
+    text, content = 'doc_pages', content_rowid = 'id', tokenize = 'unicode61 remove_diacritics 2'
+);
+CREATE TRIGGER doc_pages_fts_insert AFTER INSERT ON doc_pages BEGIN
+    INSERT INTO doc_pages_fts (rowid, text) VALUES (new.id, new.text);
+END;
+CREATE TRIGGER doc_pages_fts_delete AFTER DELETE ON doc_pages BEGIN
+    INSERT INTO doc_pages_fts (doc_pages_fts, rowid, text) VALUES ('delete', old.id, old.text);
+END;
+CREATE TRIGGER doc_pages_fts_update AFTER UPDATE OF text ON doc_pages BEGIN
+    INSERT INTO doc_pages_fts (doc_pages_fts, rowid, text) VALUES ('delete', old.id, old.text);
+    INSERT INTO doc_pages_fts (rowid, text) VALUES (new.id, new.text);
+END;
+ALTER TABLE attachments ADD COLUMN filename TEXT NOT NULL DEFAULT '';
+"""
+
 MIGRATION_V4 = """
 CREATE TABLE mail_messages (
     id INTEGER PRIMARY KEY,
@@ -423,8 +469,17 @@ class Pruned:
     tool_calls: int
 
 
-# tool calls whose results are outside text (mail, calendar, web, maps, pages, project files, the history)
-OUTSIDE_TOOLS = ("read_link", "learn_link", "search_history", "web_search", "places_search", "route")
+# tool calls whose results are outside text (mail, calendar, web, maps, pages, project files, documents, the history)
+OUTSIDE_TOOLS = (
+    "read_link",
+    "learn_link",
+    "search_history",
+    "web_search",
+    "places_search",
+    "route",
+    "search_documents",
+    "read_document",
+)
 OUTSIDE_TOOL_PREFIXES = ("mail_", "calendar_", "project_")
 
 
@@ -466,6 +521,43 @@ class Attachment:
     signal_id: str
     content_type: str
     size: int
+    filename: str = ""  # the name it was sent with ("" when Signal named none)
+
+
+@dataclass(frozen=True)
+class DocPage:
+    """One page of a document, as the documents helper read it (`ocr`: Vision read a page without text)."""
+
+    n: int
+    text: str
+    ocr: bool
+
+
+@dataclass(frozen=True)
+class DocFile:
+    """A PDF of the documents folder in her index: its path in the folder, size and change time (the key), the pages
+    read, the pages skipped with why, and why it could not be read at all ("" when it was)."""
+
+    id: int
+    path: str
+    size: int
+    mtime_ns: int
+    pages: int
+    skipped: tuple[tuple[int, str], ...]
+    error: str
+    source: DocSource
+    announced: bool
+    found_at: str
+
+
+@dataclass(frozen=True)
+class DocHit:
+    """A passage the documents search found: the document, the page and the words around the match."""
+
+    file_id: int
+    path: str
+    page: int
+    passage: str
 
 
 @dataclass(frozen=True)
@@ -693,6 +785,32 @@ def _document(row: sqlite3.Row) -> Document:
     )
 
 
+def _doc_file(row: sqlite3.Row) -> DocFile:
+    skipped: list[tuple[int, str]] = []
+    for item in str(row["skipped"]).split(","):
+        number, _, why = item.partition(":")
+        if number.isdecimal() and why:
+            skipped.append((int(number), why))
+    return DocFile(
+        id=row["id"],
+        path=row["path"],
+        size=row["size"],
+        mtime_ns=row["mtime_ns"],
+        pages=row["pages"],
+        skipped=tuple(skipped),
+        error=row["error"],
+        source=row["source"],
+        announced=bool(row["announced"]),
+        found_at=row["found_at"],
+    )
+
+
+def _fts_terms(query: str) -> str:
+    """Any of the query's words (two letters or more), each quoted: never FTS5's own syntax from the caller."""
+    terms = [term for term in re.findall(r"\w+", query.casefold()) if len(term) > 1]
+    return " OR ".join(f'"{term}"' for term in terms)
+
+
 def _fact(row: sqlite3.Row) -> Fact:
     return Fact(
         id=row["id"],
@@ -772,6 +890,8 @@ class Store:
             self._conn.executescript(f"BEGIN;\n{MIGRATION_V8}\nPRAGMA user_version = 8;\nCOMMIT;")
         if version < 9:
             self._conn.executescript(f"BEGIN;\n{MIGRATION_V9}\nPRAGMA user_version = 9;\nCOMMIT;")
+        if version < 10:
+            self._conn.executescript(f"BEGIN;\n{MIGRATION_V10}\nPRAGMA user_version = 10;\nCOMMIT;")
 
     def close(self) -> None:
         self._conn.close()
@@ -1268,13 +1388,15 @@ class Store:
 
     # attachments
 
-    def add_attachment(self, message_id: int, signal_id: str, content_type: str, size: int) -> int:
+    def add_attachment(
+        self, message_id: int, signal_id: str, content_type: str, size: int, *, filename: str = ""
+    ) -> int:
         now = utc_now()
         with self.tx():
             cursor = self._conn.execute(
-                "INSERT INTO attachments (message_id, signal_id, content_type, size, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                (message_id, signal_id, content_type, size, now, now),
+                "INSERT INTO attachments (message_id, signal_id, content_type, size, filename, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (message_id, signal_id, content_type, size, filename, now, now),
             )
         return _rowid(cursor)
 
@@ -1290,9 +1412,130 @@ class Store:
                 signal_id=row["signal_id"],
                 content_type=row["content_type"],
                 size=row["size"],
+                filename=row["filename"],
             )
             for row in rows
         ]
+
+    # documents (the folder's PDFs and their pages; [documents])
+
+    def put_doc_file(
+        self,
+        path: str,
+        size: int,
+        mtime_ns: int,
+        pages: list[DocPage],
+        *,
+        page_count: int,
+        skipped: tuple[tuple[int, str], ...] = (),
+        error: str = "",
+        source: DocSource = "folder",
+        announced: bool = False,
+        found_at: str | None = None,
+    ) -> int:
+        """A file read (or not readable: `error`) and its pages, in one transaction; a file already indexed at this
+        path keeps its number, source, when it was found and whether it was announced, and gets its new text."""
+        now = utc_now()
+        skipped_text = ",".join(f"{number}:{why}" for number, why in skipped)
+        with self.tx():
+            row = self._conn.execute("SELECT id FROM doc_files WHERE path = ?", (path,)).fetchone()
+            if row is None:
+                cursor = self._conn.execute(
+                    "INSERT INTO doc_files (path, size, mtime_ns, pages, skipped, error, source, announced, found_at,"
+                    " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        path,
+                        size,
+                        mtime_ns,
+                        page_count,
+                        skipped_text,
+                        error,
+                        source,
+                        int(announced),
+                        found_at or now,
+                        now,
+                        now,
+                    ),
+                )
+                file_id = _rowid(cursor)
+            else:
+                file_id = int(row["id"])
+                self._conn.execute("DELETE FROM doc_pages WHERE file_id = ?", (file_id,))
+                self._conn.execute(
+                    "UPDATE doc_files SET size = ?, mtime_ns = ?, pages = ?, skipped = ?, error = ?, updated_at = ?"
+                    " WHERE id = ?",
+                    (size, mtime_ns, page_count, skipped_text, error, now, file_id),
+                )
+            self._conn.executemany(
+                "INSERT INTO doc_pages (file_id, page, ocr, text, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                [(file_id, page.n, int(page.ocr), page.text, now, now) for page in pages],
+            )
+            if row is not None:
+                self._conn.execute("INSERT INTO doc_pages_fts (doc_pages_fts) VALUES ('optimize')")
+        return file_id
+
+    def doc_files(self) -> list[DocFile]:
+        """Every file in the index, newest first (when she first found or saved it)."""
+        rows = self._conn.execute("SELECT * FROM doc_files ORDER BY found_at DESC, id DESC").fetchall()
+        return [_doc_file(row) for row in rows]
+
+    def doc_file(self, file_id: int) -> DocFile | None:
+        row = self._conn.execute("SELECT * FROM doc_files WHERE id = ?", (file_id,)).fetchone()
+        return _doc_file(row) if row is not None else None
+
+    def doc_file_by_path(self, path: str) -> DocFile | None:
+        row = self._conn.execute("SELECT * FROM doc_files WHERE path = ?", (path,)).fetchone()
+        return _doc_file(row) if row is not None else None
+
+    def doc_page(self, file_id: int, page: int) -> DocPage | None:
+        row = self._conn.execute(
+            "SELECT page, text, ocr FROM doc_pages WHERE file_id = ? AND page = ?", (file_id, page)
+        ).fetchone()
+        return DocPage(row["page"], row["text"], bool(row["ocr"])) if row is not None else None
+
+    def remove_doc_files(self, file_ids: list[int]) -> None:
+        """Files gone from the folder: their rows and pages, then the index merged so no word of theirs stays."""
+        if not file_ids:
+            return
+        with self.tx():
+            for file_id in file_ids:
+                self._conn.execute("DELETE FROM doc_pages WHERE file_id = ?", (file_id,))
+                self._conn.execute("DELETE FROM doc_files WHERE id = ?", (file_id,))
+            self._conn.execute("INSERT INTO doc_pages_fts (doc_pages_fts) VALUES ('optimize')")
+
+    def clear_documents(self) -> int:
+        """A fresh index (the share was revoked, or a new share began): every file and page goes; how many files."""
+        with self.tx():
+            count = int(self._conn.execute("SELECT count(*) FROM doc_files").fetchone()[0])
+            self._conn.execute("DELETE FROM doc_pages")
+            self._conn.execute("DELETE FROM doc_files")
+            self._conn.execute("INSERT INTO doc_pages_fts (doc_pages_fts) VALUES ('optimize')")
+        return count
+
+    def search_doc_pages(self, query: str, limit: int = 6) -> list[DocHit]:
+        """Pages matching any of the query's words, best first, each with the words around the match."""
+        match = _fts_terms(query)
+        if not match:
+            return []
+        rows = self._conn.execute(
+            "SELECT p.file_id, f.path, p.page, snippet(doc_pages_fts, 0, '', '', ' … ', 64) AS passage"
+            " FROM doc_pages_fts JOIN doc_pages p ON p.id = doc_pages_fts.rowid JOIN doc_files f ON f.id = p.file_id"
+            " WHERE doc_pages_fts MATCH ? ORDER BY bm25(doc_pages_fts) LIMIT ?",
+            (match, limit),
+        ).fetchall()
+        return [DocHit(row["file_id"], row["path"], row["page"], row["passage"]) for row in rows]
+
+    def unannounced_doc_files(self) -> list[DocFile]:
+        """Files found in the folder that no note named yet, oldest first."""
+        rows = self._conn.execute("SELECT * FROM doc_files WHERE announced = 0 ORDER BY found_at, id").fetchall()
+        return [_doc_file(row) for row in rows]
+
+    def mark_doc_files_announced(self, file_ids: list[int]) -> None:
+        now = utc_now()
+        with self.tx():
+            self._conn.executemany(
+                "UPDATE doc_files SET announced = 1, updated_at = ? WHERE id = ?", [(now, i) for i in file_ids]
+            )
 
     # mail (headers, labels, delta links)
 

@@ -3,14 +3,14 @@ then the extras you pick.
 
 Safe to run again: every step checks first and skips what is done. Keys and passwords never pass through here (each
 extra has its own hidden-prompt script); the only codes typed here are Signal's one-time captcha link and SMS code
-and a registration-lock PIN, read with a hidden prompt and given to signal-cli on stdin (never as an argument, which
-other users of the Mac can see). Nothing is sent anywhere except what signal-cli and Ollama do for the step you are on.
+and a registration-lock PIN, read with a hidden prompt from the terminal itself (never from stdin, which may be an
+AI's pipe) and given to signal-cli on stdin (never as an argument, which other users of the Mac can see). Nothing is
+sent anywhere except what signal-cli and Ollama do for the step you are on. It runs only in the person's own terminal.
 """
 
 from __future__ import annotations
 
 import argparse
-import getpass
 import json
 import os
 import re
@@ -18,6 +18,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+import termios
 import time
 import tomllib
 from collections.abc import Callable, Iterable
@@ -45,6 +46,7 @@ PLACEHOLDER_NUMBER = "+300000000000"
 PLACEHOLDER_ACI = "00000000-0000-0000-0000-000000000000"
 _NUMBER = re.compile(r"^\+[0-9]{8,15}$")
 _ACI = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+TTY = "/dev/tty"  # the person's own terminal: every hidden answer is read from it, never from stdin
 RECEIVE_SECONDS = 20  # how long one look for the one-time word waits
 REGISTER_SECONDS = 120.0  # one register or verify request to Signal's servers
 # the name question's suggestions (owner's picks), and the English (Kokoro) voice each brings; the other ten
@@ -223,37 +225,46 @@ class Extra:
     how: str
 
 
-EXTRAS: dict[str, Extra] = {
+EXTRAS: dict[str, Extra] = {  # new ones go last: the numbers of the others stay
     "voice": Extra(
         "Voice notes and spoken answers (speech stays on the Mac)",
         "nothing (the speech models are downloaded once)",
-        "Take the # off [voice] and its lines in the config (the voice line has the voice that goes with her name),\n"
+        "Take the # off [voice] and its lines in her config (the voice line has the voice that goes with her name),\n"
         "  then run scripts/install-voice-daemon.sh (setup_assistant.md, 3, Voice notes).",
     ),
     "calendar": Extra(
-        "Your Google calendar in the morning digest and on request",
-        "the calendar feed is fetched from Google",
-        "Run scripts/set-calendar-url.sh, then add [calendar] (setup_assistant.md, 3, Calendar).",
+        "Calendars (Google, Outlook, iCloud, Fastmail or Nextcloud) in the morning digest and on request",
+        "each calendar is read from its own service, read-only",
+        "Google: scripts/set-calendar-url.sh; iCloud, Fastmail or Nextcloud: scripts/set-calendar-password.sh;\n"
+        "  Outlook: its mailbox's sign-in (mail); then add [calendar] (setup_assistant.md, 3, Calendar).",
     ),
     "mail": Extra(
         "Read-only mail from Microsoft 365 mailboxes, sorted for you",
         "mail is read from Microsoft Graph; bodies are never stored",
-        "Register an Entra app, add [mail], then scripts/mail-login.sh <address> (setup_assistant.md, 3, Mail).",
+        "Register an Entra app (Microsoft's admin site), add [mail], then scripts/mail-login.sh <address>\n"
+        "  (a code typed at Microsoft's sign-in page) (setup_assistant.md, 3, Mail).",
     ),
     "lights": Extra(
-        "Kasa lights and plugs at home",
+        "Lights and plugs at home: Kasa, Tapo and Philips Hue",
         "nothing (they are switched over your home network)",
-        "Run scripts/tapo-discover.sh, then add [[tapo.devices]] (setup_assistant.md, 3, Lights and plugs).",
+        "Kasa and Tapo: scripts/tapo-discover.sh (newer ones also scripts/set-tapo-credentials.sh, the TP-Link\n"
+        "  login); Hue: scripts/hue-pair.sh (press the Hue Bridge's button when asked); then add [[tapo.devices]]\n"
+        "  (setup_assistant.md, 3, Lights and plugs).",
     ),
     "web": Extra(
         "Web search with sources",
         "your search words, to Ollama's web search (Brave as backup)",
-        "Save a key with scripts/set-web-keys.sh, then add [web] (setup_assistant.md, 3, Web search).",
+        "In her own user, type each key at a hidden prompt (also over SSH):\n"
+        "    /usr/bin/sudo /usr/local/estia/bin/estia secret set web.env OLLAMA_API_KEY   (then BRAVE_API_KEY)\n"
+        "  On the Mac's own screen the login keychain works too, typed hidden:\n"
+        '    security add-generic-password -U -a "$USER" -s ollama -w   (-s brave-search for Brave\'s key)\n'
+        "  then scripts/set-web-keys.sh copies them to her. Then add [web] (setup_assistant.md, 3, Web search).",
     ),
     "maps": Extra(
         "Places and routes",
         "the place or route you ask about; 'near me' is rounded to about 1 km",
-        "Run scripts/setup-google-maps.sh, then add [maps] (setup_assistant.md, 3, Places and routes).",
+        "Run scripts/setup-google-maps.sh (a Google Cloud project with billing; gcloud's own sign-in first),\n"
+        "  then add [maps] (setup_assistant.md, 3, Places and routes).",
     ),
     "music": Extra(
         "Spotify by text message",
@@ -264,6 +275,21 @@ EXTRAS: dict[str, Extra] = {
         "Your git projects in one folder of this Mac, read-only: summary, docs or code",
         "nothing (the files are read on the Mac)",
         "Nothing to install: setup asks the folder and the level now (setup_assistant.md, 3, Projects).",
+    ),
+    "documents": Extra(
+        "Your PDFs in ~/Estia-KB and the ones you send her, read on the Mac",
+        "nothing (the PDFs are read on the Mac)",
+        "Run scripts/share-documents.sh (as you, no admin rights: it makes ~/Estia-KB and lets her account read it\n"
+        '  and add files to it), then add [documents] with folder = "/Users/<you>/Estia-KB"\n'
+        "  (setup_assistant.md, 3, Documents).",
+    ),
+    "calls": Extra(
+        "Voice calls with her, and wake-up calls (needs voice)",
+        "the calls, through Signal (end-to-end encrypted); the build downloads its code from GitHub and crates.io",
+        "Needs voice first. Sign in to GitHub once (gh auth login: a GitHub account of yours), then run\n"
+        "  tools/call-tunnel/install-signal-cli-jvm.sh and tools/call-tunnel/build.sh (several GB, a long build);\n"
+        "  in her own user then /usr/bin/sudo /usr/local/estia/bin/estia-deploy (it copies the builds into her\n"
+        "  release; [calls] before it stops her texts too); then add [calls] (setup_assistant.md, 3, Calls).",
     ),
 }
 
@@ -284,6 +310,61 @@ def parse_extras(answer: str) -> tuple[list[str], list[str]]:
         else:
             unknown.append(word)
     return sorted(picked, key=names.index), unknown
+
+
+def has_terminal() -> bool:
+    """Setup's questions and Signal's one-time codes need the person's own terminal: stdin is one, and it opens."""
+    if not sys.stdin.isatty():
+        return False
+    try:
+        os.close(os.open(TTY, os.O_RDWR | os.O_NOCTTY))
+    except OSError:
+        return False
+    return True
+
+
+def read_hidden(prompt: str, tty: str | None = None) -> str:
+    """A hidden line of any length from the terminal itself, never from stdin (a pipe there may be an AI's). Its line
+    mode is off while it reads: macOS keeps a typed line to 1,023 characters and drops the rest with the Enter, and
+    Signal's captcha link is longer. Nothing is echoed; Backspace and Ctrl-U edit; Ctrl-C stops as usual. Ctrl-D on an
+    empty line raises EOFError, no terminal OSError; the terminal's mode is always put back."""
+    fd = os.open(tty or TTY, os.O_RDWR | os.O_NOCTTY)
+    try:
+        before = termios.tcgetattr(fd)
+        quiet = termios.tcgetattr(fd)
+        quiet[3] &= ~(termios.ICANON | termios.ECHO)
+        quiet[6][termios.VMIN] = 1
+        quiet[6][termios.VTIME] = 0
+        termios.tcsetattr(fd, termios.TCSAFLUSH, quiet)
+        try:
+            os.write(fd, prompt.encode())
+            return _hidden_line(fd)
+        finally:
+            termios.tcsetattr(fd, termios.TCSAFLUSH, before)
+            os.write(fd, b"\n")
+    finally:
+        os.close(fd)
+
+
+def _hidden_line(fd: int) -> str:
+    """Bytes up to Enter (CR or LF), with Backspace (one character, all its UTF-8 bytes) and Ctrl-U applied."""
+    line = bytearray()
+    while True:
+        chunk = os.read(fd, 4096)
+        if not chunk:
+            raise EOFError
+        for byte in chunk:
+            if byte in (0x0A, 0x0D):
+                return line.decode("utf-8", errors="replace").strip()
+            if byte == 0x04 and not line:  # Ctrl-D on an empty line
+                raise EOFError
+            if byte in (0x08, 0x7F):
+                while line and line.pop() & 0xC0 == 0x80:  # a continuation byte: the character goes on
+                    pass
+            elif byte == 0x15:  # Ctrl-U: the line so far
+                line.clear()
+            elif byte >= 0x20 or byte == 0x09:
+                line.append(byte)
 
 
 def registration_argv(signal_cli: str) -> list[str]:
@@ -333,12 +414,14 @@ class Wizard:
         return answer != "q"
 
     def hidden(self, prompt: str) -> str:
-        """A hidden answer (a code, a PIN); no terminal counts as q."""
+        """A hidden answer (the captcha link, a code, a PIN), from the terminal only; Ctrl-D counts as q. Without a
+        terminal setup stops and says where to run it: a code is never read from stdin."""
         try:
-            return getpass.getpass(prompt).strip()
+            return read_hidden(prompt)
         except EOFError:
-            print()
             return "q"
+        except OSError:
+            raise SystemExit(prompts.SETUP_NO_TERMINAL) from None
 
     def run(
         self, command: list[str], *, shown: list[str] | None = None, **kwargs: object
@@ -387,21 +470,31 @@ class Wizard:
         if not self.dry_run:
             spec.write_text(modelfile(choice), encoding="utf-8")
         try:
-            self.run(["ollama", "create", "local-worker", "-f", str(spec)])
+            made = self.run(["ollama", "create", "local-worker", "-f", str(spec)]).returncode == 0
         finally:
             if not self.dry_run:
                 spec.unlink(missing_ok=True)
+        if not made:
+            raise SystemExit(prompts.SETUP_MODEL_NOT_MADE)
         done = "(dry run) would set" if self.dry_run else "✓ Model:"
         self.say(f"{done} local-worker = {choice.tag}, context {choice.num_ctx} tokens.")
 
     # 2. the Signal number
     def registered_numbers(self) -> list[str]:
-        accounts = Path.home() / ".local/share/signal-cli/data/accounts.json"
+        """The numbers signal-cli finished registering here: listed in accounts.json, and its own account file says
+        registered. signal-cli lists a number as soon as register starts, before the SMS code: a number whose code was
+        never typed is registered again, never offered."""
+        signal_data = Path.home() / ".local/share/signal-cli"
         try:
-            listed = json.loads(accounts.read_text(encoding="utf-8")).get("accounts", [])
-        except (OSError, ValueError, AttributeError):
+            listed = hostsec.signal_listed(signal_data, "")
+        except (OSError, ValueError):
             return []
-        return [str(a.get("number")) for a in listed if isinstance(a, dict) and a.get("number")]
+        found: list[str] = []
+        for item in listed:
+            account = hostsec.account_file(signal_data, item) if item.get("number") else None
+            if account is not None and account.get("registered") is True:
+                found.append(str(item["number"]))
+        return found
 
     def signal_number(self) -> str:
         if self.dry_run:
@@ -433,7 +526,9 @@ class Wizard:
                 "  2. Right-click (or long-press) 'Open Signal' and copy the link; it starts with signalcaptcha://\n"
                 "  3. Paste it below (hidden). It is a one-time code; it is not stored."
             )
-            captcha = getpass.getpass("captcha link: ").strip()
+            captcha = self.hidden("captcha link: ")
+            if captcha.lower() == "q":
+                raise SystemExit("Registration stopped: run setup again (a new captcha link for each try).")
             token = captcha.removeprefix("signalcaptcha://")
             done, why = self.registration(
                 "register",
@@ -661,7 +756,6 @@ class Wizard:
             share = prompts.SETUP_PROJECTS_SHARE if inside else prompts.SETUP_PROJECTS_OUTSIDE
             self.say(
                 prompts.SETUP_PROJECTS_HERS.format(
-                    config=ownuser.HOME / ownuser.HER_CONFIG,
                     root=json.dumps(str(where.folder), ensure_ascii=False),
                     level=where.level,
                     share=share.format(folder=where.folder),
@@ -701,6 +795,18 @@ class Wizard:
             self.say(f"✓ Config: {self.config_path} (only you can read it).")
         if digest:
             self.say(prompts.SETUP_PINNED)
+
+    def personality(self) -> None:
+        """Her style file, said at the end, once it is known where her files are: in her own user as her (her ~ is
+        /var/estia; the move takes your folder), else in your config folder. No soul.md: her built-in style."""
+        if self.own_user():
+            self.say(
+                prompts.SETUP_PERSONALITY_HERS.format(
+                    name=self.name,
+                    save=prompts.NANO_SAVE,
+                )
+            )
+            return
         soul = self.config_path.parent / "soul.md"
         if soul.exists():
             self.say(f"✓ Personality: {soul} (yours; edit it any time).")
@@ -737,10 +843,12 @@ class Wizard:
         """She runs as her own user: the bridge's service file says so (after a rollback it names you again)."""
         return ownuser.moved(estia_root())
 
-    def always_on(self) -> None:
+    def always_on(self) -> bool:
+        """Her own user: done already, the move (on a yes), or skipped. False only when the move failed: then setup
+        stops, before the security step and the extras."""
         if self.own_user():
             self.say(f"✓ Always on: as her own user {ownuser.ROLE_USER}, from {ownuser.CURRENT}.")
-            return
+            return True
         legacy = (estia_root() / ownuser.DAEMONS.relative_to("/") / f"{ownuser.BRIDGE}.plist").exists()
         move = str(REPO / "scripts" / "migrate-to-own-user.sh")
         if legacy:
@@ -758,16 +866,23 @@ class Wizard:
             )
         if self.dry_run:
             self.say(f"  $ {move}   (if you say yes; --dry-run first shows every step)")
-        elif self.yes("Install it now?" if not legacy else "Move her into her own user now?"):
-            self.run([move])
+            return True
+        if os.environ.get("SSH_CONNECTION") and not (os.environ.get("STY") or os.environ.get("TMUX")):
+            self.say(prompts.SETUP_SSH_SCREEN)  # a dropped connection would stop the move halfway
+        if not self.yes("Install it now?" if not legacy else "Move her into her own user now?"):
+            return True
+        if self.run([move]).returncode != 0:
+            self.say(prompts.SETUP_MOVE_FAILED.format(move=move))
+            return False
+        return True
 
     # 5b. the Mac's security around her, then the phone
     def security(self) -> None:
         harden_sh = str(REPO / "scripts" / "harden.sh")
         self.say(
-            "Security: SSH with keys only, no passwordless sudo, her files private and her Registration Lock, each with\n"
-            "one line on why; a change is made only on your yes, and sudo asks for your password once. FileVault and the\n"
-            "other settings only you can change are shown with their fixes.\n"
+            f"Security level {hostsec.HARDENED}: SSH with keys only, no passwordless sudo, her files private and her\n"
+            "Registration Lock, each with one line on why; a change is made only on your yes, and sudo asks for your\n"
+            "password once. FileVault and the other settings only you can change are shown with their fixes.\n"
             f"  {hostsec.NUCLEAR_LINE[0].upper()}{hostsec.NUCLEAR_LINE[1:]}; never part of setup."
         )
         if self.dry_run:
@@ -786,7 +901,7 @@ class Wizard:
     def extras(self) -> None:
         self.say("Extras (all optional, add any later with scripts/setup.sh --extras):")
         for i, (name, extra) in enumerate(EXTRAS.items(), 1):
-            self.say(f"  {i}. {name:9} {extra.title}. Leaves the Mac: {extra.leaves_the_mac}.")
+            self.say(f"  {i:>2}. {name:9} {extra.title}. Leaves the Mac: {extra.leaves_the_mac}.")
         if self.dry_run:
             self.say("  (asks which ones, then shows how to add each)")
             return
@@ -797,6 +912,11 @@ class Wizard:
             self.say(f"• {name}: {EXTRAS[name].how}")
             if name == "projects":
                 self.projects_extra()
+        if any(name != "projects" for name in picked):  # where each section goes, and when she reads it
+            if self.own_user():
+                self.say(prompts.SETUP_EXTRAS_HERS.format(edit=prompts.HER_CONFIG_EDIT, save=prompts.NANO_SAVE))
+            else:
+                self.say(prompts.SETUP_EXTRAS_YOURS.format(path=self.config_path))
 
     def voice_health(self) -> dict[str, object] | None:
         """The voice service's health (127.0.0.1 only; never the running service under a test's ESTIA_ROOT)."""
@@ -833,6 +953,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="print the steps and commands without running them")
     args = parser.parse_args(argv)
     wizard = Wizard(args.config, dry_run=args.dry_run)
+    if not args.dry_run and not args.extras and not has_terminal():  # an AI's command tool: it says where to run it
+        wizard.say(prompts.SETUP_NO_TERMINAL)
+        return 1
     if args.extras:
         wizard.extras()
         return 0
@@ -846,6 +969,7 @@ def main(argv: list[str] | None = None) -> int:
         wizard.always_on()
         wizard.security()
         wizard.extras()
+        wizard.personality()
         wizard.say("\nChecking everything:")
         result = wizard.check()
         wizard.voice_end()
@@ -875,9 +999,11 @@ def main(argv: list[str] | None = None) -> int:
         wizard.her_name()
         number = wizard.signal_number()
         wizard.config(number, wizard.owner(number))
-    wizard.always_on()
+    if not wizard.always_on():
+        return 1  # the move failed: its ✗ and the next step are on the screen
     wizard.security()
     wizard.extras()
+    wizard.personality()
     wizard.say("\nChecking everything:")
     time.sleep(0.2)
     result = wizard.check()

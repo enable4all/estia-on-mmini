@@ -4,9 +4,9 @@ CallManager reads signal-cli's call events and answers only allowed callers; str
 (a reject would send them something). It connects to the call helper's audio socket in a private folder and runs a
 laid-back conversation: listen (long thinking pauses are fine), transcribe, one turn through the app (the same tools
 as text), speak sentence by sentence, and let the caller talk over her: loudness or the voice service's speech
-detector stops her ([calls] barge, see call_audio.Barge), and the words decide what the stop was (a cough, her own
-voice from a loud speaker, or the caller's turn). Audio lives only in memory; logs hold metadata only. The app is the
-Host: it stores the turns, runs Gemma and sends notes.
+detector stops her ([calls] interrupt, see call_audio.Barge), and the words decide what the stop was (a cough, her own
+voice from a loud speaker, a listener's "okay", or the caller's turn). Audio lives only in memory; logs hold metadata
+only. The app is the Host: it stores the turns, runs Gemma and sends notes.
 
 She places a call only for a reminder the user set (`place`, from the reminders' scheduler, which sends the text
 first): to an allowed account only, one call at a time, and the call starts for the app only when it is picked up
@@ -27,7 +27,7 @@ import re
 import time
 import unicodedata
 import uuid
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -38,12 +38,21 @@ from local_assistant import prompts
 from local_assistant.call_audio import FRAME_S, RATE, Barge, CallAudio, faint_noise, pcm48_to_wav16k, wav_to_pcm48
 from local_assistant.config import DEFAULT_NAME
 from local_assistant.language import (
+    BUT,
+    BUT_WORDS,
+    CONTINUING,
     ENGLISH,
     FUNCTION_WORDS,
     INTERRUPTIONS,
     JAPANESE_CALLER_WORDS,
+    LEAVING,
+    LEAVING_NOT_ALONE,
+    LEAVING_SOFT,
     NEGATIONS,
     YES_WORDS,
+    acknowledgements,
+    negations,
+    stop_words,
 )
 from local_assistant.voice import Transcript, VoiceError, detector_state, sentences, spoken_text
 
@@ -53,6 +62,8 @@ LEAD_MS = 300  # faint noise before an answer: wakes the call's audio before the
 PAUSE_AFTER_FILLER_S = 0.35  # "Got it." … a short pause … the answer
 INTERRUPTION_END_S = 1.2  # the end of what the caller says over her (shorter than a turn: a cough resumes sooner)
 RESUME_BACK_S = 0.5  # after a cough she carries on a little before where she stopped
+# false stops (no words, her own voice) in one clip before the next stop is taken as the caller's; acknowledgements in
+# one clip before she carries on from the stop itself, no longer a little back
 MAX_FALSE_BARGE = 3
 CONNECT_SECONDS = 10.0
 NOT_READY_NOTE_SECONDS = 600.0
@@ -61,12 +72,12 @@ PLACED_OUTCOMES = ("answered", "no_answer", "declined", "busy", "call_failed")
 FILLERS = {"uh", "um", "umm", "hmm", "mm", "mhm", "ah", "oh", "huh", "eh", "er"} | {
     "äh", "ähm", "öhm", "euh", "ehm", "ehh", "eee", "yyy", "ээ", "эм", "мм", "음", "어", "えー", "えっと", "あの"
 }  # fmt: skip
-# one word alone over her that counts: "stop", "wait", a yes ... in every language (and her name: name_words)
-ONE_WORD_INTERRUPTIONS = (
-    {"stop", "wait", "no", "yes", "yeah", "okay", "ok", "hold", "sorry", "hey"}
-    | INTERRUPTIONS
-    | {word for word in YES_WORDS if " " not in word}
-)
+# one word alone over her that stops her: "stop", "wait", "but" ... in every language (and her name: name_words)
+_STOP_ALONE = frozenset({"stop", "wait", "no", "hold", "sorry", "hey"} | INTERRUPTIONS)
+ONE_WORD_INTERRUPTIONS = _STOP_ALONE | BUT_WORDS
+# a yes word alone, in any language, stops her only when it answers her: she asked something or a device question
+# waits (owner, 14 Oct: a listener's "okay" ended her answers)
+ANSWER_WORDS = frozenset({"yes", "yeah", "okay", "ok"} | {word for word in YES_WORDS if " " not in word})
 _WORD = re.compile(r"(?:[^\W\d_]|')+")  # letters of any script (and apostrophes): "don't", "café", "привет"
 _NO_SPACES = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]")  # Japanese is written without spaces
 _STOP = {"stop", "wait", "hold"}
@@ -146,7 +157,9 @@ class CallSettings:
     answer_after_s: float = 5.0  # let it ring about twice before answering (user: more natural)
     ring_wait_s: float = 75.0  # a call she places: signal-cli and RingRTC ring for 60 s; then it is a failed call
     wake_silence_s: float = 60.0  # after a wake-up call's opening, this much silence ends the call with a goodbye
-    barge: str = "loudness"  # what stops her when the caller talks over her: "loudness" or "speech" (call_audio.Barge)
+    # what stops her when the caller talks over her ([calls] interrupt): "speech" ("only speech", the default) or
+    # "loudness" ("any sound"); call_audio.Barge's names
+    barge: str = "speech"
 
 
 # Whisper writes noise as words: sound labels (*sad music*, [Music]) and, on a short sound, its favourite fillers
@@ -225,13 +238,77 @@ def name_words(name: str) -> frozenset[str]:
     return frozenset(real_words(name))
 
 
-def is_interruption(text: str, *, name: str) -> bool:
-    """Talking over her counts only with real words: two or more, or one clear word like "stop" or her name (in any
-    of the languages; Japanese, without spaces, counts its characters). A cough, a noise or "um" transcribes as
-    nothing, "-" or a filler, and she carries on."""
+def _form(word: str) -> str:
+    """A word as compared for an acknowledgement or leave-taking: lower case, a straight apostrophe, Latin letters
+    without accents ("oké" is "oke"); other scripts as written (Japanese keeps its voicing marks)."""
+    word = word.lower().replace("’", "'")
+    if all(ord(char) < 0x250 for char in word):
+        return "".join(char for char in unicodedata.normalize("NFKD", word) if not unicodedata.combining(char))
+    return unicodedata.normalize("NFC", word)
+
+
+def _units(text: str, language: str) -> tuple[str, ...]:
+    """A text's words as compared (_form), in order; Japanese, written without spaces, its characters."""
+    words = [_form(word) for word in _WORD.findall(_SOUND_LABEL.sub(" ", text.replace("’", "'")))]
+    return tuple("".join(words)) if language == "ja" else tuple(words)
+
+
+def _phrases(texts: Collection[str], language: str) -> frozenset[tuple[str, ...]]:
+    return frozenset(_units(text, language) for text in texts) - {()}
+
+
+def _made_of(units: tuple[str, ...], phrases: Collection[tuple[str, ...]], soft: Collection[tuple[str, ...]]) -> bool:
+    """Whether `units` are wholly `phrases` and `soft` ones in any order, with at least one of `phrases`."""
+    reached = {0: False}  # how far they are made of them: whether one of `phrases` came before that point
+    for start in range(len(units)):
+        if start not in reached:
+            continue
+        for options, counts in ((phrases, True), (soft, False)):
+            for option in options:
+                end = start + len(option)
+                if units[start:end] == option:
+                    reached[end] = reached.get(end, False) or reached[start] or counts
+    return reached.get(len(units), False)
+
+
+@functools.cache
+def _acknowledging(language: str) -> tuple[frozenset[tuple[str, ...]], frozenset[tuple[str, ...]]]:
+    """A call language's acknowledgements and the fillers allowed beside them, as compared."""
+    return _phrases(acknowledgements(language), language), _phrases(FILLERS, language)
+
+
+def _asked(text: str) -> bool:
+    return "?" in text or "？" in text
+
+
+def is_acknowledgement(text: str, language: str) -> bool:
+    """A listener's acknowledgement over her: only the call language's acknowledgement words and the hums Whisper
+    writes (language.acknowledgements), fillers allowed beside them ("Okay.", "Oh, I see.", "Mm-hmm.", "Ja, klopt.",
+    "はい、なるほど"). Anything more ("okay, and tomorrow?", "yes but") is none, and so is one asked back ("네?",
+    "はい？", "Right?": "pardon?" or "really?"). Japanese by characters."""
+    return not _asked(text) and _made_of(_units(text, language), *_acknowledging(language))
+
+
+def asks(hers: Sequence[str]) -> bool:
+    """Whether her sentence being said, or the one before it (`hers`), asks something: it ends with a question mark,
+    or in Japanese with か, a polite question often written without one ("明日にしますか。")."""
+    ends = (sentence.rstrip().rstrip("\"')]”’»」』").rstrip("。") for sentence in hers)
+    return any(end.endswith(("?", "？", "か")) for end in ends)
+
+
+def is_interruption(text: str, *, name: str, language: str = ENGLISH, asking: bool = False) -> bool:
+    """Talking over her counts only with real words: two or more, or one clear word like "stop", "but" or her name (in
+    any of the languages; Japanese, without spaces, counts its characters). A cough, a noise or "um" transcribes as
+    nothing, "-" or a filler, and she carries on; so does a listener's acknowledgement alone ("okay", "yeah, right",
+    "mm-hm" in the call's `language`: is_acknowledgement), unless she is `asking` (her sentence or the one before it
+    asks something, or a device question waits): then it, or a yes word alone in any language, answers her. One word
+    asked back ("Really?", "네?") always counts."""
+    if is_acknowledgement(text, language):
+        return asking
     words = real_words(text)
     units = sum(len(word) if _NO_SPACES.search(word) else 1 for word in words)
-    return units >= 2 or (len(words) == 1 and words[0] in ONE_WORD_INTERRUPTIONS | name_words(name))
+    alone = ONE_WORD_INTERRUPTIONS | name_words(name) | (ANSWER_WORDS if asking else frozenset())
+    return units >= 2 or (len(words) == 1 and (words[0] in alone or _asked(text)))
 
 
 # Her own voice: a loud speaker next to the caller's microphone (a laptop on Signal Desktop) plays her back, and the
@@ -256,7 +333,7 @@ def _plain_word(word: str) -> str:
 
 _FUNCTION_PLAIN = frozenset(_plain_word(word) for word in FUNCTION_WORDS)
 # words that are the caller's unless her played text has them too: stop and yes words, a negation
-_CALLER_PLAIN = frozenset(_plain_word(word) for word in ONE_WORD_INTERRUPTIONS | NEGATIONS)
+_CALLER_PLAIN = frozenset(_plain_word(word) for word in _STOP_ALONE | ANSWER_WORDS | NEGATIONS)
 
 
 def _compared(text: str) -> list[str]:
@@ -365,7 +442,7 @@ def _goodbye(name: str) -> re.Pattern[str]:
     return re.compile(
         r"^(?:(?:ok|okay|alright|all right|right|well|thanks|thank you|very much|so much|a lot|great|cool|so|perfect"
         rf"|no|nope|{her})\s+)*"
-        r"(?:bye(?: bye)*|goodbye|bye for now|(?:talk|speak) (?:to you )?(?:later|soon)|catch you later"
+        r"(?:bye(?: bye)*|good ?bye|bye for now|(?:talk|speak) (?:to you )?(?:later|soon)|catch you later"
         r"|see you(?: later| soon| tomorrow)?|take care|good ?night|hang up)"
         rf"(?:\s+(?:{her}|then|now|for now))*$"
     )
@@ -404,14 +481,162 @@ def is_goodbye(text: str, *, name: str) -> bool:
     return bool(_goodbye(name).match(" ".join(real_words(text))))
 
 
-def ends_with_goodbye(text: str, *, name: str) -> bool:
-    """A turn whose last sentence is a plain goodbye after other words ("No, that's good. Okay, thank you.
-    Bye-bye."): Gemma answers the rest, then the call ends once her answer is spoken, unless it asks something (as
-    after a wrap-up). Gemma rarely calls end_call on a real call, so code decides. A goodbye followed by more ("Bye.
-    Wait, what's the weather?") is not one. Commas count as breaks too ("Yeah, bye."): Whisper often writes fast
-    speech with commas only."""
-    said = [part for part in re.split(r"[.!?,;:]+(?:\s+|$)", text.strip()) if real_words(part)]
-    return any(is_goodbye(" ".join(said[start:]), name=name) for start in range(1, len(said)))  # "…, see you, Estia."
+# a sentence's or a comma's end (Whisper writes fast speech with commas only); Japanese breaks without a space
+_BREAK = re.compile(r"(?<=[.!?,;:])\s+|(?<=[、。！？])")
+_SENTENCE_END = (".", "!", "?", "。", "！", "？")
+# after a goodbye, talk that is more than closing: a question, or "wait", "but", "actually", "hold on", "before you go"
+_MORE_AFTER = re.compile(
+    r"\b(?:wait|but|actually|hold on|hang on|one more|one thing|before (?:you|i) go|quick question)\b"
+)
+_ASKS_FIRST = re.compile(
+    r"^(?:what|what's|when|where|who|why|how|which|can|could|would|will|do|does|did|is|are|should|shall|may)\b"
+)
+_LEADING_SOFT = frozenset({"and", "so", "oh", "also", "ok", "okay", "well", "then", "um"})  # "And what about…"
+
+
+@dataclass(frozen=True)
+class _Part:
+    """A part of the caller's turn with words: a sentence, or a part of one between commas, semicolons, colons or 、."""
+
+    text: str
+    sentence: int  # which sentence of the turn it is in
+    quoted: bool  # it comes after a colon in its sentence: quoted speech ("tell Alex: take care")
+
+
+@functools.cache
+def _going_on(language: str) -> frozenset[str]:
+    """The first words of a comma part that goes on from the part before it (language.CONTINUING), as compared."""
+    return frozenset(_form(word) for code in (language, ENGLISH) for word in CONTINUING.get(code, ()))
+
+
+def _turn_parts(text: str, language: str) -> list[_Part]:
+    """A turn's parts with words, in order: sentences (split at . ! ? 。！？), each split at commas, semicolons, colons
+    and 、 (Whisper writes fast speech and a hesitation with commas). A part that starts with a word that goes on from
+    the part before it in its sentence ("to", "back", "naar", "zum": language.CONTINUING, the call's language and
+    English) is joined to that part: "I have to go, uh, to the dentist" is one part, an errand; "Bye, for now" one
+    goodbye. The parts after a colon in a sentence are quoted speech."""
+    going_on = _going_on(language)
+    parts: list[_Part] = []
+    sentence = 0
+    quoted = False
+    for piece in _BREAK.split(text.strip()):
+        words = real_words(piece)
+        if words:
+            last = parts[-1] if parts and parts[-1].sentence == sentence else None
+            if last is not None and not last.text.rstrip().endswith(":") and _form(words[0]) in going_on:
+                parts[-1] = _Part(f"{last.text} {piece}", sentence, last.quoted)
+            else:
+                parts.append(_Part(piece, sentence, quoted))
+        quoted = quoted or piece.rstrip().endswith(":")
+        if piece.rstrip().endswith(_SENTENCE_END):
+            sentence += 1
+            quoted = False
+    return parts
+
+
+@functools.cache
+def _holding_on(language: str) -> tuple[str, ...]:
+    """A call language's words that say more is coming: its "but" and its stop words that are no negation ("maar",
+    "wacht"; "nee" is often only "no thanks")."""
+    return (*BUT.get(language, ()), *(word for word in stop_words(language) if word not in negations(language)))
+
+
+def _closing_talk(parts: Sequence[str], language: str = ENGLISH) -> bool:
+    """Talk after a goodbye that only closes the call ("I'm going to check the log now", "talk later", a request such as
+    "remind me at five"): no question (a question mark, or on an English call a part that starts like one after soft
+    words such as "and", "so" or "oh": Whisper may leave the mark out), no "wait", "but", "actually", "hold on" or
+    "before you go", and no "but" or stop word in the call's language ("maar", "wacht", でも)."""
+    for part in parts:
+        words = real_words(part)
+        joined = " ".join(words)
+        if _asked(part) or _MORE_AFTER.search(joined):
+            return False
+        start = next((index for index, word in enumerate(words) if word not in _LEADING_SOFT), len(words))
+        if language == ENGLISH and _ASKS_FIRST.match(" ".join(words[start:])):
+            return False
+        if any(more in "".join(words) if _NO_SPACES.search(more) else more in words for more in _holding_on(language)):
+            return False
+    return True
+
+
+def says_goodbye(text: str, *, name: str, language: str = ENGLISH) -> bool:
+    """A turn that says goodbye and more: other words before the goodbye ("No, that's good. Okay, thank you.
+    Bye-bye."), or only closing talk after it ("ok goodbye, I'm going to check the log now"; _closing_talk, in the
+    call's `language`: "Oké, bye, maar wacht even" is more). Gemma answers the rest (a reminder asked for is set), then
+    the call ends once her answer is spoken, even when it asks something, unless a device question waits (owner, 14
+    Oct); Gemma rarely calls end_call on a real call, so code decides. A goodbye followed by more ("Bye. Wait, what's
+    the weather?", "Bye, and what about tomorrow") is none; so is one in quoted speech ("tell Alex: take care, …") or
+    one a comma part goes on from ("See you, at eight": _turn_parts); a plain goodbye alone is is_goodbye's. Commas
+    count as breaks too ("Yeah, bye.")."""
+    parts = _turn_parts(text, language)
+    return len(parts) > 1 and any(
+        not part.quoted
+        and is_goodbye(part.text, name=name)
+        and _closing_talk([later.text for later in parts[index + 1 :]], language)
+        for index, part in enumerate(parts)
+    )
+
+
+@dataclass(frozen=True)
+class _Leaving:
+    """A call's leave-taking words as compared: its language's and English."""
+
+    phrases: frozenset[tuple[str, ...]]  # language.LEAVING
+    soft: frozenset[tuple[str, ...]]  # language.LEAVING_SOFT, fillers, her name
+    not_alone: frozenset[tuple[str, ...]]  # language.LEAVING_NOT_ALONE: only with a soft word beside it
+    answers: frozenset[tuple[str, ...]]  # acknowledgements and negations: a part of only these answers her
+
+
+@functools.cache
+def _leaving(language: str, name: str) -> _Leaving:
+    codes = dict.fromkeys((language, ENGLISH))
+    words = [word for code in codes for word in (*acknowledgements(code), *negations(code))]
+    return _Leaving(
+        _phrases([phrase for code in codes for phrase in LEAVING.get(code, ())], language),
+        _phrases([*(word for code in codes for word in LEAVING_SOFT.get(code, ())), *FILLERS, name], language),
+        _phrases([phrase for code in codes for phrase in LEAVING_NOT_ALONE.get(code, ())], language),
+        _phrases(words, language),
+    )
+
+
+def takes_leave(text: str, *, name: str, language: str = ENGLISH) -> bool:
+    """Leave-taking ("I have to go", "I'm hanging up", "ik moet gaan", "ich lege auf", "じゃあ、切るね"): a part of the
+    turn (_turn_parts) that is one of the call language's or English phrases (language.LEAVING), with only soft words
+    in it and in the parts beside it that it takes in (LEAVING_SOFT, a filler, her name: "Okay, so, I have to go now"),
+    not asked ("So, I have to go?"), followed only by closing talk (_closing_talk). The call ends once her reply is
+    spoken (owner, 14 Oct). None: "I have to go to the dentist", "I have to go, uh, to the dentist" (the part goes on),
+    a part in quoted speech ("He said: I have to go"), one right after a part that answers her ("Yes, I have to go.",
+    "No, I'm off.": only acknowledgement or negation words), "I'm off" with no soft word beside it (a day off too:
+    LEAVING_NOT_ALONE), and in Japanese one with anything but soft words before it in its sentence ("電気、切るね": 切る
+    is also "switch off")."""
+    words = _leaving(language, name)
+    parts = _turn_parts(text, language)
+    units = [_units(part.text, language) for part in parts]
+
+    def soft(index: int, sentence: int) -> bool:
+        """Part `index` is one of `sentence` and has only soft words: the leave-taking beside it takes it in."""
+        in_sentence = 0 <= index < len(parts) and parts[index].sentence == sentence
+        return in_sentence and _made_of(units[index], words.soft, words.soft)
+
+    for index, part in enumerate(parts):
+        first = last = index
+        while soft(first - 1, part.sentence):
+            first -= 1
+        while soft(last + 1, part.sentence):
+            last += 1
+        said = tuple(unit for span in units[first : last + 1] for unit in span)
+        before = first - 1 if first > 0 and parts[first - 1].sentence == part.sentence else None
+        if (
+            not part.quoted  # quoted speech (the parts before it are not: a colon quotes the rest of its sentence)
+            and not any(_asked(parts[at].text) for at in range(first, last + 1))  # "So, I have to go?" asks
+            and _made_of(said, words.phrases, words.soft)
+            and said not in words.not_alone
+            and (before is None or not _made_of(units[before], words.answers, words.soft))
+            and (language != "ja" or before is None)  # Japanese: only soft words before it in its sentence
+            and _closing_talk([later.text for later in parts[last + 1 :]], language)
+        ):
+            return True
+    return False
 
 
 def _parts(text: str) -> list[str]:
@@ -562,8 +787,9 @@ class CallManager:
         return f"{line} · next call {next_call}" if next_call and self._call is None else line
 
     async def detector(self) -> str:
-        """The speech detector's state for /status when speech stops her ([calls] barge = "speech"): ready, loading,
-        unavailable, old voice service or not ready (voice.detector_state); "" with loudness."""
+        """The speech detector's state for /status when speech stops her ([calls] interrupt = "only speech", the
+        default): ready, loading, unavailable, old voice service or not ready (voice.detector_state); "" with any sound
+        (loudness)."""
         if self.settings.barge != "speech":
             return ""
         return detector_state(await self._voice.health())
@@ -951,7 +1177,7 @@ class CallManager:
             # sound must not seem a yes), never after a few words ("how are you?" needs no "got it")
             acknowledge = s.acknowledge and not question_waiting and turn_words(text) >= ACK_MIN_WORDS
             turn = await self._turn(call, audio, said, acknowledge=acknowledge)
-            interruption, heard = await self._speak(call, audio, turn, last_whole=turn.asks_yes)
+            interruption, heard = await self._speak(call, audio, turn, waiting=turn.asks_yes)
             call.lines.append(f"{self.name}: {heard}")
             question_waiting = turn.asks_yes and interruption is None
             if interruption is not None:
@@ -963,12 +1189,16 @@ class CallManager:
             elif (
                 turn.end_call
                 or wants_hang_up(text)
-                or (
-                    (is_wrap_up(text) or ends_with_goodbye(text, name=self.name))
-                    and not f"{turn.text} {turn.code_text}".rstrip().endswith("?")
-                )
+                or (self._leaving(call, text) and not turn.asks_yes)  # a yes to a device must still count
+                or (is_wrap_up(text) and not f"{turn.text} {turn.code_text}".rstrip().endswith("?"))
             ):
                 return  # she said goodbye (or answered the user's wrap-up or goodbye) whole: hung up in _run_call
+
+    def _leaving(self, call: _Call, text: str) -> bool:
+        """The user said goodbye with more than the goodbye, or takes leave: she hangs up once her reply is spoken."""
+        return says_goodbye(text, name=self.name, language=call.language) or takes_leave(
+            text, name=self.name, language=call.language
+        )
 
     async def _turn(self, call: _Call, audio: CallAudio, text: str, *, acknowledge: bool) -> Turn:
         """The app's answer. A short "Got it." first when `acknowledge` (the request was taken in). A varied
@@ -1072,13 +1302,15 @@ class CallManager:
         self.said = [*self.said[-19:], text]
         self.saying = ""
 
-    async def _speak(self, call: _Call, audio: CallAudio, turn: Turn, *, last_whole: bool) -> tuple[str | None, str]:
+    async def _speak(self, call: _Call, audio: CallAudio, turn: Turn, *, waiting: bool) -> tuple[str | None, str]:
         """Gemma's answer sentence by sentence (the next one is made while one plays), then code's own words: in
         English, so a device question is always clear (on an English call they simply follow). On a call in another
         language a turn that waits for a device's yes says only code's question: Gemma's words about the device are
         left out (in Dutch it claimed a switch that was still waiting for the yes), and app.call_turn keeps only that
         question in the history too; a turn whose reminder was not set comes with no words of hers at all, only code's
-        line why. Returns what the caller said over it (or None) and what they heard of it."""
+        line why. `waiting`: a device question waits for the yes (turn.asks_yes): its last sentence is said whole, and
+        a yes word over the ones before answers it. Returns what the caller said over it (or None) and what they heard
+        of it."""
         if call.language == ENGLISH:
             spoken = [(_parts(f"{turn.text} {turn.code_text}"), ENGLISH)]
         elif turn.asks_yes and turn.code_text.strip():
@@ -1110,9 +1342,11 @@ class CallManager:
                     raise item
                 self.saying = part
                 lead = faint_noise(LEAD_MS) if index == 0 else b""
-                whole = last_whole and index == len(parts) - 1
+                whole = waiting and index == len(parts) - 1
                 hers = tuple(parts[max(0, index - 1) : index + 1])  # the sentence and the one before it
-                result = await self._say_checked(audio, lead + item, barge=not whole, fresh=index == 0, hers=hers)
+                result = await self._say_checked(
+                    audio, lead + item, barge=not whole, fresh=index == 0, hers=hers, waiting=waiting
+                )
                 self._done(part)
                 if result is not None:
                     text, fraction = result
@@ -1134,17 +1368,29 @@ class CallManager:
                     raise ConnectionError("the call's audio ended") from None
 
     async def _say_checked(
-        self, audio: CallAudio, pcm: bytes, barge: bool, *, fresh: bool = True, hers: tuple[str, ...] = ()
+        self,
+        audio: CallAudio,
+        pcm: bytes,
+        barge: bool,
+        *,
+        fresh: bool = True,
+        hers: tuple[str, ...] = (),
+        waiting: bool = False,
     ) -> tuple[str, float] | None:
         """Say `pcm` (her sentences `hers`: the one before and the one being said); when the caller talks over it,
         listen and check the words: an interruption returns (what they said, how much of the clip went out); a cough,
         a noise or her own voice (compared with what she played of `hers` up to the stop) resumes a little before the
         stop. Her own voice also raises the level a stop needs, once a call (call_audio.Barge.her_own_voice); it never
-        reaches Gemma."""
+        reaches Gemma. A listener's acknowledgement alone ("okay", "mm-hm") resumes too, unless `hers` asks something
+        or a device question is `waiting`: then it answers her (owner, 14 Oct). Each acknowledgement takes her further
+        on: a little before the stop, never back to where she resumed (a stop that soon would replay the same audio
+        for good), and after MAX_FALSE_BARGE of them in one clip from the stop itself."""
         offset = 0
         false_alarms = 0
+        carried_on = 0  # acknowledgements in this clip
+        resumed = False
         while True:
-            said = await audio.say(pcm[offset:], barge=barge, fresh=fresh and offset == 0 and false_alarms == 0)
+            said = await audio.say(pcm[offset:], barge=barge, fresh=fresh and not resumed)
             if not said.barged:
                 return None
             stop = offset + 2 * int(said.played_s * RATE)
@@ -1161,12 +1407,27 @@ class CallManager:
             own = not noise and is_own_voice(text, played_part(hers, fraction))
             if own:
                 audio.barge.her_own_voice(said.level)
-            caller = not noise and not own and is_interruption(text, name=self.name)
+            asking = waiting or asks(hers)
+            words = not noise and not own
+            acknowledged = words and not asking and is_acknowledgement(text, language)
+            caller = (
+                words and not acknowledged and is_interruption(text, name=self.name, language=language, asking=asking)
+            )
+            resumed = True
+            if acknowledged:  # words: no false stop, and never a takeover however often, but always further on
+                audio.barge.acknowledgement()
+                log.info("calls: an acknowledgement; carrying on")
+                carried_on += 1
+                back = stop - 2 * int(RESUME_BACK_S * RATE)
+                offset = back if back > offset and carried_on <= MAX_FALSE_BARGE else stop
+                continue
             if not caller:
                 audio.barge.false_stop(said)  # no words or her own voice: the shadow that fired too would have erred
             if caller or false_alarms >= MAX_FALSE_BARGE:
-                # noise and her own words never reach Gemma
-                return ("" if noise or own else text), fraction
+                taken = "" if noise or own else text  # noise and her own words never reach Gemma
+                if real_words(taken):
+                    log.info("calls: taken over (%d words)", turn_words(taken))
+                return taken, fraction
             false_alarms += 1
             log.info("calls: her own voice heard; carrying on" if own else "calls: a sound without words; carrying on")
             offset = max(0, stop - 2 * int(RESUME_BACK_S * RATE))

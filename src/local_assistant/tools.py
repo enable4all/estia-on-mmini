@@ -18,8 +18,10 @@ from zoneinfo import ZoneInfo
 
 from local_assistant import prompts
 from local_assistant.calendar_tools import CalendarTools
+from local_assistant.claims import switch_clauses
 from local_assistant.config import DEFAULT_HOST_LABEL, DEFAULT_NAME
 from local_assistant.devices import Devices
+from local_assistant.documents import LOOK_ON_REQUEST_SECONDS, Documents
 from local_assistant.fetcher import FetchError, Page
 from local_assistant.mail_tools import MailTools
 from local_assistant.maps import Mapper, MapsError, Place, Route
@@ -207,6 +209,28 @@ def project_schemas(host_label: str = DEFAULT_HOST_LABEL, projects_root: Path | 
         ),
     ]
 
+
+# offered only with [documents]: the user's PDFs (documents.py); their text is outside text
+DOCUMENT_SCHEMAS: list[dict[str, Any]] = [
+    _function(
+        "search_documents",
+        "Search the user's documents (their PDFs: letters, contracts, manuals, policies) for words. Returns the best "
+        "passages with the document's name and page.",
+        {"words": {"type": "string", "description": "Words to look for, e.g. 'pets lease'"}},
+        ["words"],
+    ),
+    _function(
+        "read_document",
+        "Read one page of one of the user's documents, by the document's name (as search_documents gives it) and the "
+        "page number.",
+        {
+            "document": {"type": "string", "description": "The document's name, e.g. 'lease.pdf'"},
+            "page": {"type": "integer", "description": "The page number, default 1"},
+        },
+        ["document"],
+    ),
+]
+DOCUMENT_TOOLS = frozenset(schema["function"]["name"] for schema in DOCUMENT_SCHEMAS)
 
 TOOL_SCHEMAS = tool_schemas()  # the setup without extra checks: also what the tests compare with
 PROJECT_SCHEMAS = project_schemas()  # with [projects] only, in ~/dev on the Mac
@@ -399,6 +423,8 @@ class Turn:
     read_mail: bool = False  # mail text was read: nothing goes to Google Maps in this answer
     # a project tool ran (private files, perhaps a planted line): nothing goes to a search engine or Google Maps
     read_project: bool = False
+    # a document tool ran (the user's PDFs, perhaps a planted line): the same as a project file
+    read_documents: bool = False
     links: list[tuple[str, str]] = field(default_factory=list)  # map links for the Sources note
     # links the user sent that stay tappable in her answer (a kept video's link, from an earlier message)
     allowed_links: list[str] = field(default_factory=list)
@@ -422,6 +448,10 @@ class Turn:
     reminder_attempts: list[ReminderAttempt] = field(default_factory=list)  # each set_reminder, stored or why not
     reminder_notes: list[str] = field(default_factory=list)
     reminder_spoken: list[str] = field(default_factory=list)
+    # lights and plugs in this answer: the devices a device_set changed ("Done": a claim of their change is true) and
+    # a device_status read (her "is now on" reports the state)
+    switched: set[str] = field(default_factory=set)
+    read_devices: bool = False
     # every profile change in this answer, reported to the user by code (not by Gemma)
     saved: list[tuple[int, str]] = field(default_factory=list)
     updated: list[tuple[int, str]] = field(default_factory=list)
@@ -451,6 +481,7 @@ class Tools:
         maps: Mapper | None = None,
         reminders: Reminders | None = None,
         videos: VideoReader | None = None,
+        documents: Documents | None = None,
         base_schemas: list[dict[str, Any]] | None = None,
         project_schemas: list[dict[str, Any]] | None = None,
         name: str = DEFAULT_NAME,
@@ -473,6 +504,7 @@ class Tools:
         self._maps = maps
         self._reminders = reminders
         self._videos = videos  # YouTube links: their captions (always on in the app)
+        self._documents = documents  # the user's PDFs: off without [documents]
         self._notify: ToolNote | None = None
         self._profile = profile
         self._tz = tz
@@ -486,6 +518,7 @@ class Tools:
         return (
             self._base_schemas
             + (self._project_schemas if self._projects else [])
+            + (DOCUMENT_SCHEMAS if self._documents else [])
             + (REMINDER_SCHEMAS if self._reminders else [])
             + (CALENDAR_SCHEMAS if self._calendar else [])
             + (WEB_SCHEMAS if self._web else [])
@@ -502,6 +535,15 @@ class Tools:
     @property
     def calls_on(self) -> bool:
         return self._calls
+
+    def unmade_switch(self, turn: Turn, answer: str) -> bool:
+        """Whether her answer claims a light or plug change that no device made (English first): a claiming clause
+        (claims.switch_clauses) that devices.Devices.unmade reads as unmade; False without devices."""
+        devices = self._devices
+        if devices is None:
+            return False
+        claimed = switch_clauses(answer, read=turn.read_devices)
+        return any(devices.unmade(clause, turn.message.text, turn.switched) for clause in claimed)
 
     def set_consolidate(self, consolidate: Consolidate) -> None:
         self._consolidate = consolidate
@@ -554,6 +596,8 @@ class Tools:
             kept = f"({name} result not kept: web results are never stored)"
         elif name == "read_link" and result.startswith(prompts.VIDEO_MARK):  # captions are never stored
             kept = prompts.VIDEO_STUB
+        elif name in DOCUMENT_TOOLS:  # her index keeps the text; the log and later replays never do
+            kept = f"({name} result not kept: a document's text stays in her index only)"
         elif name in ("places_search", "route") and result.startswith(("Places for", "Route by")):
             kept = f"({name} result not kept: Google Maps content is not stored)"  # Google's terms
         else:
@@ -584,6 +628,10 @@ class Tools:
         if name.startswith("project_"):
             turn.read_project = turn.read_project or self._projects is not None  # off: nothing was read
             return await self._project_tool(name, args)
+        if name in DOCUMENT_TOOLS:
+            turn.untrusted = True  # a document's text: no profile change, no reminder, devices wait for a yes
+            turn.read_documents = turn.read_documents or self._documents is not None  # off: nothing was read
+            return await self._document_tool(turn, name, args)
         if name.startswith("mail_"):
             turn.read_mail_or_calendar = True
             turn.read_mail = True
@@ -718,6 +766,11 @@ class Tools:
                 "Not searched: an answer that read the user's projects cannot search the web (private text must not go "
                 "to a search engine). Tell the user to ask for the search in a new message."
             )
+        if turn.read_documents:
+            return (
+                "Not searched: an answer that read the user's documents cannot search the web (private text must not "
+                "go to a search engine). Tell the user to ask for the search in a new message."
+            )
         on_call = turn.message.text.startswith(prompts.CALL_MARK)  # a call turn has 45 s in all: one search
         if turn.searches >= (1 if on_call else MAX_SEARCHES):
             limit = "one search per message is" if on_call else "two searches per message are"
@@ -751,6 +804,11 @@ class Tools:
             return (
                 "Not looked up: an answer that read the user's projects cannot ask Google Maps (private text must not "
                 "go to Google). Tell the user to ask again in a new message."
+            )
+        if turn.read_documents:
+            return (
+                "Not looked up: an answer that read the user's documents cannot ask Google Maps (private text must "
+                "not go to Google). Tell the user to ask again in a new message."
             )
         on_call = turn.message.text.startswith(prompts.CALL_MARK)
         if turn.maps_calls >= (1 if on_call else MAPS_PER_ANSWER):
@@ -837,6 +895,7 @@ class Tools:
             raise ValueError("lights and plugs are not set up.")
         device = str(args.get("device") or "")
         if name == "device_status":
+            turn.read_devices = True
             return await self._devices.status(device)
         if name == "device_set":
             raw = args.get("brightness")
@@ -848,7 +907,7 @@ class Tools:
                     raise ValueError("brightness must be a whole number from 1 to 100") from None
             power = str(args["power"]).strip().lower() if args.get("power") else None
             colour = str(args["colour"]) if args.get("colour") else None
-            return await self._devices.set(
+            result = await self._devices.set(
                 device,
                 power=power,
                 brightness=brightness,
@@ -858,6 +917,9 @@ class Tools:
                 aci=turn.message.peer_aci,
                 spoken=turn.message.text.startswith(prompts.CALL_MARK),
             )
+            if result.startswith("Done"):
+                turn.switched.add(self._devices.find(device).name)
+            return result
         raise ValueError(f"unknown tool {name!r}")
 
     async def _project_tool(self, name: str, args: dict[str, Any]) -> str:
@@ -873,6 +935,35 @@ class Tools:
         if name == "project_search":
             return await self._projects.search(project, str(args.get("words", "")))
         raise ValueError(f"unknown tool {name!r}")
+
+    async def _document_tool(self, turn: Turn, name: str, args: dict[str, Any]) -> str:
+        """The user's documents: a look first (a PDF put in the folder a minute ago is found), never on a call (the
+        index only); then the passages, or one page."""
+        if self._documents is None:  # off without [documents]: she says how the owner turns them on
+            raise ValueError(prompts.DOCUMENTS_OFF_RESULT)
+        if not turn.message.text.startswith(prompts.CALL_MARK):
+            look = await self._documents.look(budget=LOOK_ON_REQUEST_SECONDS)
+            if look.problem == "refused":  # macOS itself refuses her account: the share would change nothing
+                return prompts.DOCUMENTS_REFUSED_RESULT
+            if look.problem:
+                return prompts.DOCUMENTS_CLOSED_RESULT
+        if name == "search_documents":
+            result = self._documents.search_text(str(args.get("words") or ""))
+            named = {file.id for file in self._documents.unannounced() if f'"{file.path}", page' in result}
+        else:
+            raw = args.get("page")
+            try:
+                page = 1 if raw in (None, "") else int(str(raw).strip())
+            except ValueError:
+                raise ValueError("page must be a whole number from 1") from None
+            if page < 1:
+                raise ValueError("page must be a whole number from 1")
+            document = str(args.get("document") or "")
+            result = self._documents.read_text(document, page)
+            asked = self._documents.find(document)
+            named = {asked.id} if asked is not None and not asked.announced else set()
+        self._documents.mark_announced(sorted(named))  # asked about: the note on new PDFs never names it after
+        return result
 
     def _search(self, turn: Turn, query: str, limit: Any) -> str:
         if not query.strip():
@@ -922,6 +1013,11 @@ class Tools:
             return (
                 "Not saved: facts are never taken from web results. If the user wants something remembered, they can "
                 "say it in their own words in a new message."
+            )
+        if turn.read_documents:
+            return (
+                "Not saved: facts are never taken from the user's documents. If the user wants something remembered, "
+                "they can say it in their own words in a new message."
             )
         if turn.untrusted and turn.learned_document_id is None:  # a page, project file or history was read
             return (

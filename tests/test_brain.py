@@ -11,6 +11,7 @@ from local_assistant.fetcher import Page
 from local_assistant.gemma import Completion, GemmaUnavailableError, ToolCall
 from local_assistant.profile import Profile
 from local_assistant.reminders import Reminders
+from local_assistant.signal_text import styled, unmarked
 from local_assistant.store import Message, Store
 from local_assistant.tools import TOOL_SCHEMAS, Tools
 from local_assistant.video import Captions, KeptVideos, VideoReader
@@ -108,7 +109,16 @@ async def test_profile_changes_are_reported_by_code(store: Store) -> None:
     gemma = FakeGemma(tool("remember", fact="The user likes tea."), text("Noted: you like tea."))
     _, _, brain = make(store, gemma)
     reply = await brain.answer(store.current_conversation(), incoming(store, "remember that I like tea"))
-    assert reply.notice == "Profile changes:\nSaved #1: The user likes tea. (/forget 1 undoes it)"
+    assert reply.notice == "**Profile changes**\nSaved #1: The user likes tea. (/forget 1 undoes it)"
+
+
+@pytest.mark.parametrize("head", ["**Profile changes**", "## Profile changes", "*Profile changes:*"])
+async def test_a_fake_profile_notice_in_markup_is_removed_too(store: Store, head: str) -> None:
+    """Code's notice heading is bold now: her imitation of it, in any markup, is no notice either."""
+    fake = f"Noted: you play piano.\n\n{head}\nSaved #2: The user plays piano. (/forget 2 undoes it)"
+    _, _, brain = make(store, FakeGemma(text(fake), text(fake)))
+    reply = await brain.answer(store.current_conversation(), incoming(store, "remember that I play piano"))
+    assert reply.text == "Noted: you play piano." and reply.notice == NOTHING_SAVED
 
 
 async def test_no_notice_without_profile_changes(store: Store) -> None:
@@ -151,7 +161,7 @@ async def test_noted_without_saving_gets_one_correction(store: Store) -> None:
     reply = await brain.answer(store.current_conversation(), incoming(store, "remember that I play piano"))
     assert [f.text for f in profile.facts()] == ["The user plays piano."]
     assert gemma.calls[1]["messages"][-1] == {"role": "user", "content": prompts.NOTED_NUDGE}
-    assert reply.notice.startswith("Profile changes:\nSaved #1")
+    assert reply.notice.startswith("**Profile changes**\nSaved #1")
 
 
 async def test_an_empty_answer_is_retried_with_a_nudge(store: Store) -> None:
@@ -333,7 +343,7 @@ async def test_web_sources_are_a_code_written_note(store: Store) -> None:
     context = ContextBuilder(store, profile, TZ)
     brain = Brain(gemma, context, Tools(store, profile, TZ, no_fetch, web=FakeWeb({"ajax": found})))
     reply = await brain.answer(store.current_conversation(), incoming(store, "did Ajax win?"))
-    assert reply.sources == "🔎 Sources:\n• nos.nl: https://nos.nl/artikel/1\n• espn.com: https://www.espn.com/2"
+    assert reply.sources == "🔎 **Sources**\n• nos.nl: https://nos.nl/artikel/1\n• espn.com: https://www.espn.com/2"
 
 
 async def test_no_sources_note_without_a_web_search(store: Store) -> None:
@@ -369,7 +379,7 @@ async def test_links_stay_in_an_answer_without_a_search(store: Store) -> None:
 
 
 # the first confirmation in a store also says only it means a reminder is set
-FIRST_SET = 'Reminder set (#1): Fri 9 Oct 07:00 · "call mum". /reminders to see or cancel.\nOnly this note means a reminder is set.'
+FIRST_SET = '**Reminder set** (#1): Fri 9 Oct 07:00 · "call mum". /reminders to see or cancel.\nOnly this note means a reminder is set.'
 
 
 def with_reminders(store: Store, gemma: FakeGemma) -> Brain:
@@ -411,6 +421,23 @@ async def test_a_claimed_reminder_without_a_set_gets_the_guard_note(store: Store
 
 
 @pytest.mark.parametrize(
+    "claim",
+    [
+        "**Reminder set** (#5): Tue 13 Oct 07:00.",  # on the phone: code's own bold note
+        "I **will call you** at 07:00.",
+        "I've **set a reminder** for 07:00.",
+        "Your reminder is **set**",
+    ],
+)
+@pytest.mark.parametrize("message", ["hm", "remind me at 7"])
+async def test_a_claim_in_markup_without_a_set_gets_the_guard_note(store: Store, claim: str, message: str) -> None:
+    """The phone shows the text without its markers (signal_text), so the guard reads it that way too."""
+    brain = with_reminders(store, FakeGemma(text(claim)))
+    reply = await brain.answer(store.current_conversation(), incoming(store, message))
+    assert reply.text == claim and reply.reminder == prompts.REMINDER_GUARD
+
+
+@pytest.mark.parametrize(
     "answer",
     [
         "I couldn't set a reminder: that time has passed.",
@@ -440,7 +467,7 @@ async def test_no_guard_note_without_a_claim(store: Store, answer: str) -> None:
 async def test_the_noted_fact_after_a_remember_is_no_reminder_claim(store: Store, fact: str, answer: str) -> None:
     gemma = FakeGemma(tool("remember", fact=fact), text(answer))
     reply = await with_reminders(store, gemma).answer(store.current_conversation(), incoming(store, "remember that"))
-    assert reply.notice.startswith("Profile changes:") and reply.reminder == ""
+    assert reply.notice.startswith("**Profile changes**") and reply.reminder == ""
 
 
 async def test_a_claim_beside_the_noted_fact_still_gets_the_note(store: Store) -> None:
@@ -512,6 +539,9 @@ NOT_SET = "No reminder was set: that time has passed."
         (PAST, "Ik heb de herinnering om 17:00 uur voor je ingesteld.", NOT_SET),
         ({"at": "", "text": "mama bellen"}, "Je herinnering staat klaar.", "No reminder was set: no time was given."),
         (PAST, "Sorry, 7:00 has passed. Tomorrow instead?", f"Sorry, 7:00 has passed. Tomorrow instead?\n{NOT_SET}"),
+        # in markup, read as the phone shows it
+        (PAST, "**Reminder set** (#1): Wed 7 Oct 07:00.", NOT_SET),
+        (PAST, "Sorry about that. I've **set a reminder** for 7:00.", f"Sorry about that.\n{NOT_SET}"),
     ],
 )
 async def test_a_set_reminder_that_stored_nothing_drops_her_reminder_talk_and_adds_codes_line(
@@ -572,7 +602,7 @@ async def test_one_set_and_one_refused_in_an_answer_notes_the_refused_one(store:
     reply = await brain.answer(store.current_conversation(), incoming(store, "remind me of both"))
     assert [r.text for r in store.open_reminders(ME)] == ["call mum"]
     assert reply.reminder.splitlines() == [
-        'Reminder set (#1): Fri 9 Oct 07:00 · "call mum". /reminders to see or cancel.',
+        '**Reminder set** (#1): Fri 9 Oct 07:00 · "call mum". /reminders to see or cancel.',
         prompts.REMINDER_CONTRACT,
         'Not set: "water the plants" (that time has passed).',
     ]
@@ -621,7 +651,7 @@ async def test_unreadable_arguments_then_a_stored_try_is_a_retry(store: Store) -
     )
     reply = await with_reminders(store, gemma).answer(store.current_conversation(), incoming(store, "remind me"))
     assert reply.reminder.splitlines() == [
-        'Reminder set (#1): Fri 9 Oct 07:00 · "cook". /reminders to see or cancel.',
+        '**Reminder set** (#1): Fri 9 Oct 07:00 · "cook". /reminders to see or cancel.',
         prompts.REMINDER_CONTRACT,
     ]
     assert reply.reminder_spoken == "Reminder set for Friday 9 October, 07:00."
@@ -743,7 +773,7 @@ async def test_in_another_language_a_set_one_keeps_her_text(store: Store) -> Non
     reply = await with_reminders(store, gemma).answer(
         store.current_conversation(), incoming(store, "herinner me morgen om 7 uur")
     )
-    assert (reply.text, reply.not_set) == ("Komt goed!", "") and reply.reminder.startswith("Reminder set (#1)")
+    assert (reply.text, reply.not_set) == ("Komt goed!", "") and reply.reminder.startswith("**Reminder set** (#1)")
 
 
 async def test_in_another_language_a_claim_without_any_set_keeps_her_text_and_gets_the_note(store: Store) -> None:
@@ -825,6 +855,43 @@ async def test_links_after_outside_text_are_defanged_unless_the_user_sent_them(s
         "The club says to log in at evil[.]example/login or www[.]evil[.]example/pay (see evil[.]com). "
         "The page itself is https://club.example.org/news. Mail alex@example.com."
     )
+
+
+@pytest.mark.parametrize(
+    ("answer", "sent"),
+    [
+        ("Go to **paypal-login**.com/verify", "Go to **paypal-login[.]com/verify"),
+        ("Visit *evil*.com", "Visit *evil[.]com"),
+        ("Visit `evil`.com", "Visit `evil[.]com"),
+        ("Visit evil.**com** today", "Visit evil[.]com** today"),
+        ("Log in at **https**://evil.com now", "Log in at **evil[.]com now"),
+        ("See **the club**: https://club.example.org/news", "See **the club**: https://club.example.org/news"),
+    ],
+)
+async def test_a_link_split_by_markup_is_defanged_after_outside_text(store: Store, answer: str, sent: str) -> None:
+    """The phone shows the text without its markers (signal_text), so the link checks read it that way too: a link
+    only that reading has is defanged where it stands, the markers inside it dropped; the user's own link stays."""
+    gemma = FakeGemma(tool("read_link", url="https://club.example.org/news"), text(answer))
+    reply = await outside_turn(store, gemma).answer(
+        store.current_conversation(), incoming(store, "what does https://club.example.org/news say?")
+    )
+    assert reply.text == sent
+    shown = unmarked(styled(reply.text).text)
+    assert "evil.com" not in shown and "paypal-login.com" not in shown
+
+
+async def test_a_link_split_by_markup_is_left_out_after_a_search(store: Store) -> None:
+    from local_assistant.web_search import WebResult
+    from tests.fakes.fake_web import FakeWeb
+
+    found = [WebResult("Ajax wint", "https://nos.nl/artikel/1", "nos.nl", "", "Log in at evil.example/login")]
+    gemma = FakeGemma(tool("web_search", query="Ajax score"), text("Ajax won. Log in at **evil**.example/login now."))
+    profile = Profile(store)
+    brain = Brain(
+        gemma, ContextBuilder(store, profile, TZ), Tools(store, profile, TZ, no_fetch, web=FakeWeb({"ajax": found}))
+    )
+    reply = await brain.answer(store.current_conversation(), incoming(store, "did Ajax win?"))
+    assert reply.text == "Ajax won. Log in at ** now."
 
 
 async def test_links_are_defanged_while_outside_text_is_still_in_her_context(store: Store) -> None:
@@ -1258,3 +1325,191 @@ async def test_practice_keeps_links_without_outside_text_even_after_outside_text
     message = practice_message(store, practice.id, "Ik heb een website.", T0 + 1)
     reply = await brain.answer(store.conversation(practice.id), message, practice=practice_turn())
     assert reply.text == "Leuk! Is example.com jouw site? Wat staat erop?"
+
+
+# a device claim with no device change: code's line "Nothing was switched." (English first, as the reminder guard)
+
+
+async def test_a_switch_claimed_without_a_device_change_gets_codes_line(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gemma = FakeGemma(text("Done! I've turned off the living room lamp."))
+    brain = with_all_tools(store, gemma, tmp_path, monkeypatch)
+    reply = await brain.answer(store.current_conversation(), incoming(store, "Turn off the living room lamp please"))
+    assert reply.text == "Done! I've turned off the living room lamp."  # her words stay
+    assert (reply.device, reply.device_spoken) == ("Nothing was switched.", "Nothing was switched.")
+
+
+async def test_a_switch_that_was_done_gets_no_line(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gemma = FakeGemma(tool("device_set", device="living room lamp", power="off"), text("I've turned it off."))
+    brain = with_all_tools(store, gemma, tmp_path, monkeypatch)
+    reply = await brain.answer(store.current_conversation(), incoming(store, "Turn off the living room lamp please"))
+    assert reply.device == ""
+
+
+async def test_a_switch_that_waits_for_a_yes_is_not_done(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gemma = FakeGemma(tool("device_set", device="heater", power="off"), text("I've switched the heater off."))
+    brain = with_all_tools(store, gemma, tmp_path, monkeypatch)
+    reply = await brain.answer(store.current_conversation(), incoming(store, "Switch off the heater"))
+    assert reply.device == "Nothing was switched."  # "ask first": nothing happens before the user's yes
+
+
+async def test_a_state_read_is_no_claim(store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    gemma = FakeGemma(tool("device_status", device="bedroom light"), text("The bedroom light is now on, at 60%."))
+    brain = with_all_tools(store, gemma, tmp_path, monkeypatch)
+    reply = await brain.answer(store.current_conversation(), incoming(store, "Is the bedroom light on?"))
+    assert reply.device == ""
+
+
+async def test_a_claim_about_music_is_not_a_device_claim(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gemma = FakeGemma(text("I've switched it off."))
+    brain = with_all_tools(store, gemma, tmp_path, monkeypatch)
+    reply = await brain.answer(store.current_conversation(), incoming(store, "Stop the music on Spotify, please"))
+    assert reply.device == ""  # not about lights or plugs (music has its own rule and notes)
+
+
+async def test_without_devices_there_is_no_device_line(store: Store) -> None:
+    gemma = FakeGemma(text("I've turned off the living room lamp."))
+    _, _, brain = make(store, gemma)
+    reply = await brain.answer(store.current_conversation(), incoming(store, "Turn off the living room lamp please"))
+    assert reply.device == ""
+
+
+async def test_a_short_claim_with_no_device_named_gets_no_line(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "Turn it off" may mean the music: only a device word or a device's name, in her answer or the message, counts."""
+    gemma = FakeGemma(text("I turned it off."))
+    brain = with_all_tools(store, gemma, tmp_path, monkeypatch)
+    reply = await brain.answer(store.current_conversation(), incoming(store, "turn it off"))
+    assert reply.device == ""
+
+
+async def test_a_short_message_and_a_claim_naming_a_device_gets_the_line(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gemma = FakeGemma(text("I turned the lamp off."))
+    brain = with_all_tools(store, gemma, tmp_path, monkeypatch)
+    reply = await brain.answer(store.current_conversation(), incoming(store, "turn it off"))
+    assert reply.device == "Nothing was switched."
+
+
+# the guard reads normal talk as talk (review of 14 Oct): advice, her ask-first wording, an earlier switch, a state she
+# read, music; and each device a claim names counts on its own
+
+
+def incoming_later(store: Store, text_: str) -> Message:
+    """A second message, a minute after `incoming`'s."""
+    message_id = store.add_incoming(store.current_conversation().id, ME, T0 + 60_000, "text", text_)
+    assert message_id is not None
+    return store.message(message_id)
+
+
+@pytest.mark.parametrize(
+    ("asked", "answer"),
+    [
+        ("Any tips to sleep better?", "Turning off the lights an hour before bed helps you sleep."),
+        ("How do I wind down?", "Dimming the lights in the evening can help you wind down."),
+        ("Turn the lamp off", "Okay, turning the lamp off would need your yes first."),
+        ("Stop the music in the living room", "I have turned off the music in the living room."),
+        ("Quieter in the living room please", "I set the living room speaker to 30%."),
+    ],
+)
+async def test_normal_talk_gets_no_device_line(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, asked: str, answer: str
+) -> None:
+    brain = with_all_tools(store, FakeGemma(text(answer)), tmp_path, monkeypatch)
+    reply = await brain.answer(store.current_conversation(), incoming(store, asked))
+    assert reply.device == "", answer
+
+
+async def test_her_ask_first_wording_after_a_refused_switch_gets_no_line(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gemma = FakeGemma(
+        tool("device_set", device="heater", power="off"),
+        text("Sure, switching it off needs your yes: reply yes within 2 minutes."),
+    )
+    brain = with_all_tools(store, gemma, tmp_path, monkeypatch)
+    reply = await brain.answer(store.current_conversation(), incoming(store, "Switch off the heater"))
+    assert reply.device == ""
+
+
+@pytest.mark.parametrize(
+    "answer", ["It looks like the living room lamp has been turned off.", "Yes, the lamp has been switched off."]
+)
+async def test_a_passive_report_after_a_status_read_gets_no_line(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answer: str
+) -> None:
+    gemma = FakeGemma(tool("device_status", device="living room lamp"), text(answer))
+    brain = with_all_tools(store, gemma, tmp_path, monkeypatch)
+    reply = await brain.answer(store.current_conversation(), incoming(store, "Is the living room lamp off?"))
+    assert reply.device == ""
+
+
+@pytest.mark.parametrize(
+    "answer",
+    ["Yes, I turned off the living room lamp a few minutes ago.", "Earlier today I switched the lamp off for you."],
+)
+async def test_a_true_word_about_an_earlier_switch_gets_no_line(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answer: str
+) -> None:
+    gemma = FakeGemma(tool("device_set", device="living room lamp", power="off"), text("Done."), text(answer))
+    brain = with_all_tools(store, gemma, tmp_path, monkeypatch)
+    first = await brain.answer(store.current_conversation(), incoming(store, "Turn off the living room lamp"))
+    reply = await brain.answer(store.current_conversation(), incoming_later(store, "Did you turn off the lamp?"))
+    assert (first.device, reply.device) == ("", "")
+
+
+async def test_an_earlier_switch_that_never_happened_gets_the_line(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gemma = FakeGemma(text("Yes, I turned off the living room lamp a few minutes ago."))
+    brain = with_all_tools(store, gemma, tmp_path, monkeypatch)
+    reply = await brain.answer(store.current_conversation(), incoming(store, "Did you turn off the lamp?"))
+    assert reply.device == "Nothing was switched."
+
+
+async def test_an_earlier_switch_of_another_device_gets_the_line(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gemma = FakeGemma(
+        tool("device_set", device="bedroom light", power="on"),
+        text("Done."),
+        text("Yes, I switched the living room lamp off earlier."),
+    )
+    brain = with_all_tools(store, gemma, tmp_path, monkeypatch)
+    await brain.answer(store.current_conversation(), incoming(store, "Turn on the bedroom light"))
+    reply = await brain.answer(store.current_conversation(), incoming_later(store, "Did you turn off the lamp?"))
+    assert reply.device == "Nothing was switched."
+
+
+async def test_a_claim_naming_a_device_that_was_not_switched_gets_the_line(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One device_set that returned "Done" vouches for its own device only: the heater here waits for a yes."""
+    gemma = FakeGemma(
+        tool("device_set", device="living room lamp", power="off"),
+        tool("device_set", device="heater", power="off"),
+        text("I've turned off the living room lamp and the heater."),
+    )
+    brain = with_all_tools(store, gemma, tmp_path, monkeypatch)
+    reply = await brain.answer(
+        store.current_conversation(), incoming(store, "Turn off the living room lamp and the heater")
+    )
+    assert (reply.device, reply.device_spoken) == ("Nothing else was switched.", "Nothing else was switched.")
+
+
+async def test_it_after_a_message_naming_a_device_gets_the_line(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gemma = FakeGemma(text("Done, I switched it off."))
+    brain = with_all_tools(store, gemma, tmp_path, monkeypatch)
+    reply = await brain.answer(store.current_conversation(), incoming(store, "Turn off the living room lamp please"))
+    assert reply.device == "Nothing was switched."

@@ -14,42 +14,61 @@ Mac's own checks (`hostsec`: firewall, SSH passwords, FileVault, her file modes,
 its PIN) and those of her own user (`ownuser`), mapped one to one. Run as `_estia` (`/usr/bin/sudo /usr/local/estia/bin/estia
 doctor`), a check that needs root shows ! with the owner's command: doctor never escalates.
 
+"Always on" means alive, not just installed: launchd's state and last exit code for the bridge (`launchctl print`, fixed
+argv, read-only) and its last sign of life (`last_alive` in the database, written every minute): running with a sign of
+life in the last `ALIVE_SECONDS` is ✓; no sign of life for longer, restarting, stopped or not loaded is ✗ with where to
+look (the logs). launchd's run count is never used: deploys, reboots and restarts raise it too.
+
 An optional part whose setup is in place shows what its last real use did, from the bridge's status.json
 (part_status): ✓ working, ○ set up but not tested yet, ✗ failing with the fix. Doctor never uses a part itself, so
 a failure whose fix was saved since (a sign-in, key, login, secret address or helper) is ○ again until the next use.
+One read goes out: with Hue lights, the device helper's `hue-check` asks the paired Hue Bridge, at its own address on
+the home network and with the certificate saved at pairing, which lights it has (nothing is switched; the key stays
+in the helper).
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import errno
 import json
 import os
 import platform
+import re
+import shlex
 import shutil
 import sqlite3
 import stat
+import subprocess
 import sys
 import time
 import urllib.request
+from collections.abc import Collection
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from local_assistant import hostsec, ownuser, prompts
+from local_assistant import hostsec, ownuser, prompts, share
 from local_assistant.config import (
+    CODE_ROOT,
     DEFAULT_AVATAR,
     DEFAULT_CONFIG_PATH,
     DEFAULT_NAME,
+    INTERRUPT_NEW,
+    OWNER_HOME,
     AvatarError,
     CalendarSource,
     Config,
     ConfigError,
     find_java_home,
+    is_estia_kb,
     load_config,
     read_avatar,
 )
+from local_assistant.devices import helper_env
+from local_assistant.documents import SHARE_TOKEN
 from local_assistant.gemma import is_remote
 from local_assistant.hostsec import Check
 from local_assistant.initiative import ENABLED_KEY, QUIET_KEY, Settings
@@ -61,6 +80,7 @@ from local_assistant.part_status import (
     calendar_mailbox,
     calendar_part,
     describe,
+    in_estia_kb,
     label_of,
     mail_part,
     read,
@@ -80,6 +100,13 @@ _STATES: dict[str, Status] = {"working": "ok", "untested": "untested", "failing"
 TOOLS = ("signal-cli", "ollama", "uv")
 PLACEHOLDER_NUMBER = "+300000000000"  # config.example.toml's values
 PLACEHOLDER_ACI = "00000000-0000-0000-0000-000000000000"
+ALIVE_KEY = "last_alive"  # app.ALIVE_KEY: the bridge writes it after signal-cli subscribed, then every 60 s
+ALIVE_SECONDS = 180  # a sign of life older than this (three missed beats) means it is not alive
+LAUNCHCTL = "/bin/launchctl"
+PMSET = "/usr/bin/pmset"  # read only: `pmset -g`
+HUE_CHECK_SECONDS = 20  # doctor's limit for the device helper's run (its own 12 s are checked between requests)
+_LAUNCHD_STATE = re.compile(r"^\s*state = (.+?)\s*$", re.MULTILINE)  # the first is the service's own
+_LAUNCHD_EXIT = re.compile(r"^\s*last exit code = (-?\d+)\b", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -93,8 +120,9 @@ class Finding:
 class Probe:
     """The outside world (replaced in tests)."""
 
-    def __init__(self, home: Path | None = None) -> None:
+    def __init__(self, home: Path | None = None, *, owner_sudo: str | None = None) -> None:
         self.home = home or Path.home()
+        self.owner_sudo = owner_sudo  # root's listing of your sudo rules (estia doctor passes it to her doctor)
 
     def which(self, name: str) -> str | None:
         return shutil.which(name)
@@ -117,7 +145,18 @@ class Probe:
 
     def security_checks(self, home: Path, bot_number: str) -> list[Check]:
         """The Mac's checks around her (read-only, fixed tools, nothing applied; `home`: hers)."""
-        return hostsec.doctor_checks(hostsec.Host(hostsec.estia_root(), say=lambda _line: None), home, bot_number)
+        host = hostsec.Host(hostsec.estia_root(), say=lambda _line: None)
+        return hostsec.doctor_checks(host, home, bot_number, sudo=self.sudo_check())
+
+    def sudo_check(self) -> Check | None:
+        """Passwordless sudo where doctor can read it: from root's listing of your rules (in her own user, estia doctor
+        lists them as root and hands them over), else as you without a password (hostsec.owner_sudo). None as her
+        without that listing, and under a test's root: sudo is never run there."""
+        if self.owner_sudo is not None:
+            return hostsec.sudo_listing(self.owner_sudo)
+        if hostsec.estia_root() != Path("/") or self.her_user():
+            return None
+        return hostsec.owner_sudo(hostsec.Host(Path("/"), say=lambda _line: None))
 
     def install_checks(self) -> list[Check]:
         """Her own user's checks: the user, the root-owned code, the service files, the rollback window."""
@@ -134,6 +173,71 @@ class Probe:
     def projects(self, cfg: Config) -> Access:
         """What this user can read in the projects folder (as her: what her project tools can read)."""
         return asyncio.run(Projects(cfg).access())
+
+    def bridge_launchd(self) -> str | None:
+        """`launchctl print` of the bridge's service (read-only, fixed argv, no shell); None when it cannot be asked:
+        never under a test's root, never longer than a few seconds."""
+        if hostsec.estia_root() != Path("/"):
+            return None
+        try:
+            done = subprocess.run(
+                [LAUNCHCTL, "print", f"system/{ownuser.BRIDGE}"],
+                capture_output=True,
+                text=True,
+                timeout=8,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return done.stdout + done.stderr
+
+    def hue_check(self, cfg: Config, lights: list[str]) -> dict[str, Any] | None:
+        """The device helper's read-only check of the paired Hue Bridge (`hue-check`: reachable, the certificate saved
+        at pairing, its key, which of these lights it has; nothing switched); None when it was not asked or gave no
+        answer: never under a test's root."""
+        if hostsec.estia_root() != Path("/"):
+            return None
+        try:
+            done = subprocess.run(
+                [*cfg.tapo_helper, "hue-check", *lights],
+                capture_output=True,
+                text=True,
+                timeout=HUE_CHECK_SECONDS,
+                check=False,
+                env=helper_env(),
+            )
+            data = json.loads(done.stdout.strip().splitlines()[-1])
+        except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def signal_cli_version(self, program: str) -> str | None:
+        """`signal-cli --version` of the program the bridge runs (fixed argv, no shell); None when it cannot be asked:
+        never under a test's root."""
+        found = shutil.which(program)
+        if hostsec.estia_root() != Path("/") or found is None:
+            return None
+        try:
+            done = subprocess.run([found, "--version"], capture_output=True, text=True, timeout=30, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return done.stdout.strip() if done.returncode == 0 else None
+
+    def power(self) -> str | None:
+        """`pmset -g`: the Mac's sleep and restart settings (read-only, fixed argv, no shell); None when it cannot be
+        asked: never under a test's root."""
+        if hostsec.estia_root() != Path("/"):
+            return None
+        try:
+            done = subprocess.run([PMSET, "-g"], capture_output=True, text=True, timeout=5, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return done.stdout if done.returncode == 0 else None
+
+    def open_home(self, home: Path, shared: Collection[Path]) -> tuple[list[Path], bool]:
+        """What directly in your home every account may open, and whether the whole home was read (as her: only the
+        usual names, by name). Read-only: nothing changes."""
+        return share.open_in_home(home, shared)
 
     def program_checks(self, cfg: Config) -> list[Check]:
         """What she runs: root's alone (her signal-cli, the call helper's Java and tunnel, the folders on her PATH)."""
@@ -178,6 +282,7 @@ def run(config_path: Path, probe: Probe) -> list[Finding]:
         _model(cfg, models),
         _model_pin(cfg, models, config_path if own else None),
         _signal_number(cfg, probe),
+        *([] if (signal_cli := _signal_cli(cfg, probe)) is None else [signal_cli]),
         _picture(cfg),
         _personality(config_path.parent, cfg.name, own=own),
         _language(cfg, probe),
@@ -190,10 +295,61 @@ def run(config_path: Path, probe: Probe) -> list[Finding]:
         findings.append(_projects(cfg, probe, own))
     findings += _signal_security(cfg, probe.now())
     records = read(cfg.data_dir / "status.json")  # what the bridge saw; nothing known without it
-    findings += _optional_parts(cfg, config_path.parent, probe, _States(cfg, config_path.parent, records, probe.now()))
-    findings.append(_daemon())
+    states = _States(cfg, config_path.parent, records, probe.now(), config_path)
+    findings += _optional_parts(cfg, config_path.parent, probe, states)
+    home = _home_open(cfg, probe, own=own)
+    if home is not None:
+        findings.append(home)
+    findings.append(_daemon(cfg, probe, own))
+    power = _power(probe)
+    if power is not None:
+        findings.append(power)
     findings += _host(probe, cfg)
     return findings
+
+
+def _home_open(cfg: Config, probe: Probe, *, own: bool) -> Finding | None:
+    """In her own user, with Projects or Documents on, her account passes through your home by name: what in it
+    lets every account in, she may open too (finding 32; the share scripts name the same). As her, doctor cannot list
+    your home: it looks up the usual names and says so. No line before her own user, without a share, or with
+    nothing open."""
+    if not own:
+        return None
+    shared = {
+        path: Path(match.group(0))
+        for on, path in ((cfg.projects_enabled, cfg.projects_root), (cfg.documents_enabled, cfg.documents_folder))
+        if on and (match := OWNER_HOME.match(str(path)))
+    }
+    if not shared:
+        return None
+    home = next(iter(shared.values()))  # yours: the share opens only folders in your own home
+    found, whole = probe.open_home(home, [path for path, its_home in shared.items() if its_home == home])
+    if not found:
+        return None
+    text = share.OPEN_TEXT.format(names=share.open_names(found))
+    if not whole:
+        text += prompts.DOCTOR_HOME_USUAL_NAMES
+    return Finding("warn", "Your home", text, share.OPEN_FIX.format(paths=shlex.join(str(path) for path in found)))
+
+
+def _power(probe: Probe) -> Finding | None:
+    """Whether she keeps running: a Mac that sleeps stops her, and one without autorestart stays off after a power
+    cut (setup_assistant.md, 2.8). A laptop has no autorestart: there only sleep counts. Not read: no line."""
+    text = probe.power()
+    sleep = re.search(r"^\s*sleep\s+(\d+)", text or "", re.MULTILINE)
+    restart = re.search(r"^\s*autorestart\s+(\d+)", text or "", re.MULTILINE)
+    if sleep is None and restart is None:
+        return None
+    problems = []
+    if sleep is not None and sleep.group(1) != "0":
+        problems.append(prompts.DOCTOR_POWER_SLEEPS.format(minutes=sleep.group(1)))
+    if restart is not None and restart.group(1) != "1":
+        problems.append(prompts.DOCTOR_POWER_NO_RESTART)
+    if not problems:
+        return Finding("ok", "Power", prompts.DOCTOR_POWER_OK)
+    return Finding(
+        "warn", "Power", prompts.DOCTOR_POWER_OFF.format(problems="; ".join(problems)), prompts.DOCTOR_POWER_FIX
+    )
 
 
 def _finding(check: Check) -> Finding:
@@ -267,7 +423,7 @@ def _model_pin(cfg: Config, models: list[dict[str, Any]] | None, her_config: Pat
     """The model alias against `model_digest`: pinned and matching, pinned and not (answers paused), or not pinned
     (with the line that pins the digest Ollama lists now). `her_config`: she runs as her own user, so the fix says how
     to edit her config as her and restart her."""
-    how = prompts.DOCTOR_OWN_EDIT.format(path=her_config) if her_config is not None else ""
+    how = prompts.DOCTOR_OWN_EDIT if her_config is not None else ""
     base = _ollama(cfg)
     wanted = cfg.model if ":" in cfg.model else f"{cfg.model}:latest"
     listed = next((item for item in models or [] if item.get("name") == wanted), None)
@@ -356,26 +512,42 @@ def _model(cfg: Config, models: list[dict[str, Any]] | None) -> Finding:
         "fail",
         "Model",
         f"Ollama runs but has no model called {cfg.model}",
-        f"ollama pull {cfg.model}"
-        if cfg.model != "local-worker"
-        else "ollama pull gemma4:26b, then create local-worker from it (setup_assistant.md, 2.2)",
+        f"ollama pull {cfg.model}" if cfg.model != "local-worker" else f"run {prompts.SETUP_MODEL_FIX}",
     )
 
 
 def _signal_number(cfg: Config, probe: Probe) -> Finding:
-    accounts = probe.home / ".local/share/signal-cli/data/accounts.json"
+    """The bot's number in signal-cli's list, and its own account file not saying the registration is unfinished:
+    signal-cli lists a number as soon as register starts, before the SMS code (an unreadable file changes nothing)."""
+    signal_data = probe.home / ".local/share/signal-cli"
     try:
-        listed = json.loads(accounts.read_text(encoding="utf-8")).get("accounts", [])
-        registered = any(isinstance(item, dict) and item.get("number") == cfg.bot_number for item in listed)
-    except (OSError, ValueError, AttributeError):
-        registered = False
-    if registered:
-        return Finding("ok", "Signal number", "the bot's number is registered with signal-cli")
+        entry = next(iter(hostsec.signal_listed(signal_data, cfg.bot_number)), None) if cfg.bot_number else None
+    except (OSError, ValueError):
+        entry = None
+    if entry is None:
+        return Finding(
+            "fail",
+            "Signal number",
+            "signal-cli has no account for bot_number",
+            "register the bot's number: setup_assistant.md, 2.3 (signal-cli ... register, then verify)",
+        )
+    account = hostsec.account_file(signal_data, entry)  # by signal-cli's own name only: never a path
+    if account is not None and account.get("registered") is False:
+        return Finding("fail", "Signal number", prompts.DOCTOR_SIGNAL_UNFINISHED, prompts.DOCTOR_SIGNAL_UNFINISHED_FIX)
+    return Finding("ok", "Signal number", "the bot's number is registered with signal-cli")
+
+
+def _signal_cli(cfg: Config, probe: Probe) -> Finding | None:
+    """The version of the signal-cli the bridge runs: written for 0.14.x (its register, verify and receive requests);
+    not read, no line."""
+    text = probe.signal_cli_version(cfg.signal_cli)
+    if not text:
+        return None
+    version = text.split()[-1]
+    if version.startswith("0.14."):
+        return Finding("ok", "signal-cli", text)
     return Finding(
-        "fail",
-        "Signal number",
-        "signal-cli has no account for bot_number",
-        "register the bot's number: setup_assistant.md, 2.3 (signal-cli ... register, then verify)",
+        "warn", "signal-cli", prompts.DOCTOR_SIGNAL_CLI_OTHER.format(version=version), prompts.DOCTOR_SIGNAL_CLI_FIX
     )
 
 
@@ -400,7 +572,7 @@ def _personality(folder: Path, name: str, *, own: bool = False) -> Finding:
         return Finding("ok", "Personality", f"no soul.md: {name}'s built-in playful style (soul.example.md: your own)")
     soul = load_soul(path)
     if soul.problem:
-        chmod = f"/usr/bin/sudo -u {ownuser.ROLE_USER} chmod 600 {path}" if own else f"chmod 600 {path}"
+        chmod = f"{hostsec.SUDO} -u {ownuser.ROLE_USER} {hostsec.CHMOD} 600 {path}" if own else f"chmod 600 {path}"
         return Finding("warn", "Personality", f"soul.md is not used: {soul.problem}", f"{chmod}, then check it")
     return Finding("ok", "Personality", "soul.md")
 
@@ -529,9 +701,23 @@ def _language(cfg: Config, probe: Probe) -> Finding:
     return Finding("ok", "Language", name)
 
 
+def _interrupt_wording(cfg: Config) -> list[Finding]:
+    """[calls] in an older wording of what stops her: still read, with the new wording to write (and an old barge
+    beside interrupt, which is not read)."""
+    new = f'interrupt = "{INTERRUPT_NEW[cfg.calls_barge]}"'
+    found: list[Finding] = []
+    if cfg.calls_interrupt_old:
+        text = prompts.DOCTOR_INTERRUPT_OLD.format(old=cfg.calls_interrupt_old)
+        found.append(Finding("warn", "Calls setting", text, prompts.DOCTOR_INTERRUPT_OLD_FIX.format(new=new)))
+    if cfg.calls_barge_unread:
+        text = prompts.DOCTOR_BARGE_UNREAD.format(barge=cfg.calls_barge_unread, new=new)
+        found.append(Finding("warn", "Calls setting", text, prompts.DOCTOR_BARGE_UNREAD_FIX))
+    return found
+
+
 def _speech_detector(cfg: Config, probe: Probe) -> Finding:
-    """With [calls] barge = "speech": whether the voice service's speech detector is ready (else loudness stops her on
-    calls meanwhile)."""
+    """With [calls] interrupt = "only speech" (the default): whether the voice service's speech detector is ready (else
+    any sound stops her on calls meanwhile)."""
     try:
         health = probe.get_json(f"{cfg.voice_url.rstrip('/')}/health")
     except (OSError, ValueError):
@@ -539,10 +725,11 @@ def _speech_detector(cfg: Config, probe: Probe) -> Finding:
     state = detector_state(health if isinstance(health, dict) else None)
     if state == "ready":
         return Finding("ok", "Speech detector", "ready")
+    log = f"{ownuser.ESTIA} logs voice" if probe.moved() else prompts.DOCTOR_VOICE_LOG  # her output: /var/log/estia
     text, fix = {
         "old voice service": (prompts.DOCTOR_DETECTOR_OLD, prompts.DOCTOR_VOICE_REINSTALL),
-        "loading": (prompts.DOCTOR_DETECTOR_LOADING, prompts.DOCTOR_DETECTOR_LOADING_FIX),
-        "unavailable": (prompts.DOCTOR_DETECTOR_UNAVAILABLE, prompts.DOCTOR_DETECTOR_UNAVAILABLE_FIX),
+        "loading": (prompts.DOCTOR_DETECTOR_LOADING, prompts.DOCTOR_DETECTOR_LOADING_FIX.format(log=log)),
+        "unavailable": (prompts.DOCTOR_DETECTOR_UNAVAILABLE, prompts.DOCTOR_DETECTOR_UNAVAILABLE_FIX.format(log=log)),
     }.get(state, (prompts.DOCTOR_DETECTOR_SILENT, prompts.DOCTOR_VOICE_REINSTALL))
     return Finding("warn", "Speech detector", text, fix)
 
@@ -570,10 +757,12 @@ def _changed(path: Path) -> float | None:
         return None
 
 
-def _fix_saved(cfg: Config, folder: Path, part: str, reason: str) -> float | None:
+def _fix_saved(cfg: Config, folder: Path, part: str, reason: str, config: Path | None = None) -> float | None:
     """When the setup that fixes this failure was last saved; None for a failure that saving cannot fix (no answer,
     too many requests, ...). A mailbox's own sign-in time: renewing its token (mail does, hourly) is no sign-in, and
-    for missing consent only a sign-in that asked for Calendars.Read counts."""
+    for missing consent only a sign-in that asked for Calendars.Read counts. A CalDAV calendar's password: the time
+    scripts/set-calendar-password.sh saved it; its calendar's name, and a Hue light's id: the config's own time
+    (`config`)."""
     kind, _, name = part.partition(":")
     mailbox = calendar_mailbox(cfg, part)
     match kind, reason:
@@ -586,10 +775,16 @@ def _fix_saved(cfg: Config, folder: Path, part: str, reason: str) -> float | Non
             return tokens.signed_in_at(address, calendar=reason == "no_consent") if address else None
         case "spotify", "sign_in" | "refused":
             return SpotifyTokens(cfg.spotify_token_path, cfg.spotify_client_id).signed_in_at()
-        case "calendar", "not_set" | "gone":
+        case "calendar", "not_set" | "gone" | "no_password" | "password_refused":
             return _address_saved(cfg, folder / "calendar.env", part)
+        case "calendar", "no_calendar":
+            return _changed(config) if config is not None else None
+        case "devices", "no_light":  # the light's id corrected in [[tapo.devices]]
+            return _changed(config) if config is not None else None
         case "devices", "login":
             return _changed(folder / "tapo.env")
+        case "devices", "hue_key" | "certificate" | "not_paired":  # scripts/hue-pair.sh
+            return _changed(folder / "hue.env")
         case "web" | "places", "no_key" | "refused":
             return _changed(folder / "web.env")
         case "calendar", "helper_missing":
@@ -598,20 +793,23 @@ def _fix_saved(cfg: Config, folder: Path, part: str, reason: str) -> float | Non
             return _changed(Path(cfg.tapo_helper[0]))
         case "youtube", "helper_missing":
             return _changed(Path(cfg.youtube_helper[0]))
+        case "documents", "helper_missing":
+            return _changed(Path(cfg.documents_helper[0]))
     return None
 
 
 def _address_saved(cfg: Config, path: Path, part: str) -> float | None:
-    """When this Google calendar's address was saved: the time scripts/set-calendar-url.sh keeps next to it. Without
-    one (saved by hand), the file's own time, but only when no other Google calendar shares the file."""
-    google = [source for source in cfg.calendars if not source.mailbox]
-    source = next((source for source in google if calendar_part(source.name) == part), None)
+    """When this Google calendar's address or CalDAV calendar's password was saved: the time
+    scripts/set-calendar-url.sh or set-calendar-password.sh keeps next to it. Without one (saved by hand), the file's
+    own time, but only when no other calendar keeps its secret in the file."""
+    shared = [source for source in cfg.calendars if source.secret_key]
+    source = next((source for source in shared if calendar_part(source.name) == part), None)
     if source is None:
         return None
     saved = read_keys(path, (source.saved_key,)).get(source.saved_key, "")
     if saved.isascii() and saved.isdigit():
         return float(saved)
-    return _changed(path) if len(google) == 1 else None
+    return _changed(path) if len(shared) == 1 else None
 
 
 @dataclass(frozen=True)
@@ -622,12 +820,19 @@ class _States:
     folder: Path  # where the key, login and secret address files are
     records: dict[str, Record]
     now: float
+    config: Path | None = None  # the config file (its time: a calendar's name corrected there)
 
     def finding(self, part: str, detail: str = "") -> Finding:
         record = self.records.get(part)
-        saved = _fix_saved(self.cfg, self.folder, part, record.reason) if record is not None else None
+        saved = _fix_saved(self.cfg, self.folder, part, record.reason, self.config) if record is not None else None
         line = describe(
-            part, record, self.now, self.cfg.timezone, saved=saved, mailbox=calendar_mailbox(self.cfg, part)
+            part,
+            record,
+            self.now,
+            self.cfg.timezone,
+            saved=saved,
+            mailbox=calendar_mailbox(self.cfg, part),
+            estia_kb=in_estia_kb(self.cfg, part),
         )
         text = f"{line.text} ({detail})" if detail else line.text
         return Finding(_STATES[line.state], line.label, text, line.fix)
@@ -669,6 +874,7 @@ def _optional_parts(cfg: Config, folder: Path, probe: Probe, states: _States) ->
             )
         if cfg.calls_barge == "speech":
             found.append(_speech_detector(cfg, probe))
+        found += _interrupt_wording(cfg)
     if cfg.mail_enabled:
         tokens = TokenStore(cfg.mail_token_path)
         waiting = [account.name for account in cfg.mail_accounts if not tokens.refresh_token(account.address)]
@@ -704,6 +910,8 @@ def _optional_parts(cfg: Config, folder: Path, probe: Probe, states: _States) ->
             if Path(cfg.tapo_helper[0]).exists()
             else Finding("fail", "Lights and plugs", "the device helper is not set up", "cd tools/tapo && uv sync")
         )
+        if any(spec.hue for spec in cfg.tapo_devices):
+            found.append(_hue(cfg, folder, probe))
     if cfg.web_enabled:
         keys = read_keys(folder / "web.env", ("OLLAMA_API_KEY", "BRAVE_API_KEY"))
         found.append(
@@ -727,7 +935,148 @@ def _optional_parts(cfg: Config, folder: Path, probe: Probe, states: _States) ->
             else Finding("fail", "Spotify", "not signed in yet", "scripts/spotify-login.sh")
         )
     found.append(_youtube(cfg, states, own=probe.moved()))  # always on, with read_link
+    if cfg.documents_enabled:
+        found.append(_documents(cfg, states, own=probe.moved()))
     return found
+
+
+def _documents(cfg: Config, states: _States, *, own: bool) -> Finding:
+    """The documents helper in place and the folder as the user doctor runs as reads it (as her: listed, and the
+    share's token file read), then what her last look did. Read-only: the helper is not run, the folder not changed."""
+    helper = Path(cfg.documents_helper[0])
+    if not os.access(helper, os.X_OK):  # in her own user a deploy builds it in the release (deploy.DOCUMENTS_BINARY)
+        if own and _release_without_documents():  # the deploy's build failed: the release went live without it
+            fix = prompts.DOCTOR_DOCUMENTS_REBUILD_FIX.format(deploy=ownuser.DEPLOY_CMD)
+            return Finding("fail", "Documents", prompts.DOCTOR_DOCUMENTS_NOT_BUILT, fix)
+        fix = (
+            prompts.DOCTOR_YOUTUBE_DEPLOY_FIX.format(deploy=ownuser.DEPLOY_CMD)
+            if own
+            else prompts.DOCTOR_DOCUMENTS_BUILD_FIX
+        )
+        return Finding("fail", "Documents", prompts.DOCTOR_DOCUMENTS_NO_HELPER, fix)
+    folder = cfg.documents_folder
+    if own and folder.is_relative_to(ownuser.HOME):  # ~ in her config is her home: the folder is always yours
+        return Finding("fail", "Documents", prompts.DOCTOR_DOCUMENTS_HERS, prompts.DOCTOR_DOCUMENTS_HERS_FIX)
+    if own and not is_estia_kb(folder):  # the share opens only ~/Estia-KB: another folder stays closed to her
+        fix = prompts.DOCTOR_DOCUMENTS_HERS_FIX
+        if _guarded(folder):
+            fix = f"{fix}. {prompts.DOCTOR_DOCUMENTS_WHY_HOME}"
+        return Finding("fail", "Documents", prompts.DOCTOR_DOCUMENTS_NOT_KB.format(folder=folder), fix)
+    refused = Finding(
+        "fail",
+        "Documents",
+        prompts.DOCTOR_DOCUMENTS_REFUSED.format(folder=folder),
+        prompts.DOCTOR_DOCUMENTS_REFUSED_KB_FIX if is_estia_kb(folder) else prompts.DOCTOR_DOCUMENTS_REFUSED_FIX,
+    )
+    try:
+        listed = stat.S_ISDIR(os.lstat(folder).st_mode)
+    except FileNotFoundError:  # before her own user the bridge runs as you: the folder only, no share
+        fix = (
+            prompts.DOCTOR_DOCUMENTS_MAKE_FIX
+            if own
+            else prompts.DOCTOR_DOCUMENTS_MKDIR_FIX.format(folder=shlex.quote(str(folder)))
+        )
+        return Finding("fail", "Documents", prompts.DOCTOR_DOCUMENTS_MISSING.format(folder=folder), fix)
+    except PermissionError as exc:
+        if exc.errno == errno.EPERM:  # macOS itself refuses (not the ACL): the share would change nothing
+            return refused
+        listed = False
+    except OSError:
+        listed = False
+    if listed:
+        try:
+            with os.scandir(folder):
+                pass
+        except PermissionError as exc:
+            if exc.errno == errno.EPERM:
+                return refused
+            listed = False
+        except OSError:
+            listed = False
+    if not listed:
+        text = prompts.DOCTOR_DOCUMENTS_CLOSED.format(folder=folder)
+        return Finding("fail" if own else "warn", "Documents", text, prompts.DOCTOR_DOCUMENTS_SHARE_FIX)
+    if own:  # in her own user the share's token must be readable: the test file
+        try:
+            token = (folder / SHARE_TOKEN).read_text(encoding="ascii", errors="replace").strip()
+        except OSError:
+            token = ""
+        if not token:
+            text = prompts.DOCTOR_DOCUMENTS_UNSHARED.format(folder=folder)
+            return Finding("fail", "Documents", text, prompts.DOCTOR_DOCUMENTS_SHARE_FIX)
+    return states.finding("documents", prompts.DOCTOR_DOCUMENTS_OK.format(folder=folder))
+
+
+def _release_without_documents() -> bool:
+    """Whether the running release says its documents build failed (release.json `documents`: false; estia-deploy
+    goes live without the helper, an extra). False when it says nothing (a checkout, an older release)."""
+    try:
+        meta = json.loads((CODE_ROOT / "release.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(meta, dict) and meta.get("documents") is False
+
+
+_GUARDED = frozenset({"documents", "desktop", "downloads"})  # macOS guards them (TCC); a Mac's usual disk ignores case
+
+
+def _guarded(folder: Path) -> bool:
+    """Whether `folder` is in a home's Documents, Desktop or Downloads."""
+    text = str(folder)
+    home = OWNER_HOME.match(text)
+    below = Path(text[home.end() :]).parts if home else ()  # ("/", "Documents", ...)
+    return len(below) > 1 and below[1].casefold() in _GUARDED
+
+
+HUE_LABEL = "Hue Bridge"
+_HUE_PROBLEMS = {
+    "unreachable": (
+        "no answer at the address saved at pairing",
+        "check that the bridge is plugged in; a new address: scripts/hue-pair.sh <address>",
+    ),
+    "certificate": (
+        "its certificate is not the one saved at pairing: nothing was sent to it",
+        "if the bridge was replaced or reset: scripts/hue-pair.sh",
+    ),
+    "key": ("the bridge refused its key", "scripts/hue-pair.sh"),
+    "not_paired": ("not paired yet", "scripts/hue-pair.sh"),
+}
+_HUE_UNREAD = ("the bridge's answer could not be read", "run doctor again later")
+_HUE_FOUND = "reachable, its certificate the one saved at pairing"
+
+
+def _hue(cfg: Config, folder: Path, probe: Probe) -> Finding:
+    """With Hue lights: the bridge paired (a private hue.env, read here only for its mode), then the device helper's
+    read-only check: reachable, the certificate saved at pairing, its key, each configured Hue light on it, and which
+    of them the bridge cannot reach (switched off at the wall: a warning, the bridge is fine)."""
+    lights = [spec for spec in cfg.tapo_devices if spec.hue]
+    if not _private_file(folder / "hue.env"):
+        return Finding("fail", HUE_LABEL, *_HUE_PROBLEMS["not_paired"])
+    answer = probe.hue_check(cfg, [spec.light for spec in lights])
+    if answer is None:
+        return Finding("untested", HUE_LABEL, "paired, not checked: the device helper did not answer")
+    if not answer.get("ok"):
+        return Finding("fail", HUE_LABEL, *_HUE_PROBLEMS.get(str(answer.get("error")), _HUE_UNREAD))
+    found = answer.get("found")
+    found = found if isinstance(found, list) else []
+    missing = [spec.name for spec in lights if spec.light not in found]
+    if missing:
+        return Finding(
+            "fail",
+            HUE_LABEL,
+            f"{_HUE_FOUND}; not on the bridge: {', '.join(missing)}",
+            "scripts/tapo-discover.sh lists the bridge's lights; fix the light id in [[tapo.devices]]",
+        )
+    disconnected = answer.get("disconnected")
+    silent = [spec.name for spec in lights if isinstance(disconnected, list) and spec.light in disconnected]
+    if silent:
+        return Finding(
+            "warn",
+            HUE_LABEL,
+            f"{_HUE_FOUND}; not answering the bridge: {', '.join(silent)}",
+            "if it was switched off at the wall, switch it on there",
+        )
+    return Finding("ok", HUE_LABEL, f"{_HUE_FOUND}, {len(lights)} of {len(lights)} lights found")
 
 
 def _youtube(cfg: Config, states: _States, *, own: bool = False) -> Finding:
@@ -750,8 +1099,9 @@ def _youtube(cfg: Config, states: _States, *, own: bool = False) -> Finding:
 
 
 def _calendar(cfg: Config, folder: Path, source: CalendarSource, states: _States) -> Finding:
-    """One calendar: a Google one needs the helper and its address in calendar.env; an Outlook one its mailbox's
-    sign-in (no helper, no calendar.env). Then what its last real read did."""
+    """One calendar: a Google one needs the helper and its address in calendar.env, a CalDAV one the helper and its
+    app-specific password there (its line names the service); an Outlook one its mailbox's sign-in (no helper, no
+    calendar.env). Then what its last real read did."""
     part = calendar_part(source.name)
     label = label_of(part)
     account = cfg.calendar_mailbox(source)
@@ -764,21 +1114,83 @@ def _calendar(cfg: Config, folder: Path, source: CalendarSource, states: _States
                 f"scripts/mail-login.sh <address of {account.name}>",
             )
         return states.finding(part)
-    script = "scripts/set-calendar-url.sh" + ("" if part == "calendar" else f" {source.name}")
+    caldav = source.kind == "caldav"
+    script = ("scripts/set-calendar-password.sh" if caldav else "scripts/set-calendar-url.sh") + (
+        "" if part == "calendar" else f" {source.name}"
+    )
     if not Path(cfg.calendar_helper[0]).exists():
         return Finding("fail", label, "the calendar helper is not set up", "cd tools/ical && uv sync")
     if not _private_file(folder / "calendar.env"):
         return Finding("fail", label, "no private calendar.env", script)
-    if not read_keys(folder / "calendar.env", (source.ical_key,)):  # only whether it is there: never the address
-        return Finding("fail", label, f"no address saved in calendar.env ({source.ical_key})", script)
-    return states.finding(part)
+    if not read_keys(folder / "calendar.env", (source.secret_key,)):  # only whether it is there: never the secret
+        saved = "app-specific password" if caldav else "address"
+        return Finding("fail", label, f"no {saved} saved in calendar.env ({source.secret_key})", script)
+    return states.finding(part, source.service if caldav else "")
 
 
-def _daemon() -> Finding:
-    plist = hostsec.estia_root() / ownuser.DAEMONS.relative_to("/") / f"{ownuser.BRIDGE}.plist"  # a test: its own root
-    if plist.exists():
-        return Finding("ok", "Always on", "the LaunchDaemon is installed")
-    return Finding("warn", "Always on", "not installed yet (try scripts/run.sh first)", "scripts/install-daemon.sh")
+def _last_alive(cfg: Config) -> float | None:
+    """The bridge's last sign of life in the database, only read; None when none is on record (or no database yet:
+    after the move, doctor runs only as her, who can read hers)."""
+    try:
+        with closing(_read_only(cfg)) as conn:
+            row = conn.execute("SELECT value FROM state WHERE key = ?", (ALIVE_KEY,)).fetchone()
+    except sqlite3.Error:
+        return None
+    try:
+        return float(row[0]) if row is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _daemon(cfg: Config, probe: Probe, own: bool) -> Finding:
+    """Installed, and alive: launchd's state and last exit code, and the bridge's last sign of life."""
+    plist = ownuser.DAEMONS / f"{ownuser.BRIDGE}.plist"
+    if not (hostsec.estia_root() / plist.relative_to("/")).exists():  # a test: its own root
+        return Finding("warn", "Always on", prompts.DOCTOR_ALWAYS_ON_MISSING, "scripts/install-daemon.sh")
+    logs = f"{ownuser.ESTIA} logs launchd" if own else f"tail -n 50 {cfg.log_dir / 'launchd.log'}"
+    bridge_log = f"{ownuser.ESTIA} logs bridge" if own else f"tail -n 50 {cfg.log_dir / 'bridge.log'}"
+    now = probe.now()
+    alive = _last_alive(cfg)
+    fresh = alive is not None and now - alive <= ALIVE_SECONDS
+    launchd = probe.bridge_launchd()
+    state = _LAUNCHD_STATE.search(launchd or "")
+    if state is None and "could not find service" not in (launchd or "").lower():
+        launchd = None  # an answer without a state that is not "not loaded": launchd was not read
+    found_exit = _LAUNCHD_EXIT.search(launchd or "")
+    code = int(found_exit.group(1)) if found_exit else None
+
+    def silent() -> str:
+        assert alive is not None
+        minutes = max(0, int((now - alive) // 60))
+        if minutes < 120:
+            text = prompts.DOCTOR_ALWAYS_ON_SILENT.format(minutes=minutes)
+        else:
+            text = prompts.DOCTOR_ALWAYS_ON_SILENT_SINCE.format(when=local_when(alive, now, cfg.timezone))
+        return text + (prompts.DOCTOR_ALWAYS_ON_EXIT.format(code=code) if code else "")
+
+    if launchd is None:  # launchd could not be asked: the sign of life alone
+        if alive is None:  # installed is not alive: no ✓ (review of 14 Oct)
+            return Finding("untested", "Always on", prompts.DOCTOR_ALWAYS_ON_UNREAD, bridge_log)
+        if fresh:
+            when = local_when(alive, now, cfg.timezone)
+            return Finding("ok", "Always on", prompts.DOCTOR_ALWAYS_ON_ALIVE_ONLY.format(when=when))
+        return Finding("fail", "Always on", silent(), bridge_log)
+    if state is None:
+        fix = f"{hostsec.SUDO} {LAUNCHCTL} bootstrap system {plist}"
+        return Finding("fail", "Always on", prompts.DOCTOR_ALWAYS_ON_NOT_LOADED, fix)
+    if state.group(1) != "running":
+        if code:  # launchd starts it again after a failure (KeepAlive): restarting
+            return Finding("fail", "Always on", prompts.DOCTOR_ALWAYS_ON_RESTARTING.format(code=code), logs)
+        text = prompts.DOCTOR_ALWAYS_ON_STOPPED_NEVER if code is None else prompts.DOCTOR_ALWAYS_ON_STOPPED
+        restart = (
+            f"{ownuser.ESTIA} restart" if own else f"{hostsec.SUDO} {LAUNCHCTL} kickstart -k system/{ownuser.BRIDGE}"
+        )
+        return Finding("fail", "Always on", text.format(code=code), restart)
+    if alive is None:
+        return Finding("warn", "Always on", prompts.DOCTOR_ALWAYS_ON_NONE_YET, bridge_log)
+    if not fresh:
+        return Finding("fail", "Always on", silent(), bridge_log)
+    return Finding("ok", "Always on", prompts.DOCTOR_ALWAYS_ON_ALIVE.format(when=local_when(alive, now, cfg.timezone)))
 
 
 def render(findings: list[Finding]) -> str:
@@ -800,7 +1212,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="the config file to check")
     args = parser.parse_args(argv)
-    findings = run(args.config, Probe())
+    # root's `sudo -l -U <owner>` on stdin (estia doctor): told by the environment, which a doctor from before ignores
+    listing = sys.stdin.read(200_000) if os.environ.get("ESTIA_OWNER_SUDO") == "stdin" else None
+    findings = run(args.config, Probe(owner_sudo=listing))
     print(render(findings))
     return exit_code(findings)
 

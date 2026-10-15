@@ -139,10 +139,22 @@ async def test_with_several_calendars_one_that_fails_is_never_cancelled_and_name
     feed.items = []
     note = await cal.change_note((NOW + timedelta(minutes=90)).timestamp())
     assert note is not None and note[0].splitlines() == [
-        "Calendar changes:",
-        "- your 15:00 event (Work) is no longer in the calendar",
-        "- your 16:00 event (Family) is no longer in the calendar",
+        "**Calendar changes**",
+        "• your 15:00 event (Work) is no longer in the calendar",
+        "• your 16:00 event (Family) is no longer in the calendar",
     ]
+
+
+async def test_more_changes_than_the_note_shows_end_in_one_line_with_no_bullet() -> None:
+    feed = Feed()
+    feed.items = [event(f"Item {n}", f"2026-10-14 {12 + n}:00") for n in range(7)]
+    cal = watch(feed)
+    await cal.check(NOW.timestamp())
+    feed.items = []
+    note = await cal.change_note((NOW + timedelta(minutes=30)).timestamp())
+    assert note is not None
+    lines = note[0].splitlines()
+    assert len(lines) == 1 + 5 + 1 and lines[-1] == "…and 2 more"  # not an item: no "•"
 
 
 async def test_an_invitation_in_two_calendars_is_never_cancelled_when_one_of_them_fails_once() -> None:

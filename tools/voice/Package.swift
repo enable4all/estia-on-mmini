@@ -3,7 +3,21 @@
 // Supertonic-3 for ten more languages) on the Neural Engine, served on 127.0.0.1 for the bridge. The engine
 // layer and its pins come from the OpenWhisperer voice app (MIT, app/Package.swift), where they are explained
 // in full; change them only deliberately, after measuring.
+import Foundation
 import PackageDescription
+
+/// The Command Line Tools' Testing macros folder, named for the test targets only while the Command Line Tools are the
+/// active developer folder (DEVELOPER_DIR, else xcode-select's choice, else Xcode when installed): there SwiftPM
+/// sometimes loses the Testing macros plugin after a failed build ("plugin for module 'TestingMacros' not found"),
+/// and naming its folder keeps every run reliable. With Xcode active, Xcode's own compiler finds its own macros; the
+/// Command Line Tools' could be another version. (Untested with Xcode active: this Mac has only the Command Line Tools.)
+let commandLineTools = "/Library/Developer/CommandLineTools"
+let activeDeveloperFolder = Context.environment["DEVELOPER_DIR"]
+    ?? (try? FileManager.default.destinationOfSymbolicLink(atPath: "/var/db/xcode_select_link"))
+    ?? (FileManager.default.fileExists(atPath: "/Applications/Xcode.app")
+        ? "/Applications/Xcode.app/Contents/Developer" : commandLineTools)
+let testingMacros: [SwiftSetting] = activeDeveloperFolder.hasPrefix(commandLineTools)
+    ? [.unsafeFlags(["-plugin-path", commandLineTools + "/usr/lib/swift/host/plugins/testing"])] : []
 
 let package = Package(
     name: "voice-service",
@@ -26,19 +40,17 @@ let package = Package(
             ],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
-        // Swift Testing works with the Command Line Tools (XCTest does not). After a failed build SwiftPM
-        // sometimes loses the Testing macros plugin ("plugin for module 'TestingMacros' not found");
-        // naming its folder keeps every run reliable (harmless where the folder does not exist).
+        // Swift Testing works with the Command Line Tools (XCTest does not); `testingMacros` above.
         .testTarget(
             name: "VoiceCoreTests",
             dependencies: ["VoiceCore"],
-            swiftSettings: [.unsafeFlags(["-plugin-path", "/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing"])]
+            swiftSettings: testingMacros
         ),
         // The service's own glue to the engines, where it needs their types (Whisper's decoding options).
         .testTarget(
             name: "VoiceServiceTests",
             dependencies: ["voice-service", .product(name: "WhisperKit", package: "WhisperKit")],
-            swiftSettings: [.unsafeFlags(["-plugin-path", "/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing"])]
+            swiftSettings: testingMacros
         ),
     ]
 )

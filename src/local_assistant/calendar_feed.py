@@ -1,8 +1,10 @@
 """The calendars: events in local time from each configured calendar, or why a calendar could not be read.
 
-A Google calendar is read through the calendar helper (tools/ical): the bridge runs it with fixed arguments (no shell,
-a clean environment, a time limit) and reads one JSON object back; it never holds the calendar's address. Only the
-helper's own error codes are believed, never its text. An Outlook calendar is read through Graph (calendar_graph).
+A Google or CalDAV calendar is read through the calendar helper (tools/ical): the bridge runs it with fixed arguments
+(no shell, a clean environment, a time limit) and reads one JSON object back; it never holds the calendar's address or
+password. A CalDAV calendar's account (server, user name, calendar name) goes to the helper on stdin, never on its
+command line, which every user of the Mac can see. Only the helper's own error codes are believed, never its text. An
+Outlook calendar is read through Graph (calendar_graph).
 With several calendars each is read at the same time (a helper process of its own per Google calendar), one failing
 calendar never hides the others (it is named in `Agenda.missed`), each event carries its calendar's name, and an event
 in two calendars (the same UID and start) is kept once. With one calendar nothing changes: its failure is raised as
@@ -25,12 +27,27 @@ from typing import Any, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from local_assistant.config import DEFAULT_CALENDAR, CalendarSource, Config
-from local_assistant.part_status import PartStatus, calendar_part
+from local_assistant.part_status import PartStatus, Reason, calendar_part
 
 log = logging.getLogger(__name__)
 
 SEARCH_LIMIT = 10
 _WORD = re.compile(r"\w+")  # the helper's words
+# the fixed codes of a CalDAV calendar's invalid answer (tools/ical/helper.py INVALID_CODES): only these are logged,
+# never the helper's text
+INVALID_CODES = frozenset(
+    {
+        "redirect_refused",
+        "other_server",
+        "too_large",
+        "xml_refused",
+        "not_dav",
+        "http_status",
+        "bad_account",
+        "too_slow",
+        "other",
+    }
+)
 
 
 class FeedError(Exception):
@@ -49,6 +66,34 @@ class FeedNotSet(FeedError):
     """No usable address is saved (scripts/set-calendar-url.sh)."""
 
     reason = "not_set"
+
+
+class FeedNoPassword(FeedNotSet):
+    """No usable app-specific password is saved for a CalDAV calendar (scripts/set-calendar-password.sh)."""
+
+    reason = "no_password"
+
+
+class FeedPasswordRefused(FeedError):
+    """The CalDAV server refused the user name or app-specific password."""
+
+    reason = "password_refused"
+
+
+class FeedNoCalendar(FeedError):
+    """No CalDAV account at the configured address, or no calendar by that name in it."""
+
+    reason = "no_calendar"
+
+
+# the helper's error codes that are failures of their own: the exception, the part's reason and the exception's words
+_FAILURES: dict[str, tuple[type[FeedError], Reason, str]] = {
+    "gone": (FeedGone, "gone", "the address no longer works"),
+    "not_set": (FeedNotSet, "not_set", "the calendar is not set up"),
+    "no_password": (FeedNoPassword, "no_password", "no app-specific password saved"),
+    "password_refused": (FeedPasswordRefused, "password_refused", "the user name or app-specific password was refused"),
+    "no_calendar": (FeedNoCalendar, "no_calendar", "no calendar by that name"),
+}
 
 
 class FeedSignIn(FeedError):
@@ -136,7 +181,7 @@ class CalendarFeed:
         self._status = status or PartStatus(None)  # what each calendar's last real read did (doctor, /status)
         self._readers: list[tuple[CalendarSource, Reader]] = []
         for source in config.calendars:
-            if not source.mailbox:
+            if source.kind in ("google", "caldav"):
                 self._readers.append((source, IcalReader(config, source, status=self._status)))
             elif outlook is not None:
                 self._readers.append((source, outlook(source)))
@@ -201,7 +246,7 @@ class CalendarFeed:
 
 
 class IcalReader:
-    """One Google calendar, through the calendar helper."""
+    """One Google or CalDAV calendar, through the calendar helper."""
 
     def __init__(self, config: Config, source: CalendarSource, *, status: PartStatus | None = None) -> None:
         self._tz = config.timezone
@@ -209,7 +254,13 @@ class IcalReader:
         self._timeout = config.calendar_helper_timeout
         self._status = status or PartStatus(None)
         self._part = calendar_part(source.name)
+        self._service = source.service  # in its errors: "invalid answer from iCloud"
         self._which = [] if source.name == DEFAULT_CALENDAR else ["--calendar", source.name]
+        self._account: bytes | None = None  # a CalDAV calendar's account, for the helper's stdin
+        if source.kind == "caldav":
+            self._which.append("--caldav")
+            account = {"server": source.caldav, "user": source.user, "calendar": source.calendar}
+            self._account = (json.dumps(account) + "\n").encode()
 
     async def events(self, start: datetime, end: datetime) -> Agenda:
         """Every event overlapping [start, end), in start order."""
@@ -230,6 +281,7 @@ class IcalReader:
             proc = await asyncio.create_subprocess_exec(
                 *self._command,
                 *args,
+                stdin=asyncio.subprocess.DEVNULL if self._account is None else asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
                 env=_helper_env(),
@@ -239,7 +291,7 @@ class IcalReader:
             self._status.failed(self._part, "helper_missing")
             raise FeedError("the calendar helper is not installed (cd tools/ical && uv sync --frozen)") from None
         try:
-            out, _ = await asyncio.wait_for(proc.communicate(), self._timeout)
+            out, _ = await asyncio.wait_for(proc.communicate(self._account), self._timeout)
         except TimeoutError:
             await self._stop(proc)
             log.warning("calendar helper timed out after %.0f s", self._timeout)
@@ -257,20 +309,21 @@ class IcalReader:
             self._status.failed(self._part, "helper_failed")
             raise FeedError("no answer from the calendar helper")
         error = data.get("error") if not data.get("ok") else None
+        code = data.get("code")
+        known = f" ({code})" if error == "invalid" and isinstance(code, str) and code in INVALID_CODES else ""
         log.info(
-            "calendar helper: %s in %d ms",
+            "calendar helper: %s%s in %d ms",
             error or f"{len(data.get('events') or [])} events",
+            known,
             (time.monotonic() - started) * 1000,
         )
-        if error == "gone":
-            self._status.failed(self._part, "gone")
-            raise FeedGone("the address no longer works")
-        if error == "not_set":
-            self._status.failed(self._part, "not_set")
-            raise FeedNotSet("the calendar is not set up")
+        if isinstance(error, str) and error in _FAILURES:
+            failure, reason, words = _FAILURES[error]
+            self._status.failed(self._part, reason)
+            raise failure(words)
         if error is not None:
             self._status.failed(self._part, "no_answer" if error == "unreachable" else "bad_answer")
-            raise FeedError("unreachable" if error == "unreachable" else "invalid answer from Google")
+            raise FeedError("unreachable" if error == "unreachable" else f"invalid answer from {self._service}")
         self._status.ok(self._part)
         return data
 

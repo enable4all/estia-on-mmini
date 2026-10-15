@@ -14,7 +14,7 @@
 #                                                 /usr/bin/sudo /usr/local/estia/bin/estia remove-old
 # At its end, as you and without sudo, your projects folder ([projects] root, default ~/dev) is shared with her
 # read-only: scripts/share-projects.sh (the dry run shows its chmod commands too).
-# Run the real move inside tmux (or herdr) when you are on SSH: it keeps going if the connection drops.
+# Run the real move inside screen (built into macOS) or tmux when you are on SSH: it keeps going if the connection drops.
 # The first move only: once she runs in her own user it stops before any sudo (it would run this checkout as root).
 # Updates from then on: /usr/bin/sudo /usr/local/estia/bin/estia-deploy
 set -euo pipefail

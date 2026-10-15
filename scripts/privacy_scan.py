@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Privacy check: refuse private files and private-looking values before they reach git.
 
-Usage: privacy_scan.py [--staged] [--config PATH]
+Usage: privacy_scan.py [--staged] [--config PATH | --values PATH]
+       privacy_scan.py --hash-values CONFIG
 
 Scans every git-tracked file (default), or the staged version of added and changed files (--staged, for the pre-commit
 hook). Prints one line per finding, `<path>:<line>: <rule>` (a file name: `<path>: <rule>`), then a count line. It
@@ -9,9 +10,14 @@ never prints the matched text or a config value. Exit 0 when clean, 1 on a findi
 
 - File names that are always refused, whatever the content: databases, logs, audio, env and token files, the owner's
   notes and config, keys.
-- Per line: private keys, API keys, e-mail addresses, phone numbers, UUIDs (Signal account IDs), home paths, and the
-  owner's own config values as whole words (named by key; setup keys such as paths and labels, and values that also
-  appear in config.example.toml, are generic).
+- Per line: private keys, API keys, secret values (quoted, and the key files' own `KEY=value` lines: web.env,
+  calendar.env, tapo.env, hue.env), e-mail addresses (also written %40, as in a calendar's address), phone numbers,
+  UUIDs (Signal account IDs), home paths, a Google calendar's secret address (`…/private-<hex>/…`), private network
+  addresses (outside the docs' own 192.168.1.0/24 and 10.0.0.0/24), and the owner's own config values as whole words
+  (named by key; setup keys such as paths and labels, and values that also appear in config.example.toml, are generic).
+- In her own user her config is hers (/var/estia, 0700). She gives salted hashes of its private values, never the
+  values (`--hash-values`, run as her: the scan's note says how), into ~/.config/local-assistant/privacy-values.json,
+  which every scan then reads; the values are matched there as runs of whole words.
 - A line with the marker `privacy-ok` skips the content rules: give the reason (`# privacy-ok: fake test number`).
 - `.privacy-scan-skip` at the repo root: glob patterns, one per line (# comments), of paths not scanned at all, for a
   private fork that tracks private notes. A pattern without `/` matches the file name at any depth; `dir/` matches all
@@ -22,18 +28,30 @@ Standard library only (runs with `python3 -I`). Ideas from AURA's privacy scan (
 
 import argparse
 import fnmatch
+import hashlib
+import ipaddress
+import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import tomllib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 MARKER = "privacy-ok"
 SKIP_FILE = ".privacy-scan-skip"
 EXAMPLE_CONFIG = "config.example.toml"
+VALUES_FILE = Path(".config") / "local-assistant" / "privacy-values.json"  # in your home: her values, hashed
+HER_CONFIG = "/var/estia/.config/local-assistant/config.toml"
+HASH_COMMAND = (  # private from the start (umask, the old file removed first): the salt sits beside the hashes
+    f"umask 077 && mkdir -p ~/.config/local-assistant && /bin/rm -f ~/{VALUES_FILE} && "
+    "/usr/bin/sudo -u _estia /usr/local/estia/current/.venv/bin/python -I "
+    f"/usr/local/estia/current/scripts/privacy_scan.py --hash-values {HER_CONFIG} > ~/{VALUES_FILE}"
+)
+WORD = re.compile(r"\w+")
 MAX_BYTES = 2 * 1024 * 1024  # bigger files: names only
 BINARY_PROBE = 8192  # a NUL byte in the first 8 KB: binary, names only
 
@@ -61,9 +79,25 @@ API_KEY = re.compile(
 SECRET_VALUE = re.compile(
     r"(?:api_?key|secret|token|password|passwd)\w*[\"']?\s*[:=]\s*[\"'][A-Za-z0-9_-]{16,}[\"']", re.IGNORECASE
 )
-EMAIL = re.compile(
-    r"(?<![A-Za-z0-9._%+-])([A-Za-z0-9._%+-]+)@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})(?![A-Za-z0-9-])"
+# a key file's line as written (web.env, calendar.env, tapo.env, hue.env: unquoted), also pasted into a doc or a comment;
+# any other *_API_KEY, *_PASSWORD, *_SECRET or *_TOKEN only as an env line (no space around "=": not a constant in
+# code); a placeholder (<your key>, $VAR, …) is no value
+ENV_SECRET = re.compile(
+    r"^[\s#>*-]*(?:export\s+)?"
+    r"(?:(?:BRAVE_API_KEY|OLLAMA_API_KEY|GOOGLE_MAPS_API_KEY|TAPO_PASSWORD|HUE_KEY|HUE_FINGERPRINT"
+    r"|CALDAV_PASSWORD\w*|CALENDAR_ICS_URL\w*)\s*=\s*|[A-Z][A-Z0-9_]*_(?:API_KEY|PASSWORD|SECRET|TOKEN)=)"
+    r"[^\s\"'$<{%.…]\S{7,}"
 )
+EMAIL = re.compile(
+    r"(?<![A-Za-z0-9._%+-])([A-Za-z0-9._%+-]+?)(?:@|%40)([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})"
+    r"(?![A-Za-z0-9-])"
+)
+# a Google calendar's secret iCal address: its private-<hex> part is the password
+GOOGLE_ICAL = re.compile(r"calendar\.google\.com/calendar/ical/[^/\s]+/private-([0-9a-f]{8,})", re.IGNORECASE)
+FAKE_HEX = ("0123456789abcdef" * 4, "fedcba9876543210" * 4)  # patterned fakes, read from the start
+IPV4 = re.compile(r"(?<![\w.])(\d{1,3}(?:\.\d{1,3}){3})(?![\w/]|\.\d)")
+PRIVATE_NETWORKS = tuple(ipaddress.ip_network(net) for net in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+FAKE_NETWORKS = tuple(ipaddress.ip_network(net) for net in ("192.168.1.0/24", "10.0.0.0/24"))  # the docs' home network
 PHONE = re.compile(r"(?<![\w+])\+(\d{10,15})(?!\d)")  # E.164: + and 10-15 digits, no spaces
 UUID = re.compile(r"\b([0-9a-f]{8})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{12})\b", re.IGNORECASE)
 HOME_PATH = re.compile(r"/Users/(<[^>/\s]*>?|\$[{(]?\w*|[A-Za-z0-9._-]+)")  # <you>, $USER or a name
@@ -102,6 +136,7 @@ SETUP_KEYS = frozenset(
         "voice.voice",
         "tapo.devices.kind",
         "tapo.devices.rule",
+        "tapo.devices.brand",
         "calls.signal_cli",
         "calls.java_home",
         "calls.tunnel",
@@ -200,13 +235,81 @@ def _placeholder_user(name: str) -> bool:
     return name.lower() in PLACEHOLDER_USERS or name.startswith(("<", "$"))
 
 
-def line_rules(line: str, owner: list[tuple[str, re.Pattern[str]]]) -> Iterator[str]:
+def _fake_hex(digits: str) -> bool:
+    """A patterned fake: 0123456789abcdef or fedcba9876543210 from the start, or one repeated digit."""
+    digits = digits.lower()
+    return any(fake.startswith(digits) for fake in FAKE_HEX) or len(set(digits)) == 1
+
+
+def _private_address(text: str) -> bool:
+    """A private network address (RFC 1918) outside the docs' own fake ranges."""
+    try:
+        address = ipaddress.ip_address(text)
+    except ValueError:
+        return False
+    return any(address in net for net in PRIVATE_NETWORKS) and not any(address in net for net in FAKE_NETWORKS)
+
+
+# the owner's values: a line in, the config keys whose values it holds out
+Owner = Callable[[str], list[str]]
+
+
+def _patterns(found: dict[str, str]) -> Owner:
+    """Each value as a whole-word pattern."""
+    patterns = [(key, _whole_word(value)) for value, key in found.items()]
+    return lambda line: [key for key, pattern in patterns if pattern.search(line)]
+
+
+def _digest(salt: str, words: list[str]) -> str:
+    return hashlib.sha256("\0".join([salt, *words]).encode("utf-8")).hexdigest()
+
+
+def _hashed(data: object) -> Owner:
+    """Salted hashes of each value's words (`--hash-values`): a line's runs of whole words are hashed and looked up, so
+    10.0.0.4 is not in 10.0.0.41 and a name not in a longer one. ValueError for a file of another shape."""
+    if not isinstance(data, dict) or not isinstance(data.get("salt"), str) or not isinstance(data.get("values"), list):
+        raise ValueError("not a values file")
+    salt: str = data["salt"]
+    tables: dict[int, dict[str, str]] = {}
+    for entry in data["values"]:
+        if not isinstance(entry, dict):
+            raise ValueError("not a values file")
+        key, words, digest = entry.get("key"), entry.get("words"), entry.get("hash")
+        if not (isinstance(key, str) and isinstance(words, int) and words >= 1 and isinstance(digest, str)):
+            raise ValueError("not a values file")
+        tables.setdefault(words, {})[digest] = key
+
+    def check(line: str) -> list[str]:
+        words = WORD.findall(line)
+        keys: list[str] = []
+        for size, table in tables.items():
+            for start in range(len(words) - size + 1):
+                key = table.get(_digest(salt, words[start : start + size]))
+                if key is not None and key not in keys:
+                    keys.append(key)
+        return keys
+
+    return check
+
+
+def hash_values(config: Path, example_text: str) -> dict[str, object]:
+    """Her config's private values as salted hashes of their words, with their keys: never a value."""
+    salt = secrets.token_hex(16)
+    entries = []
+    for value, key in private_values(config, example_text).items():
+        words = WORD.findall(value)
+        if words:
+            entries.append({"key": key, "words": len(words), "hash": _digest(salt, words)})
+    return {"salt": salt, "values": entries}
+
+
+def line_rules(line: str, owner: Owner) -> Iterator[str]:
     """The content rules one line breaks, in a fixed order, each once."""
     if PRIVATE_KEY.search(line):
         yield "private key"
     if API_KEY.search(line):
         yield "api key"
-    if SECRET_VALUE.search(line):
+    if SECRET_VALUE.search(line) or ENV_SECRET.search(line):
         yield "secret value"
     if any(not _public_email(m.group(1), m.group(2)) for m in EMAIL.finditer(line)):
         yield "email address"
@@ -216,12 +319,15 @@ def line_rules(line: str, owner: list[tuple[str, re.Pattern[str]]]) -> Iterator[
         yield "uuid"
     if any(not _placeholder_user(m.group(1)) for m in HOME_PATH.finditer(line)):
         yield "home path"
-    for key, value in owner:
-        if value.search(line):
-            yield f"owner config value ({key})"
+    if any(not _fake_hex(m.group(1)) for m in GOOGLE_ICAL.finditer(line)):
+        yield "calendar address"
+    if any(_private_address(m.group(1)) for m in IPV4.finditer(line)):
+        yield "private address"
+    for key in owner(line):
+        yield f"owner config value ({key})"
 
 
-def scan_content(path: str, data: bytes, owner: list[tuple[str, re.Pattern[str]]]) -> Iterator[Finding]:
+def scan_content(path: str, data: bytes, owner: Owner) -> Iterator[Finding]:
     if len(data) > MAX_BYTES or b"\0" in data[:BINARY_PROBE]:
         return
     for number, line in enumerate(data.decode("utf-8", "replace").split("\n"), start=1):
@@ -238,9 +344,9 @@ def _whole_word(value: str) -> re.Pattern[str]:
     return re.compile(head + re.escape(value) + tail)
 
 
-def owner_values(config: Path, example_text: str) -> list[tuple[str, re.Pattern[str]]]:
-    """(key path, whole-word pattern) for each private string of 4+ characters in the owner's config: not under a
-    setup key and not in config.example.toml."""
+def private_values(config: Path, example_text: str) -> dict[str, str]:
+    """{value: key path} for each private string of 4+ characters in the owner's config: not under a setup key and not
+    in config.example.toml."""
     data = tomllib.loads(config.read_text(encoding="utf-8"))
     found: dict[str, str] = {}
 
@@ -263,28 +369,47 @@ def owner_values(config: Path, example_text: str) -> list[tuple[str, re.Pattern[
             add(node, keys)
 
     walk(data, ())
-    return [(key, _whole_word(value)) for value, key in found.items()]
+    return found
 
 
-def load_owner(config: Path | None, root: Path) -> list[tuple[str, re.Pattern[str]]]:
-    """The owner's private values. The default config may be missing or broken: then the rule is skipped silently."""
+def _example_text(root: Path) -> str:
     try:
-        example_text = (root / EXAMPLE_CONFIG).read_text(encoding="utf-8")
+        return (root / EXAMPLE_CONFIG).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
-        example_text = ""
+        return ""
+
+
+def _load_values(path: Path) -> Owner:
+    """Her hashed values (ValueError or OSError when they cannot be read)."""
+    return _hashed(json.loads(path.read_text(encoding="utf-8")))
+
+
+def load_owner(config: Path | None, root: Path, values: Path | None = None) -> Owner:
+    """The owner's private values: from `values` (hashed), the config, or by default your config, else her hashed
+    values in your home (VALUES_FILE). Neither readable: the rule is skipped, with a note in her own user."""
+    if values is not None:
+        try:
+            return _load_values(values)
+        except (OSError, ValueError) as exc:
+            raise ScanError(f"cannot read the values {values}") from exc
     path = config or Path.home() / ".config" / "local-assistant" / "config.toml"
     try:
-        return owner_values(path, example_text)
+        return _patterns(private_values(path, _example_text(root)))
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
-        if config is None:
-            if (Path(os.environ.get("ESTIA_ROOT") or "/") / "var" / "estia").is_dir():  # her own user has it now
-                print(
-                    "privacy scan: note: your own config values were not checked: her config is in /var/estia, "
-                    "readable only by _estia. --config <file> checks against a copy you can read.",
-                    file=sys.stderr,
-                )
-            return []
-        raise ScanError(f"cannot read the config {config}") from exc
+        if config is not None:
+            raise ScanError(f"cannot read the config {config}") from exc
+    try:
+        return _load_values(Path.home() / VALUES_FILE)
+    except (OSError, ValueError):
+        pass
+    if (Path(os.environ.get("ESTIA_ROOT") or "/") / "var" / "estia").is_dir():  # her own user has it now
+        print(
+            "privacy scan: note: your own config values were not checked: her config is in /var/estia, readable only "
+            "by _estia. Have her give their salted hashes (never the values), now and after each change to her "
+            f"config: {HASH_COMMAND}. Or check against a copy you can read: --config <file>.",
+            file=sys.stderr,
+        )
+    return lambda line: []
 
 
 def _working_copy(root: Path, path: str) -> bytes | None:
@@ -304,13 +429,13 @@ def _working_copy(root: Path, path: str) -> bytes | None:
         raise ScanError(f"cannot read {path}") from exc
 
 
-def scan(root: Path, staged: bool, config: Path | None) -> tuple[list[Finding], int]:
+def scan(root: Path, staged: bool, config: Path | None, values: Path | None = None) -> tuple[list[Finding], int]:
     if staged:
         paths = _split_z(_git(root, "diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRT"))
     else:
         paths = _split_z(_git(root, "ls-files", "-z"))
     patterns = load_skip_patterns(root)
-    owner = load_owner(config, root)
+    owner = load_owner(config, root, values)
     found: list[Finding] = []
     scanned = 0
     for path in paths:
@@ -334,13 +459,24 @@ def _plural(count: int, word: str) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Refuse private files and private-looking values in the repo.")
     parser.add_argument("--staged", action="store_true", help="scan the staged version of added and changed files")
-    parser.add_argument(
+    owner = parser.add_mutually_exclusive_group()
+    owner.add_argument(
         "--config", type=Path, help="the owner's config (default: ~/.config/local-assistant/config.toml)"
     )
+    owner.add_argument("--values", type=Path, help=f"her hashed values (default, without your config: ~/{VALUES_FILE})")
+    owner.add_argument("--hash-values", type=Path, metavar="CONFIG", help="print a config's values, hashed; no scan")
     args = parser.parse_args(argv)
+    if args.hash_values is not None:  # as her, from the release: no git, the example config beside this script
+        try:
+            hashed = hash_values(args.hash_values, _example_text(Path(__file__).resolve().parents[1]))
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+            print(f"privacy scan: cannot read the config {args.hash_values}", file=sys.stderr)
+            return 2
+        print(json.dumps(hashed))
+        return 0
     try:
         root = Path(os.fsdecode(_git(None, "rev-parse", "--show-toplevel")).strip())
-        found, scanned = scan(root, args.staged, args.config)
+        found, scanned = scan(root, args.staged, args.config, args.values)
     except ScanError as exc:
         print(f"privacy scan: {exc}", file=sys.stderr)
         return 2

@@ -441,12 +441,12 @@ def test_the_recap_lists_the_points_under_its_header() -> None:
             said="Zaterdag ik ben", better="Zaterdag ben ik", why="The verb comes second."
         ),
     ]
-    assert text.startswith("📚 Practice recap (Dutch, A2)")
+    assert text.startswith("📚 **Practice recap** (Dutch, A2)")
 
 
 def test_a_recap_without_points_says_well_done() -> None:
     text = recap_text("de", "B1", [], heard=False)
-    assert text == f"📚 Practice recap (German, B1)\n{prompts.BABBLE_RECAP_NONE}"
+    assert text == f"📚 **Practice recap** (German, B1)\n{prompts.BABBLE_RECAP_NONE}"
     assert prompts.BABBLE_RECAP_NONE == "No mistakes to note: well done."
 
 
@@ -587,7 +587,7 @@ async def test_the_recap_asks_gemma_over_the_users_own_turns_only(store: Store) 
         "3. Nee, morgen",
     ]
     assert harness.sent == [
-        "📚 Practice recap (Dutch, A2)\n"
+        "📚 **Practice recap** (Dutch, A2)\n"
         '• "Zaterdag ik ben" → "Zaterdag ben ik": Das Verb steht an zweiter Stelle.\n'
         f"{prompts.BABBLE_RECAP_HEARD}"
     ]
@@ -617,7 +617,7 @@ async def test_points_that_the_checks_all_drop_are_no_mistakes_without_well_done
     harness.say("Ik woon bij het station.")
     harness.babble.end("off")
     await harness.babble.finish(harness.babble.held())  # type: ignore[arg-type]
-    assert harness.sent == [f"📚 Practice recap (Dutch, A2)\n{prompts.BABBLE_RECAP_NONE_KEPT}"]
+    assert harness.sent == [f"📚 **Practice recap** (Dutch, A2)\n{prompts.BABBLE_RECAP_NONE_KEPT}"]
     assert prompts.BABBLE_RECAP_NONE_KEPT == "No mistakes to note."
 
 
@@ -627,7 +627,7 @@ async def test_no_points_is_well_done_and_typed_turns_need_no_heard_line(store: 
     harness.say("Ik woon in Utrecht.")
     harness.babble.end("off")
     await harness.babble.finish(harness.babble.held())  # type: ignore[arg-type]
-    assert harness.sent == [f"📚 Practice recap (Dutch, A2)\n{prompts.BABBLE_RECAP_NONE}"]
+    assert harness.sent == [f"📚 **Practice recap** (Dutch, A2)\n{prompts.BABBLE_RECAP_NONE}"]
 
 
 async def test_spoken_german_turns_need_no_heard_line(store: Store) -> None:
@@ -645,7 +645,7 @@ async def test_a_session_without_practice_turns_says_so_without_gemma(store: Sto
     session = harness.babble.start(ME, "fr", "B1")
     harness.babble.end("off")
     await harness.babble.finish(harness.babble.held())  # type: ignore[arg-type]
-    assert harness.sent == [f"📚 Practice recap (French, B1)\n{prompts.BABBLE_RECAP_NOTHING}"] and gemma.calls == []
+    assert harness.sent == [f"📚 **Practice recap** (French, B1)\n{prompts.BABBLE_RECAP_NOTHING}"] and gemma.calls == []
     assert store.get_state(SESSION_KEY) == "" and harness.babble.last() == ("fr", "B1")
     ended = store._conn.execute("SELECT ended_at FROM conversations WHERE id = ?", (session.conversation_id,))
     assert ended.fetchone()[0] is not None
@@ -671,7 +671,7 @@ async def test_a_failed_recap_is_codes_note_and_the_session_is_cleared(
     harness.babble.end("off")
     await harness.babble.finish(harness.babble.held())  # type: ignore[arg-type]
     assert len(gemma.calls) == len(failures) and not gemma.queue
-    assert harness.sent == [f"📚 Practice recap (Dutch, A2)\n{prompts.BABBLE_RECAP_FAILED}"]
+    assert harness.sent == [f"📚 **Practice recap** (Dutch, A2)\n{prompts.BABBLE_RECAP_FAILED}"]
     assert harness.babble.held() is None and harness.babble.running() is None
 
 
@@ -734,7 +734,7 @@ async def test_a_recap_cut_off_twice_with_no_complete_point_is_codes_note(store:
     harness.say("Ik woon bij de station")
     harness.babble.end("off")
     await harness.babble.finish(harness.babble.held())  # type: ignore[arg-type]
-    assert harness.sent == [f"📚 Practice recap (Dutch, A2)\n{prompts.BABBLE_RECAP_FAILED}"]  # never silent
+    assert harness.sent == [f"📚 **Practice recap** (Dutch, A2)\n{prompts.BABBLE_RECAP_FAILED}"]  # never silent
 
 
 async def test_complete_points_of_a_cut_off_recap_reach_the_note(store: Store) -> None:
@@ -812,7 +812,9 @@ async def test_half_an_hour_without_practice_ends_it_with_the_recap(store: Store
     harness.clock.now = at("2026-10-14 15:01")  # 30 minutes after the last practice message
     await harness.babble.tick()
     # the user may not know it ended: the recap says why
-    assert harness.sent == [f"📚 Practice recap (Dutch, A2)\n{prompts.BABBLE_RECAP_NONE}\n{prompts.BABBLE_RECAP_IDLE}"]
+    assert harness.sent == [
+        f"📚 **Practice recap** (Dutch, A2)\n{prompts.BABBLE_RECAP_NONE}\n{prompts.BABBLE_RECAP_IDLE}"
+    ]
     assert store.get_state(SESSION_KEY) == "" and harness.babble.running() is None
     assert (
         prompts.BABBLE_RECAP_IDLE == "Practice ended after 30 minutes without a practice message. /babble resumes it."
@@ -825,7 +827,7 @@ async def test_a_session_with_no_message_is_idle_from_its_start(store: Store) ->
     harness.clock.now = at("2026-10-14 14:30")
     await harness.babble.tick()
     assert harness.sent == [
-        f"📚 Practice recap (Dutch, A2)\n{prompts.BABBLE_RECAP_NOTHING}\n{prompts.BABBLE_RECAP_IDLE}"
+        f"📚 **Practice recap** (Dutch, A2)\n{prompts.BABBLE_RECAP_NOTHING}\n{prompts.BABBLE_RECAP_IDLE}"
     ]
 
 
@@ -873,7 +875,9 @@ async def test_while_locked_the_idle_loop_does_nothing_and_the_recap_comes_after
     assert harness.sent == [] and harness.gemma.calls == [] and harness.babble.running() is not None
     harness.locked = False  # /unlock
     await harness.babble.tick()
-    assert harness.sent == [f"📚 Practice recap (Dutch, A2)\n{prompts.BABBLE_RECAP_NONE}\n{prompts.BABBLE_RECAP_IDLE}"]
+    assert harness.sent == [
+        f"📚 **Practice recap** (Dutch, A2)\n{prompts.BABBLE_RECAP_NONE}\n{prompts.BABBLE_RECAP_IDLE}"
+    ]
     assert harness.babble.session() is None
 
 

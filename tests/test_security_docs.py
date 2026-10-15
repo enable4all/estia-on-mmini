@@ -126,7 +126,7 @@ def test_her_projects_folder_is_named_with_its_limit_everywhere() -> None:
     """Her user reads your projects folder read-only, nothing else in your home; the accepted risk is said in one line
     (files git does not track are readable by her user) in each doc that names the share."""
     setup = (ROOT / "setup_assistant.md").read_text(encoding="utf-8")
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme = (ROOT / "GUIDE.md").read_text(encoding="utf-8")  # the README's body since the split (15 Oct)
     gaps = section(SECURITY, "Known accepted gaps")
     protects = section(SECURITY, "What the project tries to protect")
     for text in (setup, gaps, protects, readme):

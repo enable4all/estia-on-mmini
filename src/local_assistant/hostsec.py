@@ -13,6 +13,10 @@ and never applies anything; `harden` asks before it applies any.
 The firewall, its stealth mode, the interpreters on its list and the keychain lock are the nuclear option
 (`scripts/harden.sh --nuclear`): they may stop other services on this Mac, so outside it they are never a "!" or a "✗".
 
+The Mac's security has two levels, named in every text a person reads (never "default"): hardened, what setup's security
+step sets and doctor can read (SSH with keys only or off, her files private, her Registration Lock), and nuclear, that,
+the firewall on and no interpreter on its list (`security_level`; stealth mode and the keychain lock do not count).
+
 Nothing here returns or prints a secret: the Registration Lock is set or not set, never its PIN; the bot's number is only
 used to find her account.
 """
@@ -31,7 +35,7 @@ import time
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 Status = Literal["ok", "info", "warn", "fail"]
 
@@ -78,9 +82,14 @@ PRIVILEGED = frozenset(
 )
 HARDEN = "scripts/harden.sh"
 NUCLEAR = f"{HARDEN} --nuclear"
-# one neutral line for the nuclear option, outside it (harden's default step; doctor with the firewall off)
+# the two security levels, by name (owner, 14 Oct: never "default"): setup's security step, and --nuclear on top of it
+HARDENED = "hardened"
+NUCLEAR_LEVEL = "nuclear"
+# one neutral line for the nuclear option, outside it (harden at the hardened level; doctor with the firewall off)
 NUCLEAR_ITEMS = "the firewall, stealth mode, python3 and ruby off the firewall's list, and the keychain lock"
-NUCLEAR_LINE = f"{NUCLEAR_ITEMS}: only with {NUCLEAR}, which may stop other services on this Mac"
+NUCLEAR_LINE = (
+    f"the {NUCLEAR_LEVEL} level: {NUCLEAR_ITEMS}: only with {NUCLEAR}, which may stop other services on this Mac"
+)
 # the SSH drop-in that harden installs: read before macOS's own 100-macos.conf (sshd takes the first value it reads)
 SSH_DROP_IN_PATH = Path("/etc/ssh/sshd_config.d/000-estia-keys-only.conf")
 SSH_DROP_IN = (
@@ -106,6 +115,7 @@ class Check:
     text: str
     fix: str = ""
     apply: tuple[tuple[str, ...], ...] = ()
+    unread: bool = False  # the setting could not be read: neither held nor not held (security_level)
 
 
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
@@ -348,6 +358,7 @@ def firewall_apps(host: Host) -> Check:
             "Firewall list",
             "could not be read",
             "check System Settings → Network → Firewall → Options",
+            unread=True,
         )
     allowed = [path for path, ok in _listed_apps(out) if ok and INTERPRETERS.match(Path(path).name)]
     if not allowed:
@@ -792,9 +803,74 @@ def sudoers(host: Host, contents: dict[str, str | None] | None = None) -> Check:
             "warn",
             "Passwordless sudo",
             f"{len(unread)} rule file(s) in /etc/sudoers.d can be read only by root",
-            f"{HARDEN} checks them, or run: sudo grep -l NOPASSWD /etc/sudoers.d/* (prints names only)",
+            f"{HARDEN} checks them, or run: {SUDO} /usr/bin/grep -l NOPASSWD /etc/sudoers.d/* (prints names only)",
         )
     return Check("sudoers", "ok", "Passwordless sudo", "no rule in /etc/sudoers.d skips the password")
+
+
+VISUDO = "/usr/sbin/visudo"
+PASSWORDLESS = "Passwordless sudo"
+# Defaults that skip your password, or let one sign-in count for every program of yours (any of them then is root)
+_SUDO_DEFAULTS = {
+    "!authenticate": "sudo asks no password at all (!authenticate)",
+    "timestamp_type=global": "one sudo sign-in counts for every program of yours (timestamp_type=global)",
+    "!tty_tickets": "one sudo sign-in counts for every program of yours (!tty_tickets)",
+}
+SUDO_FIX = (
+    f"edit it with {SUDO} {VISUDO} (/etc/sudoers), or {SUDO} {VISUDO} -f <file> for a file in /etc/sudoers.d; "
+    f"{HARDEN} removes a file there that holds only rules without the password (it asks first)"
+)
+
+
+def sudo_listing(listing: str) -> Check:
+    """Your sudo as `sudo -l` lists it (yours, or root's `sudo -l -U <you>`): every rule and Default that applies to
+    you, from /etc/sudoers and /etc/sudoers.d alike. A rule that runs without the password (NOPASSWD) and Defaults
+    that skip it or share one sign-in with every program of yours are named as kinds and counts, never the rules.
+    Not sudo's listing: not read."""
+    rules = 0
+    found: list[str] = []
+    section = ""
+    read = False
+    for raw in listing.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if not raw[:1].isspace():  # a heading: "Matching Defaults entries for …:", "User … may run …:"
+            low = line.lower()
+            section = "defaults" if "defaults" in low else "rules" if " may run" in low else ""
+            read = read or bool(section) or "not allowed to run sudo" in low
+            continue
+        if section == "rules" and re.search(r"\bNOPASSWD:", line):
+            rules += 1
+        elif section == "defaults":
+            for token in re.split(r"[\s,]+", line):
+                why = _SUDO_DEFAULTS.get(token)
+                if why and why not in found:
+                    found.append(why)
+    if not read:
+        return Check("sudoers", "warn", PASSWORDLESS, "could not be read", f"{HARDEN} reads it", unread=True)
+    if rules:
+        plural = "s run" if rules != 1 else " runs"
+        found.insert(0, f"{rules} sudo rule{plural} without your password (NOPASSWD)")
+    if found:
+        text = f"{'; '.join(found)}: any program you run can become root, and read her data"
+        return Check("sudoers", "warn", PASSWORDLESS, text, SUDO_FIX)
+    return Check("sudoers", "ok", PASSWORDLESS, "no sudo rule or setting skips your password")
+
+
+def owner_sudo(host: Host) -> Check:
+    """Your sudo, read as you without a password (read-only): `sudo -n -k -l` lists your rules without asking only
+    when one of them runs without the password (sudo's listpw default) or none needs one; "a password is required"
+    means no rule skips it. -k ignores your cached sign-in (it is kept): a sudo used a minute ago proves nothing. The
+    sign-in settings (timestamp_type) need your password: harden reads them, and root for her doctor."""
+    if host.dry_run:  # a dry run never runs sudo, not even to list
+        return Check("sudoers", "warn", PASSWORDLESS, "not read in a dry run (sudo is not run there)", unread=True)
+    code, out = host.run([SUDO, "-n", "-k", "-l"], read_only=True)
+    if code == 0:
+        return sudo_listing(out)
+    if "password is required" in out:
+        return Check("sudoers", "ok", PASSWORDLESS, "no sudo rule runs without your password")
+    return sudo_listing("")
 
 
 def admins(host: Host, owner: str) -> Check:
@@ -996,19 +1072,64 @@ def data_modes(home: Path, *, sudo: bool = False) -> Check:
     )
 
 
+ACCOUNT_FILE = re.compile(r"[0-9A-Za-z_][0-9A-Za-z_.-]*")  # signal-cli's own name for an account file: no path
+JSON_LIMIT = 4 * 2**20
+
+
+def read_json(path: Path, limit: int = JSON_LIMIT) -> Any:
+    """A small JSON file read as data, as whoever runs this (root in the move): never through a link at its name
+    (O_NOFOLLOW), never waiting on a FIFO (O_NONBLOCK), a regular file only, at most `limit` bytes. Raises OSError or
+    ValueError."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    with os.fdopen(fd, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise OSError(f"{path}: not a regular file")
+        data = handle.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError(f"{path}: over {limit} bytes")
+    return json.loads(data.decode("utf-8"))
+
+
+def signal_listed(signal_data: Path, number: str) -> list[dict[str, Any]]:
+    """accounts.json's entries for the number (every entry without one). Raises FileNotFoundError when there is no
+    list, OSError or ValueError when it cannot be read."""
+    listed = read_json(signal_data / "data" / "accounts.json")
+    accounts = listed.get("accounts", []) if isinstance(listed, dict) else None
+    if not isinstance(accounts, list):
+        raise ValueError("accounts.json: no list of accounts")
+    entries = [entry for entry in accounts if isinstance(entry, dict)]
+    return [entry for entry in entries if entry.get("number") == number] if number else entries
+
+
+def account_file(signal_data: Path, entry: dict[str, Any]) -> dict[str, Any] | None:
+    """The account file an entry of accounts.json names, by signal-cli's own name for it (never a path); None when
+    the name is not one or the file cannot be read."""
+    name = entry.get("path")
+    if not isinstance(name, str) or not ACCOUNT_FILE.fullmatch(name):
+        return None
+    try:
+        account = read_json(signal_data / "data" / name)
+    except (OSError, ValueError):
+        return None
+    return account if isinstance(account, dict) else None
+
+
+def signal_account(signal_data: Path, number: str) -> dict[str, Any] | None:
+    """signal-cli's own account file for the number (accounts.json names it), without a number the only account there;
+    None when there is none or it cannot be read. It holds her keys: callers take one fact from it, never pass it on.
+    Doctor, setup and the move all read it here (`read_json`: no link followed, no FIFO waited on)."""
+    try:
+        matches = signal_listed(signal_data, number)
+    except (OSError, ValueError):
+        return None
+    return account_file(signal_data, matches[0]) if len(matches) == 1 else None
+
+
 def registration_lock(signal_data: Path, number: str) -> bool | None:
     """Whether her Signal account has a Registration Lock PIN, from signal-cli's own account file. None: unreadable or
     no such account. The PIN itself is never returned. Without a number, the only account there."""
-    try:
-        listed = json.loads((signal_data / "data" / "accounts.json").read_text(encoding="utf-8")).get("accounts", [])
-        entries = [a for a in listed if isinstance(a, dict)]
-        matches = [a for a in entries if a.get("number") == number] if number else entries
-        if len(matches) != 1 or not re.fullmatch(r"[0-9A-Za-z_.-]+", str(matches[0].get("path", ""))):
-            return None
-        account = json.loads((signal_data / "data" / str(matches[0]["path"])).read_text(encoding="utf-8"))
-        return bool(account.get("registrationLockPin")) if isinstance(account, dict) else None
-    except (OSError, ValueError, AttributeError, TypeError, KeyError):
-        return None
+    account = signal_account(signal_data, number)
+    return None if account is None else bool(account.get("registrationLockPin"))
 
 
 NO_ACCOUNT = "no Signal account for her number yet"
@@ -1018,14 +1139,12 @@ def registration_lock_state(signal_data: Path, number: str) -> Literal["on", "of
     """ "on" or "off"; "none" when signal-cli holds no account for the number yet (nothing registered here);
     "unknown" when its account file cannot be read. Never the PIN."""
     try:
-        listed = json.loads((signal_data / "data" / "accounts.json").read_text(encoding="utf-8")).get("accounts", [])
+        if not signal_listed(signal_data, number):
+            return "none"
     except FileNotFoundError:
         return "none"
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError):
         return "unknown"
-    entries = [a for a in listed if isinstance(a, dict)] if isinstance(listed, list) else []
-    if not (([a for a in entries if a.get("number") == number]) if number else entries):
-        return "none"
     state = registration_lock(signal_data, number)
     return "unknown" if state is None else "on" if state else "off"
 
@@ -1060,23 +1179,102 @@ def registration_lock_check(home: Path, number: str = "") -> Check:
         "Registration Lock",
         "her Signal account file could not be read",
         "/usr/bin/sudo /usr/local/estia/bin/estia doctor reads it as her; setup_assistant.md, 2.10",
+        unread=True,
     )
 
 
 # ------------------------------------------------------------------ the sets
 
 
-def doctor_checks(host: Host, home: Path, bot_number: str = "") -> list[Check]:
-    """Doctor's lines: the firewall (on: fine, with a line for each listener it does not let through; off: one
-    neutral line naming the nuclear option), SSH passwords, FileVault, her file modes and her Registration Lock.
-    Read-only; the fixes name scripts/harden.sh, and nothing is applied."""
+def level_checks(host: Host, home: Path, bot_number: str = "") -> list[Check]:
+    """What the security level is read from (read-only, as doctor and the bridge run them): the firewall, SSH, her
+    file modes, her Registration Lock and the firewall's list (doctor shows no line of its own for the list: outside
+    the nuclear option it is never a "!")."""
     return [
         doctor_firewall(host),
-        *firewall_listeners(host),
         ssh_password(host),
-        filevault(host),
         _shown(data_modes(home)),
         registration_lock_check(home, bot_number),
+        firewall_apps(host),
+    ]
+
+
+_HARDENED_KEYS = ("ssh_password", "data_modes", "registration_lock")  # what the security step sets and doctor reads
+# no sudo rule skips your password: counts wherever it can be read (doctor as you; in her own user from root's listing),
+# never in her bridge's own reading (her user cannot read sudo's rules)
+_SUDO_KEY = "sudoers"
+_LEVEL_KEYS = (*_HARDENED_KEYS, _SUDO_KEY)
+_NUCLEAR_KEYS = ("firewall", "firewall_apps")  # and what --nuclear adds that can be read (never the keychain lock)
+
+
+def security_level(checks: Sequence[Check]) -> str | None:
+    """The Mac's security level from the checks: "nuclear" when the security step's settings hold (SSH with keys only
+    or off, her files private, her Registration Lock), the firewall is on and no interpreter is on its list;
+    "hardened" when the security step's settings hold; "" when one of them was read and does not hold; None when one
+    of them could not be read (and none was read as not held). Stealth mode and the keychain lock do not count."""
+    found = {check.key: check for check in checks}
+    held = [found[key] for key in _LEVEL_KEYS if key in found]
+    if any(check.status != "ok" and not check.unread for check in held):
+        return ""
+    if any(key not in found for key in _HARDENED_KEYS) or any(check.status != "ok" for check in held):
+        return None
+    if all(key in found and found[key].status == "ok" for key in _NUCLEAR_KEYS):
+        return NUCLEAR_LEVEL
+    return HARDENED
+
+
+def mac_security_level(home: Path, bot_number: str = "") -> str | None:
+    """The Mac's security level as doctor reads it, for her list of what she can do (read-only, fixed tools, nothing
+    applied; `home`: hers). None off the live Mac (a test's or a rehearsal's root): nothing is read there; and None
+    when a setting it needs could not be read."""
+    if estia_root() != Path("/"):
+        return None
+    return security_level(level_checks(Host(Path("/"), say=lambda _line: None), home, bot_number))
+
+
+def level_check(checks: Sequence[Check]) -> Check:
+    """Doctor's last security line: the level the Mac is at, by name, with the other level named too."""
+    level = security_level(checks)
+    if level == NUCLEAR_LEVEL:
+        text = (
+            f"{NUCLEAR_LEVEL}: {HARDENED}, the firewall on and no interpreter on its list (the strictest of the two "
+            "levels; stealth mode and the keychain lock do not count)"
+        )
+        return Check("security_level", "ok", "Security level", text)
+    if level == HARDENED:
+        firewall_on = any(check.key == "firewall" and check.status == "ok" for check in checks)
+        adds = "python3 and ruby off the firewall's list" if firewall_on else "the firewall"
+        text = f"{HARDENED} (the security step); {NUCLEAR_LEVEL}, the other level, adds {adds}: {NUCLEAR}"
+        return Check("security_level", "ok", "Security level", text)
+    if level is None:
+        unread = [check.part for check in checks if check.key in _LEVEL_KEYS and check.status != "ok"]
+        return Check("security_level", "warn", "Security level", f"not read: {', '.join(unread)} could not be read")
+    missing = [check.part for check in checks if check.key in _LEVEL_KEYS and check.status != "ok" and not check.unread]
+    return Check(
+        "security_level",
+        "warn",
+        "Security level",
+        f"not {HARDENED} yet: {', '.join(missing)} not as the security step sets them",
+        f"{HARDEN} (the security step) sets the {HARDENED} level",
+    )
+
+
+def doctor_checks(host: Host, home: Path, bot_number: str = "", *, sudo: Check | None = None) -> list[Check]:
+    """Doctor's lines: the firewall (on: fine, with a line for each listener it does not let through; off: one
+    neutral line naming the nuclear option), SSH passwords, FileVault, her file modes, her Registration Lock and, when
+    it could be read (`sudo`: `owner_sudo` as you, `sudo_listing` of root's listing for her doctor), passwordless sudo,
+    then the security level they make. Read-only; the fixes name scripts/harden.sh, and nothing is applied."""
+    firewall, ssh, modes, lock, apps = level_checks(host, home, bot_number)
+    read = [sudo] if sudo is not None else []
+    return [
+        firewall,
+        *firewall_listeners(host),
+        ssh,
+        filevault(host),
+        modes,
+        lock,
+        *read,
+        level_check((firewall, ssh, modes, lock, apps, *read)),
     ]
 
 
@@ -1095,7 +1293,7 @@ def all_checks(
         ssh_password(host, key_home=owner_home),
         data_modes(her_home, sudo=own_user),
         keychain(host, owner_home),
-        sudoers(host),
+        owner_sudo(host),
         registration_lock_check(her_home, bot_number),
         filevault(host),
         auto_login(host),

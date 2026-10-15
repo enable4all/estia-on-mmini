@@ -1,14 +1,14 @@
 # End-to-end checklist (from your phone)
 
-Before you start, `scripts/doctor.sh` must show each part you test without ✗ (○ means set up, not used yet). Then run with the bridge in the foreground (`scripts/run.sh` in a terminal; if the daemon is installed, stop it first with `/usr/bin/sudo launchctl bootout system/com.local-assistant.bridge` and load it again afterwards with `/usr/bin/sudo launchctl bootstrap system /Library/LaunchDaemons/com.local-assistant.bridge.plist`) and `tail -f ~/Library/Logs/local-assistant/bridge.log`
+Before you start, the check (`/usr/bin/sudo /usr/local/estia/bin/estia doctor`; before her own user, `scripts/doctor.sh`) must show each part you test without ✗ (○ means set up, not used yet). In her own user she already runs: read her log with `/usr/bin/sudo /usr/local/estia/bin/estia logs -n 100` after each item. Before her own user, run with the bridge in the foreground (`scripts/run.sh` in a terminal; if the daemon is installed, stop it first with `/usr/bin/sudo /bin/launchctl bootout system/com.local-assistant.bridge` and load it again afterwards with `/usr/bin/sudo /bin/launchctl bootstrap system /Library/LaunchDaemons/com.local-assistant.bridge.plist`) and `tail -f ~/Library/Logs/local-assistant/bridge.log`
 next to it. Keep your results in a note of your own, not in the repository, and tick each item with what you observed.
 
 | # | Send from the phone | Expected | Result |
 |---|---|---|---|
-| 1 | `hello` | Read receipt, "typing…", short plain-text answer within ~10–30 s (the first message may include the ~8 s model load) | |
+| 1 | `hello` | Read receipt, "typing…", a short answer within ~10–30 s, no asterisks shown (the first message may include the ~8 s model load) | |
 | 2 | A follow-up that needs #1 (e.g. "and what can you do?") | Answer refers to the conversation | |
 | 3 | `Please remember that I don't drink coffee` | "Noted: …"; `/profile` shows it as "you asked" | |
-| 4 | `/profile` | Numbered facts with source and date, fill level | |
+| 4 | `/profile` | "Your profile" in bold with the fill level; numbered facts with source and date under their category in bold, a blank line between groups | |
 | 5 | `/forget N` (the coffee fact) | "Forgotten: #N …"; `/profile` no longer lists it | |
 | 6 | `/learn <your public LinkedIn link>`, then `Please learn from my LinkedIn profile: <link>` | She lists the facts it saved (role, employer, education …); `/profile` shows them "from a link" | |
 | 7 | A voice note (without `[voice]` in the config) | "I can only handle text and photos for now." | |
@@ -40,20 +40,21 @@ next to it. Keep your results in a note of your own, not in the repository, and 
 | 28 | `/voice echo on`, a voice note | `🎙️ "…"` with what was heard, then the answer and the voice note | |
 | 29 | `/voice off`, a voice note; `/voice on`, a typed question | Text only; then text and a voice note | |
 | 30 | A voice note asking for something long ("tell me about all my projects") | The voice note ends with "The rest is in the text." | |
-| 31 | `/usr/bin/sudo launchctl bootout system/com.local-assistant.voice`, a voice note; bootstrap it again | "Voice isn't available right now; please type it."; afterwards voice works again | |
+| 31 | `/usr/bin/sudo /usr/local/estia/bin/estia stop voice`, a voice note; then `/usr/bin/sudo /usr/local/estia/bin/estia start voice` | "Voice isn't available right now; please type it."; afterwards voice works again | |
 | 32 | Devices: `scripts/tapo-discover.sh`, then the chosen devices in `[[tapo.devices]]` and a bridge restart; `scripts/doctor.sh` | Lights and plugs ○ (✓ once a device has answered); `How's the Mac?` reports all N devices as answering | |
 | 33 | "Turn on <a light>", "dim it to 30 %, warm white", "make it blue", "turn it off" | Each happens within ~5 s; each answer is followed by "Devices: …" with what really changed | |
 | 34 | "Is <a plug> on?", then "switch it off" | The right state; switched off; note | |
 | 35 | With one device set to `ask first`: "switch it off", reply `yes`; again, reply something else | She asks for yes; after `yes` "Devices: … off" (no answer from the model); the other reply cancels it | |
 | 36 | Pull one device's plug, ask for it | "… isn't answering (switched off at the wall, or a new address?)" | |
 | 37 | Calendar: `cd tools/ical && uv sync --frozen`, `[calendar]` in the config, a bridge restart; `scripts/doctor.sh` | Calendar ○ (✓ once it has been read); `How's the Mac?` reports the calendar as ok, with the number of events in the next 7 days | |
-| 38 | Next morning 09:15 | The digest starts with the date, "Calendar today:" (the same events as the calendar app, repeating ones included, declined ones and what is over left out), "Tomorrow: …", then the mail part | |
+| 38 | Next morning 09:15 | The digest starts with the date in bold, then "Today" in bold (the same events as the calendar app, repeating ones included, declined ones and what is over left out, one per line), a blank line, "Tomorrow", then a block per mailbox ("Mail (work)" in bold), numbered 1 to n from the top; no asterisks shown | |
 | 39 | `What's on Friday?` (also once on a Friday) | That day's events with times and places | |
 | 40 | `When is <an event>?` | The date from the calendar | |
 | 41 | Add an event in the calendar app, then ask about that day after 5, 15 and 60 minutes | Note when it shows up (the feed can lag behind the app) | |
 | 41a | Several calendars: `[[calendar.sources]]` with a second Google calendar (`scripts/set-calendar-url.sh <name>`) and/or a mailbox's Outlook calendar (`Calendars.Read` granted by an administrator, or `scripts/mail-login.sh <address>` again), a bridge restart; `scripts/doctor.sh` | One line per calendar, ○ (✓ once read); `What's on <day>?` puts each event's calendar before its title ("Work: …"); an invitation in two calendars shows once; an all-day Outlook event shows on its own day, not the day before | |
+| 41c | A CalDAV calendar: an app-specific password (iCloud: account.apple.com), `scripts/set-calendar-password.sh <name>`, its `[[calendar.sources]]` entry with `caldav`, `user` and `calendar`, a bridge restart; `scripts/doctor.sh`; then a wrong calendar name, then a revoked password | ○, then ✓ after `What's on <day>?` with its events (repeating ones expanded, declined ones left out); the wrong name gives ✗ "no calendar by that name" with its fix; the revoked password gives ✗ "user name or password refused" and one note with the fix. Note whether iCloud answers from a pNN-caldav host | |
 | 41b | Make one calendar unreadable (an Outlook calendar before `Calendars.Read` is granted, or a Google address reset) | The digest and her answers name that calendar with the reason and the fix; the other calendars' events still show; mail keeps working | |
-| 22 | Optional alert test with an entry in `[health] extra_checks`: stop that service on purpose (for a launchd service: `/usr/bin/sudo launchctl bootout system/<label>`), wait, then start it again (`/usr/bin/sudo launchctl bootstrap system <plist>`) | Within 4 h + 5 min (or sooner after a bridge restart: first check 2 min after start, alert 5 min later) "⚠ Problem on the Mac: - my-service: not answering (since HH:MM)"; after the restart, within 5 min "✓ Back to normal on the Mac: - my-service (was down HH:MM–HH:MM)" | |
+| 22 | Optional alert test with an entry in `[health] extra_checks`: stop that service on purpose (for a launchd service: `/usr/bin/sudo /bin/launchctl bootout system/<label>`), wait, then start it again (`/usr/bin/sudo /bin/launchctl bootstrap system <plist>`) | Within 4 h + 5 min (or sooner after a bridge restart: first check 2 min after start, alert 5 min later) "⚠ Problem on the Mac: - my-service: not answering (since HH:MM)"; after the restart, within 5 min "✓ Back to normal on the Mac: - my-service (was down HH:MM–HH:MM)" | |
 
 ## Calls (with `[calls]`; call her on Signal)
 
@@ -161,7 +162,7 @@ no `[initiative]` section (they are opt-in).
 |---|---|---|---|
 | 87 | Start the updated bridge on an install that already chats, during the day, and wait a few minutes without writing; then `/initiative`, `/initiative on`, a restart | Nothing she starts arrives; `/status` shows "Initiative: off · /initiative on turns it on". "Messages I start myself: off. /initiative on turns them on (…)."; then "On. Now and then I'll message you first: … /quiet pauses that. /initiative off turns that off."; no other announcement, not after the restart either | |
 | 88 | Draft each kind: `--draft improvise`, `--draft lookback` (after a week of chatting), `--draft followup` (after 89) | Short, warm, in your language, about you and the moment or your own week; no claims, links, numbers, mail or calendar; "(nothing would be sent: …)" when a check failed, with what she wrote | |
-| 89 | "I'll call the dentist tomorrow", then leave her alone for half an hour; `/reminders` | Under "Check-ins I may send:" one `#cN` with the day after tomorrow, evening; the day after tomorrow from 17:00 a check-in like "Did you get hold of the dentist?" ending "(a check-in on something you said · /quiet to pause)" | |
+| 89 | "I'll call the dentist tomorrow", then leave her alone for half an hour; `/reminders` | Under "Check-ins I may send" (bold) one `#cN` with the day after tomorrow, evening; the day after tomorrow from 17:00 a check-in like "Did you get hold of the dentist?" ending "(a check-in on something you said · /quiet to pause)" | |
 | 90 | With `[calendar]`: move an event later today by an hour in Google Calendar, and one in Outlook; wait up to 30 minutes | "Calendar change: <title> moved HH:MM → HH:MM (today)." ending "(calendar change · /quiet to pause)", at most one a day | |
 | 91 | With `[calendar]`: an event tomorrow at 07:30 | At 20:00: "Early start tomorrow: 07:30 <title>." (unless she already wrote first that day) | |
 | 92 | `/quiet`, then `/status`; later `/quiet off` | "Quiet: I won't message you first until you send /quiet off. Reminders you set still come."; `/status` shows "Initiative: paused (/quiet) · …"; nothing she starts arrives meanwhile; a reminder does. "I may message you first again: …" | |
@@ -187,8 +188,8 @@ Their facts are in `status.json` (times and a count only).
 | 108 | Set `[privacy] keep_days = 1` on a test install, leave it overnight | The next morning `/status` shows fewer history messages; `bridge.log` has one "retention: … deleted" line after 03:00 | |
 | 109 | Watch `launchd.log` and `voice.log` grow past 10 MB (or start with a large one) | Emptied at the next start or the next line; `bridge.log` rotates to `bridge.log.1` … `.5` at 10 MB | |
 | 110 | An allowed linked device, unused for 15 days (or set its `last_seen` in `known_devices` back on a test install), sends a message; then `/devices forget N` from the phone after unlinking a device | Held with "…silent for more than 14 days…"; after `/devices forget N` the number is off `/devices`, and a new device that gets it is held | |
-| 111 | `ls -l /var/estia/Library/Logs/local-assistant/launchd.log` after the first start; then, on a test install only, replace it with a link to a file in `/tmp` as `_estia` and restart the bridge | Owned by `_estia`, 0600; after the restart the file in `/tmp` is unchanged (launchd did not follow the link as root). If it changed, point StandardOutPath at /dev/null and report it | |
-| 112 | `/usr/bin/sudo cat /etc/ssh/sshd_config.d/000-estia-keys-only.conf` after the security step; `ssh _estia@<the Mac>` from the laptop | Holds `DenyUsers _estia`; the login is refused | |
+| 111 | `ls -ld /var/log/estia; ls -l /var/log/estia` after the first start (an older install: after `--update-tools` and one more update) | The folder is root's, 0755, so her account cannot put a link there; `launchd.log` and `voice.log` in it are `_estia`'s, 0600 | |
+| 112 | `/usr/bin/sudo /bin/cat /etc/ssh/sshd_config.d/000-estia-keys-only.conf` after the security step; `ssh _estia@<the Mac>` from the laptop | Holds `DenyUsers _estia`; the login is refused | |
 | 113 | `dscl . -read /Users/_estia AuthenticationAuthority Password UserShell IsHidden` <!-- privacy-ok: her directory record, not a home folder --> | No AuthenticationAuthority; `Password: *`, `/usr/bin/false`, `IsHidden: 1`; doctor "Own user ✓ … no password, no login" | |
 | 114 | A commit that changes `scripts/estia`, then `/usr/bin/sudo /usr/local/estia/bin/estia-deploy` | The commits and files are listed and a yes is asked; after it "The root-run tools differ in this release (scripts/estia): the installed ones stay"; `--update-tools` shows the diff and asks; `/usr/local/estia/bin/estia` changes only on yes | |
 | 115 | `/usr/bin/sudo /usr/local/estia/bin/estia signal listDevices`, then `/usr/bin/sudo /usr/local/estia/bin/estia unlock` after a `/lock` | The bridge stops, her devices are listed (only this Mac), she starts again; after `unlock` she answers at once | |
@@ -214,3 +215,41 @@ Their facts are in `status.json` (times and a count only).
 | 125 | After a move that kept an earlier copy aside: `/usr/bin/sudo /usr/local/estia/bin/estia remove-old` | It names each `/var/estia/.before-<time>` folder it deletes, and the held folders when on record (no rollback after) | |
 | 126 | With "block all incoming connections" on (a test Mac only): `/usr/bin/sudo /usr/local/estia/bin/estia doctor` | One line "! Firewall: block all incoming connections is on: … cannot be reached from other machines" with `--setblockall off`, no per-program commands | |
 | 127 | The first voice deploy with Whisper's pinned files: `/usr/bin/sudo /usr/local/estia/bin/estia-deploy --voice`, then `/usr/bin/sudo /usr/local/estia/bin/estia logs voice -n 40` | "listening: pinned model files checked in …" (or, for a copy an older download filled with other files, "… set aside as <folder>.refused-<time>, never loaded; downloading the pinned ones again", then "… downloaded and checked"), then "listening ready in …"; `curl -s http://127.0.0.1:8150/health` shows `stt` ready. Never "listening unavailable" | |
+
+## Text styles
+
+| # | Do | Expected | Result |
+|---|---|---|---|
+| 128 | "Three tips for sleeping better, as a list with a bold title each" | Each title in bold, "•" at each line's start, no `**` or `- ` shown; the same request as a voice note: her voice says no "asterisk" | |
+| 129 | `/help`, `/status`, `/reminders`, `/devices` | Each section under a bold heading, a blank line between sections, one item per line | |
+| 130 | A question whose answer is long (over about 2000 characters, e.g. "explain how a bill becomes law in the Netherlands, in detail, with bold terms") | The whole text arrives; bold shows in its first part; whether bold past the first 2000 bytes shows is untested (only styles inside them are sent) | |
+| 131 | On Signal Desktop and on the phone, the morning digest | Same layout on both: the date, "Today", "Tomorrow" and each "Mail: …" in bold, blank lines between | |
+
+## Hue lights (no real Hue Bridge tested yet)
+
+| # | Do | Expected | Result |
+|---|---|---|---|
+| 132 | `scripts/hue-pair.sh`, then press the bridge's button; once more with the router's address (`scripts/hue-pair.sh 192.168.1.1` or yours) | The first finds the bridge, shows the fingerprint and lists the lights; the second stops at once: "… answers, but not as a Hue Bridge: nothing saved." | |
+| 133 | "turn on the hall light" with a Hue light that is off, then at once "is the hall light on?" | The note says "on" (not "off"), and so does the answer; `bridge.log` shows one `hue-set` | |
+| 134 | Switch a Hue light off at the wall, wait a minute, then "is the hall light on?" and `scripts/doctor.sh` | "not answering (…switched off at the wall?)", never its last state; doctor's Hue Bridge line is ! naming that light | |
+| 135 | With three or more Hue lights: "How's the Mac?" | Every Hue light's state, within a few seconds; `bridge.log` shows one `hue-status` | |
+| 136 | After a bridge firmware update: "is the hall light on?" | Its state; if "the certificate is not the one saved at pairing", note it here (pairing again is the fix) | |
+
+## Documents (with `[documents]`, in her own user)
+
+| # | Do | Expected | Result |
+|---|---|---|---|
+| 137 | As you, in your checkout (no admin rights): `scripts/share-documents.sh --dry-run`, then `scripts/share-documents.sh` | The dry run names `~/Estia-KB` and, for passing through, your home only (no `~/Documents`), and changes nothing; the real run makes `~/Estia-KB` (0700) when missing, prints no "Operation not permitted" and ends with "✓ _estia lists and reads …" and the line `[documents] folder = "/Users/<you>/Estia-KB"` | |
+| 138 | That line in her config (`/usr/bin/sudo /usr/local/estia/bin/estia config`), `/usr/bin/sudo /usr/local/estia/bin/estia restart`, then `/usr/bin/sudo /usr/local/estia/bin/estia doctor` | Documents ○ ("shared and readable"), ✓ after her first look; never "macOS refuses it" | |
+| 139 | Send her a PDF (a lease) with "what does it say about pets?" | "Saved in your Estia-KB folder: <date> lease.pdf (N pages).", then an answer that names the document and the page; in Finder the file in `~/Estia-KB` opens, moves and deletes as yours | |
+| 140 | Outside quiet hours, copy a PDF into `~/Estia-KB` on the Mac and wait up to an hour; then `/docs` | Unasked, "I found 1 new document: <its name>."; `/docs` lists it first | |
+| 141 | `/usr/bin/sudo /usr/local/estia/bin/estia logs -n 5000 \| grep documents` | No `EPERM` and no `EACCES` | |
+| 142 | `scripts/share-documents.sh --revoke`, `/docs`, then `scripts/share-documents.sh` again and `/docs` | After the revoke: "I cannot read your Estia-KB folder right now …" and doctor ✗ "not shared with her"; after the new share, the documents are read again from the start | |
+| 143 | Before 138, with her config still naming the first share's folder in Documents: `/usr/bin/sudo /usr/local/estia/bin/estia doctor` | ✗ Documents: "<that folder> is not your ~/Estia-KB: the share opens only ~/Estia-KB to her", its fix her config's `[documents] folder` line with "macOS guards Documents, Desktop and Downloads; a folder in your home needs no extra permission"; never `scripts/share-documents.sh` | |
+
+## Her voice service's address (the per-chunk check, live untested)
+
+| # | Do | Expected | Result |
+|---|---|---|---|
+| 144 | With `interrupt = "only speech"` in `[calls]` (the default), a call of a few minutes in which you talk over her several times; then `/usr/bin/sudo /usr/local/estia/bin/estia logs -n 300 \| grep "calls:"` | The end-of-call line shows no new `timeout` or `late` detector failures (each 256 ms chunk now opens its own connection and runs `lsof` first) and no "loudness took over"; if it does, note it here: the fix is one checked connection per call stream | |
+| 145 | `/usr/bin/sudo /usr/local/estia/bin/estia stop voice`; as you, `/usr/bin/python3 -m http.server 8150 --bind 127.0.0.1` in another window; send her a voice note; stop the server (Ctrl-C); `/usr/bin/sudo /usr/local/estia/bin/estia start voice` | The server prints no request line: nothing reached it; `/status` and doctor name another program at her voice address ("not hers"); after `start voice` voice notes work again | |

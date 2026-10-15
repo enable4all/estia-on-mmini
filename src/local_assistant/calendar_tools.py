@@ -24,6 +24,7 @@ from local_assistant import prompts
 from local_assistant.calendar_feed import Agenda, CalendarFeed, Event, FeedError, FeedGone, FeedNotSet, Missed
 from local_assistant.config import DEFAULT_CALENDAR, Config
 from local_assistant.fetcher import strip_control_tokens
+from local_assistant.signal_text import unmarked
 
 log = logging.getLogger(__name__)
 
@@ -55,8 +56,9 @@ def clean(text: str, limit: int) -> str:
 
 
 def clean_place(text: str) -> str:
-    """A short place: links (meeting links) removed."""
-    return clean(_LINK.sub(" ", text), PLACE_CHARS).strip(" ,;·-")
+    """A short place: markers (*, ~, `) and then links (meeting links) removed, so markup cannot split a link that
+    Signal's text styles would join ("**evil**.com")."""
+    return clean(_LINK.sub(" ", unmarked(text)), PLACE_CHARS).strip(" ,;·-")
 
 
 def resolve_start(word: str, today: date) -> date:
@@ -89,6 +91,11 @@ def _in(wait: timedelta) -> str:
     return f"in {hours} h" + (f" {rest} min" if rest else "")
 
 
+def _block(heading: str, lines: list[str]) -> str:
+    """A digest section: its bold heading, then its lines; "**Today**: nothing" without any."""
+    return "\n".join([f"**{heading}**", *lines]) if lines else f"**{heading}**: nothing"
+
+
 def _full(day: date) -> str:
     return f"{day:%a} {day.day} {day:%b} {day.year}"
 
@@ -105,8 +112,9 @@ class CalendarTools:
         self.status_seconds = 10.0  # mini_status must not wait on a slow Google
 
     async def digest_block(self) -> str:
-        """Today's events still to come (and all-day items), then one line for tomorrow; then each calendar that could
-        not be read, with why."""
+        """Today's events still to come (and all-day items) under a bold "Today", then tomorrow's under "Tomorrow", one
+        per line ("•"), a blank line between; then each calendar that could not be read, with why. Markup: sent as
+        Signal's text styles (signal_text)."""
         now = datetime.fromtimestamp(self._clock(), self._tz)
         today = now.date()
         tomorrow = today + timedelta(days=1)
@@ -117,12 +125,12 @@ class CalendarTools:
         if self._none_read(agenda):
             return "\n".join(missed)
         coming = [e for e in self._on(agenda.events, today) if e.all_day or e.end > now or e.start >= now]
-        lines = [f"- {self._line(event, today)}" for event in coming]
+        lines = [f"• {self._line(event, today)}" for event in coming]
         if len(lines) > TODAY_LINES:
             lines = [*lines[:TODAY_LINES], f"…and {len(lines) - TODAY_LINES} more"]
-        head = "Calendar today:" if lines else "Calendar today: nothing"
-        cut = [CUT_SHORT] if agenda.truncated else []
-        return "\n".join([head, *lines, self._tomorrow(agenda.events, tomorrow), *cut, *missed])
+        blocks = [_block("Today", lines), _block("Tomorrow", self._tomorrow(agenda.events, tomorrow))]
+        rest = [CUT_SHORT] if agenda.truncated else []
+        return "\n\n".join(blocks + (["\n".join([*rest, *missed])] if rest or missed else []))
 
     async def glance(self) -> str:
         """Today at the start of a call, as counts and times only: the events not over yet (declined left out), the one
@@ -170,8 +178,10 @@ class CalendarTools:
         return f"Calendar today: {text}{missed}."
 
     async def agenda(self, start: str, days: int = 1) -> str:
-        """Whole days from `start` (1 to 14), every event."""
-        first = resolve_start(start, datetime.fromtimestamp(self._clock(), self._tz).date())
+        """Whole days from `start` (1 to 14), every event; today's timed events marked by code, right after their times:
+        "(over)", "(now, until 15:00)" or "(in 40 min)", so "what's next?" never names one that has ended."""
+        now = datetime.fromtimestamp(self._clock(), self._tz)
+        first = resolve_start(start, now.date())
         days = max(1, min(MAX_DAYS, days))
         last = first + timedelta(days=days - 1)
         agenda = await self._agenda(self._midnight(first), self._midnight(last + timedelta(days=1)))
@@ -181,7 +191,8 @@ class CalendarTools:
         lines: list[str] = []
         for offset in range(days):
             day = first + timedelta(days=offset)
-            events = [f"- {self._line(event, day)}" for event in self._on(agenda.events, day)]
+            marks = now if day == now.date() else None  # today's lines only
+            events = [f"- {self._line(event, day, marks)}" for event in self._on(agenda.events, day)]
             if days > 1:
                 lines.append(f"{day:%a} {day.day} {day:%b}:" + ("" if events else " nothing"))
             elif not events:
@@ -237,7 +248,7 @@ class CalendarTools:
     def _the_one_of_before(self) -> bool:
         """One Google calendar named "calendar": its words stay exactly as before there were names."""
         sources = self._feed.sources
-        return len(sources) == 1 and sources[0].name == DEFAULT_CALENDAR and not sources[0].mailbox
+        return len(sources) == 1 and sources[0].name == DEFAULT_CALENDAR and sources[0].kind == "google"
 
     def _none_read(self, agenda: Agenda) -> bool:
         return bool(agenda.missed) and len(agenda.missed) == len(self._feed.sources)
@@ -286,16 +297,20 @@ class CalendarTools:
         return agenda
 
     async def _note(self, missed: Sequence[Missed]) -> None:
-        """One note per calendar whose address stopped working; read fine again, a later failure is noted again."""
+        """One note per calendar whose address or password stopped working; read fine again, a later failure is noted
+        again."""
         self._noted &= {m.source.name for m in missed}
         for item in missed:
-            if item.reason != "gone" or item.source.name in self._noted:
+            if item.reason not in ("gone", "password_refused") or item.source.name in self._noted:
                 continue
             self._noted.add(item.source.name)
+            named = (
+                prompts.CALENDAR_PASSWORD_NAMED if item.reason == "password_refused" else prompts.CALENDAR_GONE_NAMED
+            )
             text = (
                 prompts.CALENDAR_GONE
                 if self._the_one_of_before()
-                else prompts.CALENDAR_GONE_NAMED.format(calendar=item.source.shown, name=item.source.name)
+                else named.format(calendar=item.source.shown, name=item.source.name)
             )
             try:
                 await self._notify(text)
@@ -321,19 +336,29 @@ class CalendarTools:
         title = clean(event.title, TITLE_CHARS) or "(no title)"
         return f"{clean(event.calendar, CALENDAR_CHARS)}: {title}" if event.calendar else title
 
-    def _line(self, event: Event, day: date) -> str:
+    def _line(self, event: Event, day: date, now: datetime | None = None) -> str:
+        """One event as a line; with `now` (today's lines), a timed event's mark from code after its times."""
         title = self._title(event)
         if event.all_day:
             last = event.end.date() - timedelta(days=1)  # Google's all-day end date is exclusive
             text = f"All day: {title}" + (f" (until {_on_day(last, day)})" if last > day else "")
         else:
-            text = f"{self._times(event, day)} {title}"
+            mark = f" ({self._mark(event, day, now)})" if now is not None else ""
+            text = f"{self._times(event, day)}{mark} {title}"
         place = clean_place(event.place)
         if place:
             text += f" ({place})"
         if event.response == "needs-action":
             text += " (invite, not answered)"
         return text
+
+    def _mark(self, event: Event, day: date, now: datetime) -> str:
+        """ "over", "now, until 15:00" ("now" when it ends after this day) or "in 40 min", against `now`."""
+        if event.start > now:
+            return _in(event.start - now)
+        if event.end > now:
+            return f"now, until {event.end:%H:%M}" if event.end <= self._midnight(day + timedelta(days=1)) else "now"
+        return "over"
 
     def _times(self, event: Event, day: date) -> str:
         start, end = event.start, event.end
@@ -353,12 +378,12 @@ class CalendarTools:
             text += f" ({there} {city})"
         return text
 
-    def _tomorrow(self, events: Iterable[Event], day: date) -> str:
+    def _tomorrow(self, events: Iterable[Event], day: date) -> list[str]:
+        """Tomorrow's all-day items, then its first TOMORROW_TIMED events by start, one per line."""
         items = self._on(events, day)
-        all_day = [self._title(event) for event in items if event.all_day]
         timed = [event for event in items if not event.all_day and event.start >= self._midnight(day)]
-        parts = [f"all day: {', '.join(all_day)}"] if all_day else []
-        parts += [f"{event.start:%H:%M} {self._title(event)}" for event in timed[:TOMORROW_TIMED]]
+        lines = [f"• All day: {self._title(event)}" for event in items if event.all_day]
+        lines += [f"• {event.start:%H:%M} {self._title(event)}" for event in timed[:TOMORROW_TIMED]]
         if len(timed) > TOMORROW_TIMED:
-            parts.append(f"…and {len(timed) - TOMORROW_TIMED} more")
-        return "Tomorrow: " + (" · ".join(parts) if parts else "nothing")
+            lines.append(f"…and {len(timed) - TOMORROW_TIMED} more")
+        return lines

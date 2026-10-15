@@ -50,6 +50,7 @@ def mac_state(root: Path, **overrides: tuple[int, str]) -> dict[str, tuple[int, 
         f"{FDESETUP} status": (0, "FileVault is On.\n"),
         f"{hostsec.DSCL} . -read /Groups/admin GroupMembership": (0, "GroupMembership: root alex\n"),
         f"{SUDO} -n -l": (0, "User alex may run the following commands:\n    (ALL) ALL\n"),
+        f"{SUDO} -n -k -l": (1, "sudo: a password is required\n"),
         f"{SSHD} -t*": (0, ""),
     }
     state.update(overrides)
@@ -84,6 +85,7 @@ def step(
     own_user: bool = False,
     said: list[str] | None = None,
     nuclear: bool = False,
+    new_pin: bool = False,
 ) -> harden.Harden:
     typed = iter(pins)
     asked: list[str] = []
@@ -101,6 +103,7 @@ def step(
         hidden=lambda prompt: next(typed),
         say=(said.append if said is not None else lambda text: None),
         tailscale_tools=(),
+        new_pin=new_pin,
         nuclear=nuclear,
     )
     run.questions = asked
@@ -132,7 +135,7 @@ def test_stealth_mode_is_its_own_question_and_stays_off_without_a_yes(tmp_path: 
 
 
 def test_without_nuclear_the_strict_settings_are_one_neutral_line(tmp_path: Path) -> None:
-    """The default step never asks about the firewall, stealth mode, the firewall's list or the keychain lock, never
+    """The hardened level never asks about the firewall, stealth mode, the firewall's list or the keychain lock, never
     shows them as ! or ✗, and changes none of them: one neutral line names --nuclear."""
     root, home = mac(tmp_path)
     keychain(root, home)
@@ -197,7 +200,7 @@ def test_nothing_changes_without_a_yes_and_sudo_is_never_asked(tmp_path: Path) -
     said: list[str] = []
     assert step(host, home, said=said, nuclear=True).run() == 0
     assert not any(argv[0] == SUDO and argv[1] != "-n" for argv in host.asked)
-    assert not any(argv[:2] == (SUDO, "-n") and argv[2] != "-l" for argv in host.asked)
+    assert not any(argv[:2] == (SUDO, "-n") and argv[2:] not in (("-l",), ("-k", "-l")) for argv in host.asked)
     text = "\n".join(said)
     assert "Firewall" in text and "FileVault" in text and "Signal → Settings → Linked devices" in text
 
@@ -234,7 +237,11 @@ def test_passwordless_sudo_is_offered_only_while_password_sudo_works(tmp_path: P
     root, home = mac(tmp_path)
     (root / "etc/sudoers.d/zz-alex-setup").write_text("alex ALL=(ALL) NOPASSWD: ALL\n")
     answers = mac_state(
-        root, **{f"{SUDO} -n /bin/cat /etc/sudoers.d/zz-alex-setup": (0, "alex ALL=(ALL) NOPASSWD: ALL\n")}
+        root,
+        **{
+            f"{SUDO} -n /bin/cat /etc/sudoers.d/zz-alex-setup": (0, "alex ALL=(ALL) NOPASSWD: ALL\n"),
+            f"{SUDO} -n -k -l": (0, "User alex may run:\n    (ALL) ALL\n    (ALL) NOPASSWD: ALL\n"),
+        },
     )
     host = FakeMac(root, answers)
     run = step(host, home, yes=["passwordless sudo"])
@@ -249,6 +256,7 @@ def test_passwordless_sudo_is_offered_only_while_password_sudo_works(tmp_path: P
         **{
             f"{SUDO} -n /bin/cat /etc/sudoers.d/zz-alex-setup": (0, "alex ALL=(ALL) NOPASSWD: ALL\n"),
             f"{SUDO} -n -l": (0, "User alex may run:\n    (ALL) NOPASSWD: ALL\n"),
+            f"{SUDO} -n -k -l": (0, "User alex may run:\n    (ALL) NOPASSWD: ALL\n"),
         },
     )
     host = FakeMac(root, only_nopasswd)
@@ -256,6 +264,36 @@ def test_passwordless_sudo_is_offered_only_while_password_sudo_works(tmp_path: P
     run.run()
     assert not any("passwordless sudo" in q for q in run.questions)  # removing it would lock you out of sudo
     assert not any(argv[:3] == (SUDO, "-n", hostsec.RM) for argv in host.asked)
+
+
+def test_a_passwordless_rule_in_etc_sudoers_is_named_and_never_removed(tmp_path: Path) -> None:
+    """Review of 15 Oct: a %admin NOPASSWD rule added with visudo sits in /etc/sudoers, not /etc/sudoers.d: it is
+    found from what sudo itself lists, named, and its fix is visudo; harden never edits /etc/sudoers."""
+    root, home = mac(tmp_path)
+    listing = "User alex may run the following commands on mini:\n    (ALL) ALL\n    (ALL) NOPASSWD: ALL\n"
+    host = FakeMac(root, mac_state(root, **{f"{SUDO} -n -k -l": (0, listing)}))
+    said: list[str] = []
+    step(host, home, yes=["passwordless sudo"], said=said).run()
+    assert "! Passwordless sudo: 1 sudo rule runs without your password (NOPASSWD)" in "\n".join(said)
+    assert any("/usr/bin/sudo /usr/sbin/visudo" in line for line in said)
+    assert not any(argv[:3] == (SUDO, "-n", hostsec.RM) for argv in host.asked)
+    assert not any(argv[-1] == "/etc/sudoers" for argv in host.asked)
+
+
+def test_with_your_password_harden_reads_the_sign_in_settings_too(tmp_path: Path) -> None:
+    """One sudo sign-in for every program of yours (timestamp_type=global) is only listed with your password: harden
+    reads it once sudo is asked (always in her own user)."""
+    root, home = mac(tmp_path)
+    listing = (
+        "Matching Defaults entries for alex on mini:\n    env_reset, timestamp_type=global\n\n"
+        "User alex may run the following commands on mini:\n    (ALL) ALL\n"
+    )
+    host = FakeMac(root, mac_state(root, **{f"{SUDO} -n -l": (0, listing)}))
+    said: list[str] = []
+    step(host, home, own_user=True, said=said).run()
+    shown = "\n".join(said)
+    assert "✓ Passwordless sudo: no sudo rule runs without your password" in shown  # the first look, without it
+    assert "one sudo sign-in counts for every program of yours (timestamp_type=global)" in shown
 
 
 def test_the_registration_lock_is_set_in_a_maintenance_window(tmp_path: Path) -> None:
@@ -284,6 +322,28 @@ def test_the_registration_lock_is_set_in_a_maintenance_window(tmp_path: Path) ->
     assert host.given[pin_call] == f"{PIN}\n"  # stdin only
     assert all(PIN not in " ".join(argv) for argv in host.asked) and PIN not in "\n".join(said)
     assert any("password manager" in line for line in said)
+
+
+def test_a_new_pin_is_offered_with_the_lock_on_only_when_asked_for(tmp_path: Path) -> None:
+    """After a compromise the PIN may be known: `scripts/harden.sh --new-pin` offers a new one also while the lock is
+    on (SECURITY.md, "If the Mac is compromised", step 7); without it a lock that is on is left (review 15 Oct, 27)."""
+    root, home = mac(tmp_path)
+    (root / "Library/LaunchDaemons").mkdir(parents=True)
+    (root / "Library/LaunchDaemons/com.local-assistant.bridge.plist").write_text("x")
+    her = {"data_modes": {"status": "ok"}, "registration_lock": {"status": "ok", "text": "on"}}
+    answers = {
+        f"{SUDO} -n -u _estia -H -- *--her-checks": (0, json.dumps(her)),
+        f"{SUDO} -n -u _estia -H -- *--set-pin": (0, "Registration Lock: on\n"),
+        f"{LAUNCHCTL} print system/com.local-assistant.bridge": (0, "pid = 77\n"),
+    }
+    plain = step(FakeMac(root, mac_state(root, **answers)), home, yes=["Registration Lock"], own_user=True)
+    plain.run()
+    assert not any("Registration Lock" in q for q in plain.questions)
+    host = FakeMac(root, mac_state(root, **answers))
+    again = step(host, home, yes=["Registration Lock"], pins=[PIN, PIN], own_user=True, new_pin=True)
+    assert again.run() == 0
+    assert any("Registration Lock" in q for q in again.questions)
+    assert any(argv[-1] == "--set-pin" for argv in host.asked)
 
 
 def test_a_pin_typed_differently_twice_is_asked_again(tmp_path: Path) -> None:

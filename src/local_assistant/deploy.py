@@ -6,9 +6,12 @@
 0. Review: the commits since the live one and the files they change are shown, and nothing happens without a yes.
 1. Build, as the owner (SUDO_USER), at the release's final path /usr/local/estia/releases/<UTC stamp>-<commit>: the
    commit's files (git archive), a Python interpreter of its own (uv python install into the release, never uv's copy
-   in the owner's home), the editable .venv and the tools' venvs (uv sync, with bytecode), the voice service and the
-   programs she runs: the JVM signal-cli and the call helper, Homebrew's native signal-cli and, with the JVM build, a
-   JDK (vendor/), so nothing she runs stays in a folder the owner can change.
+   in the owner's home), the editable .venv and the tools' venvs (uv sync, with bytecode), the documents helper (swift
+   build from the commit's own sources, its binary alone kept, then it reads tools/documents/check.pdf; an extra, so a
+   failed build leaves it out and the deploy goes on), the voice service when it is installed or asked for (built
+   from the commit's own tools/voice, or the live release's build when that tree is the same; never the checkout's
+   build) and the programs she runs: the JVM signal-cli and the call helper, Homebrew's native signal-cli and, with
+   the JVM build, a JDK (vendor/), so nothing she runs stays in a folder the owner can change.
 2. Freeze, as root: the build is copied into fresh root-owned files at the same path (0755 folders and programs, 0644
    the rest, times kept so the bytecode stays valid). Hard links, links that leave the release (also through a chain
    of links), links to nothing, set-id bits and files the owner did not make stop the deploy.
@@ -28,6 +31,7 @@ Prints metadata only (names, commits, versions, file names), never file contents
 from __future__ import annotations
 
 import argparse
+import contextlib
 import difflib
 import hashlib
 import json
@@ -77,7 +81,13 @@ TOOL_FILES = (
     f"launchd/{ownuser.VOICE}.plist.in",
 )
 PROGRAMS = frozenset({"scripts/estia", "scripts/estia-deploy"})
-VOICE_BINARY = Path("tools/voice/.build/release/voice-service")
+VOICE_TOOL = Path("tools/voice")
+VOICE_BINARY = VOICE_TOOL / ".build/release/voice-service"
+SWIFT = "/usr/bin/swift"
+DOCUMENTS = Path("tools/documents")
+DOCUMENTS_BINARY = DOCUMENTS / ".build/release/documents-helper"  # config's default helper: a checkout's path too
+DOCUMENTS_CHECK = DOCUMENTS / "check.pdf"  # one text page the new build reads before the release is frozen
+DOCUMENTS_CHECK_TEXT = "This page is read after every build of the documents helper."
 
 
 class DeployError(Exception):
@@ -271,6 +281,48 @@ def copy_regular(source: Path, target: Path, mode: int) -> None:
     os.chmod(target, mode)
 
 
+def tree_digest(path: Path) -> str | None:
+    """A program or a folder as it would be copied: sha256 over each entry's path, kind, execute bit and bytes (a
+    link: its text), walked without following a link; files opened without following one or waiting on a FIFO (root
+    reads folders the owner can change here). None when it cannot be read."""
+    digest = hashlib.sha256()
+
+    def add_file(name: str, dir_fd: int | None, rel: str) -> None:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
+        with os.fdopen(fd, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                raise OSError(f"{rel}: not a regular file")
+            digest.update(f"F {rel} {int(bool(info.st_mode & 0o111))}\n".encode())
+            for block in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(block)
+
+    try:
+        top = os.lstat(path)
+        if stat.S_ISLNK(top.st_mode):
+            digest.update(f"L . {os.readlink(path)}\n".encode())
+        elif stat.S_ISREG(top.st_mode):
+            add_file(str(path), None, ".")
+        elif stat.S_ISDIR(top.st_mode):
+            for folder, dirs, files, dir_fd in os.fwalk(path, follow_symlinks=False):
+                here = os.path.relpath(folder, path)
+                dirs.sort()
+                for name in sorted([*dirs, *files]):
+                    rel = os.path.join(here, name)
+                    entry = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+                    if stat.S_ISLNK(entry.st_mode):
+                        digest.update(f"L {rel} {os.readlink(name, dir_fd=dir_fd)}\n".encode())
+                    elif stat.S_ISDIR(entry.st_mode):
+                        digest.update(f"D {rel}\n".encode())
+                    else:
+                        add_file(name, dir_fd, rel)
+        else:
+            return None
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
 def _digest(path: Path) -> str | None:
     try:
         return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -321,6 +373,9 @@ class Deploy:
         self.current = self.code / "current"
         self.tools = host.path(ownuser.TOOLS)
         self.dry = host.dry_run
+        self.voice_built = False  # this release's voice service was built now (not the live release's build)
+        self.reviewed: dict[Path, str | None] | None = None  # vendor/ as shown before the yes: what goes live
+        self.reviewed_items: list[tuple[Path, Path]] | None = None  # and where each comes from: the build copies these
 
     # ---------------------------------------------------------------- helpers
 
@@ -361,11 +416,34 @@ class Deploy:
             raise DeployError("the checkout has no commit")
         return sha or "0" * 40, dirty
 
+    def vendor_review(self) -> list[str]:
+        """Her programs from outside git (vendor/: the checkout's vendor/, Homebrew's), each with where it comes from:
+        new or changed against the live release's copy, or gone. Their digests are kept: the copy that goes live must
+        be what was shown."""
+        items = self.vendor_items()
+        self.reviewed_items = items
+        self.reviewed = {rel: tree_digest(source) for source, rel in items}
+        lines: list[str] = []
+        for source, rel in items:
+            old = tree_digest(self.current / "vendor" / rel)
+            if old is None or old != self.reviewed[rel]:
+                lines.append(f"  {'new' if old is None else 'changed'}: vendor/{rel} (from {clean(str(source))})")
+        names = {rel.parts[0] for _source, rel in items}
+        listed = self.live_meta().get("vendor")
+        for name in listed if isinstance(listed, list) else []:
+            if isinstance(name, str) and name not in names:
+                lines.append(f"  gone: vendor/{clean(name)}")
+        return lines
+
     def review(self, sha: str) -> bool:
-        """What goes live: the commits since the live one and the files they change, then a yes."""
+        """What goes live: the commits since the live one and the files they change, and her programs from outside
+        git that differ from the live release's, then a yes."""
         live = str(self.live_meta().get("sha", ""))
+        programs = self.vendor_review()
         if not re.fullmatch(r"[0-9a-f]{7,64}", live):
             self.say(f"First release from {self.checkout}: commit {sha[:12]}.")
+        elif sha.startswith(live) and programs:
+            self.say(f"Commit {sha[:12]} is live already; only her programs from outside git change:")
         elif sha.startswith(live):
             self.say(f"Commit {sha[:12]} is live already: this builds it again.")
         else:
@@ -386,6 +464,12 @@ class Deploy:
                 )
                 for line in files.splitlines()[:200]:
                     self.say(f"  {clean(line)}")
+        if programs and not (re.fullmatch(r"[0-9a-f]{7,64}", live) and sha.startswith(live)):
+            self.say("Her programs from outside git (vendor/), as they go into the release:")
+        for line in programs:
+            self.say(line)
+        if not programs and self.reviewed:
+            self.say("Her programs from outside git (vendor/): the same as the live release's.")
         if self.dry:
             self.say("would ask: Deploy it?")
             return True
@@ -429,11 +513,97 @@ class Deploy:
             found.pop(JDK, None)  # Java only for the JVM signal-cli
         return [(source, rel) for rel, source in found.items()]
 
-    def voice_source(self) -> Path | None:
-        for folder in (self.checkout / "tools/voice/.build/release", self.current / "tools/voice/.build/release"):
-            if (folder / "voice-service").is_file():
-                return folder
-        return None
+    def voice_tree(self, sha: str) -> str:
+        """git's id of tools/voice in the commit (its sources and Package.resolved: the same id, the same build); ""
+        for a commit without it."""
+        argv = [GIT, "-C", str(self.checkout), "rev-parse", "--verify", "--quiet", f"{sha}:{VOICE_TOOL}"]
+        code, out = self.host.run(self.owner(argv), read_only=True)
+        found = out.strip()
+        return found if code == 0 and re.fullmatch(r"[0-9a-f]{40,64}", found) else ""
+
+    def build_voice(self, release: Path, sha: str) -> str:
+        """The voice service (tools/voice), when it is installed or asked for (--voice): the live release's build when
+        its tools/voice is the same tree (root-owned, built from that tree), else built as the owner from the commit's
+        own sources with the exact versions in its Package.resolved, never the checkout's build (an older pull,
+        another branch, a dirty tree); its program and bundles kept. The tree it came from, or "" (no voice)."""
+        if not (self.voice or self.installed(ownuser.VOICE)):
+            return ""
+        tree = self.voice_tree(sha)
+        if not tree and self.dry:  # the commit was not read (sudo is never run in a dry run): claim no rebuild
+            self.note(f"take the live release's voice service, or build it when the commit's {VOICE_TOOL} differs")
+            return "(not read in a dry run)"
+        if not tree:
+            raise DeployError(f"commit {sha[:12]} has no {VOICE_TOOL}, and her voice service runs from the release")
+        target = release / VOICE_BINARY.parent
+        live = self.current / VOICE_BINARY.parent
+        scratch = release / ".voice-build"
+        self.voice_built = not (self.live_meta().get("voice_tree") == tree and (live / VOICE_BINARY.name).is_file())
+        if self.voice_built:
+            package = ["--package-path", str(release / VOICE_TOOL), "--scratch-path", str(scratch)]
+            self.build_step(
+                [SWIFT, "build", "-c", "release", "--force-resolved-versions", *package, "--product", "voice-service"]
+            )
+        source = scratch / "release" if self.voice_built else live
+        self.build_step([MKDIR, "-p", str(target)])
+        self.build_step([CP, "-p", str(source / VOICE_BINARY.name), str(target / VOICE_BINARY.name)])
+        for bundle in sorted(source.glob("*.bundle")):
+            self.build_step([CP, "-R", "-p", str(bundle), f"{target}/"])
+        if self.voice_built:
+            self.build_step([RM, "-rf", str(scratch)])
+        return tree
+
+    def build_documents(self, release: Path) -> bool:
+        """tools/documents' helper (Swift, Apple's frameworks only), built as the owner from the commit's own sources
+        (never the checkout's build) into a scratch folder; only its binary stays, at DOCUMENTS_BINARY (the config's
+        default, the same path as in a checkout); then it reads its check page. False for a commit without it.
+        Documents are an extra: a failed build (an older Swift, no Command Line Tools) or a check page not read
+        leaves the helper out of the release, says why, and the deploy goes on (release.json: documents false;
+        doctor names it)."""
+        package = release / DOCUMENTS
+        if not ((self.checkout if self.dry else release) / DOCUMENTS / "Package.swift").is_file():
+            return False
+        scratch = release / ".documents-build"
+        build = ["--package-path", str(package), "--scratch-path", str(scratch), "--product", "documents-helper"]
+        helper = release / DOCUMENTS_BINARY
+        try:
+            self.build_step([SWIFT, "build", "-c", "release", *build])
+            self.build_step([MKDIR, "-p", str(helper.parent)])
+            self.build_step([CP, "-p", str(scratch / "release" / helper.name), str(helper)])
+            why = ""
+        except DeployError as exc:
+            why = str(exc)
+        self.build_step([RM, "-rf", str(scratch)])
+        why = why or self.check_documents(release, helper)
+        if not why:
+            return True
+        self.build_step([RM, "-rf", str(release / DOCUMENTS / ".build")])
+        self.say(
+            f"! the documents helper was not built: {why}. This release reads no PDFs (doctor names it); the helper "
+            "needs Swift 6.0 or later (swift --version)."
+        )
+        return False
+
+    def check_documents(self, release: Path, helper: Path) -> str:
+        """The new helper reads its check page: "" when it did, else why not (a fixed code, never its output)."""
+        argv = [str(helper), "read", str(release / DOCUMENTS_CHECK), "--max-pages", "300", "--max-seconds", "60"]
+        code, out = self.host.run(self.owner(argv))
+        if self.dry:
+            return ""
+        try:
+            data = json.loads(out.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            data = None
+        if not isinstance(data, dict):
+            why = f"exit {code}, no answer"
+        elif data.get("ok") is not True:
+            error = data.get("error")
+            why = error if isinstance(error, str) and re.fullmatch(r"[a-z_]{1,30}", error) else "an odd answer"
+        else:
+            pages = data.get("pages")
+            page = pages[0] if isinstance(pages, list) and len(pages) == 1 and isinstance(pages[0], dict) else {}
+            text = page.get("text")
+            why = "" if isinstance(text, str) and DOCUMENTS_CHECK_TEXT in text else "another text"
+        return f"it did not read its check page ({DOCUMENTS_CHECK}): {why}" if why else ""
 
     def build(self, release: Path, sha: str) -> dict[str, object]:
         """Everything the owner builds into `release` (owned by the owner meanwhile)."""
@@ -465,15 +635,12 @@ class Deploy:
                 "UV_COMPILE_BYTECODE=1",  # her user cannot write __pycache__ in the release: compiled now
             )
         self.build_step([str(interp), "-I", "-m", "compileall", "-q", "-j", "0", str(release / "src")])
-        voice = self.voice_source()
-        if voice is not None:
-            target = release / "tools/voice/.build/release"
-            self.build_step([MKDIR, "-p", str(target)])
-            self.build_step([CP, "-p", str(voice / "voice-service"), str(target / "voice-service")])
-            for bundle in sorted(voice.glob("*.bundle")):
-                self.build_step([CP, "-R", "-p", str(bundle), f"{target}/"])
+        voice_tree = self.build_voice(release, sha)
+        documents = self.build_documents(release)
         vendored: list[str] = []
-        for source, rel in self.vendor_items():
+        # the list shown before the yes, never a fresh look: an item put there since is never copied
+        items = self.reviewed_items if self.reviewed_items is not None else self.vendor_items()
+        for source, rel in items:
             self.build_step([MKDIR, "-p", str(release / "vendor" / rel.parent)])
             if source.name == rel.name:
                 self.build_step([CP, "-R", "-p", str(source), f"{release / 'vendor' / rel.parent}/"])
@@ -494,7 +661,9 @@ class Deploy:
         version = re.search(r"cpython-([0-9.]+)", str(interp))
         return {
             "python": version.group(1) if version else PYTHON_SERIES,
-            "voice": voice is not None,
+            "voice": bool(voice_tree),
+            "voice_tree": voice_tree,
+            "documents": documents,
             "vendor": vendored,
         }
 
@@ -534,6 +703,7 @@ class Deploy:
         try:
             meta = self.build(release, sha)
             self.freeze(release)
+            self.check_reviewed(release)
         except BaseException:
             if not self.dry:
                 shutil.rmtree(release, ignore_errors=True)
@@ -552,8 +722,26 @@ class Deploy:
             (release / "release.json").chmod(0o644)
         vendor = ", ".join(str(item) for item in meta["vendor"]) or "none"  # type: ignore[attr-defined]
         voice = "yes" if meta["voice"] else "no"
-        self.say(f"release {release.name}: commit {sha[:12]}, Python {meta['python']}, voice {voice}, vendor {vendor}")
+        documents = "yes" if meta["documents"] else "no"
+        self.say(
+            f"release {release.name}: commit {sha[:12]}, Python {meta['python']}, voice {voice}, "
+            f"documents {documents}, vendor {vendor}"
+        )
         return release
+
+    def check_reviewed(self, release: Path) -> None:
+        """Each program from outside git in the frozen release is what the review showed (its folder may change
+        between the yes and the copy)."""
+        if self.dry or self.reviewed is None:
+            return
+        for rel, shown in self.reviewed.items():
+            if tree_digest(release / "vendor" / rel) != shown:
+                raise DeployError(f"vendor/{rel} changed after the review: run the deploy again to see it")
+        shown_names = {rel.parts[0] for rel in self.reviewed}
+        with contextlib.suppress(FileNotFoundError):
+            for name in sorted(os.listdir(release / "vendor")):
+                if name not in shown_names:
+                    raise DeployError(f"vendor/{clean(name)} was not in the review: run the deploy again to see it")
 
     # ---------------------------------------------------------------- the root-run tools
 
@@ -639,7 +827,8 @@ class Deploy:
 
     def services(self, release: Path) -> dict[str, bytes]:
         """The service files as the root-run tools' templates render them, each checked: the bridge (when installed)
-        and the voice service (when installed, or with --voice). A template with anything else stops the deploy."""
+        and the voice service (when installed, or with --voice). A template with anything else stops the deploy.
+        Their output files are made in /var/log/estia (root's), which launchd opens as root."""
         folder = self.tools / "launchd" if (self.tools / "launchd").is_dir() else release / "launchd"
         rendered: dict[str, bytes] = {}
         for label in ownuser.LABELS:
@@ -656,6 +845,13 @@ class Deploy:
             if problem:
                 raise DeployError(f"{label}.plist: {problem}")
             rendered[label] = text.encode("utf-8")
+        if rendered and self.dry:
+            self.note(f"make {ownuser.STREAM_LOGS} (root's) and her services' output files in it")
+        elif rendered:  # before the switch: launchd opens them as root (an install from before had them in her folder)
+            try:
+                ownuser.make_stream_logs(self.host)
+            except OSError as exc:
+                raise DeployError(str(exc)) from exc
         return rendered
 
     def wait_gone(self, label: str) -> None:
@@ -691,11 +887,19 @@ class Deploy:
                     self.wait_gone(label)
                 self.host.run([LAUNCHCTL, "bootstrap", "system", system])
             elif label == ownuser.BRIDGE or voice_changed or self.voice:
-                self.host.run([LAUNCHCTL, "kickstart", "-k", f"system/{label}"])
+                self.start(label)
+
+    def start(self, label: str) -> None:
+        """A restart of an unchanged service: kickstart when launchd knows it, else loaded from its file (a kickstart
+        of a service that is not loaded, after a failed try or a bootout by hand, fails)."""
+        if self.host.run([LAUNCHCTL, "print", f"system/{label}"], read_only=True)[0] == 0:
+            self.host.run([LAUNCHCTL, "kickstart", "-k", f"system/{label}"])
+        else:
+            self.host.run([LAUNCHCTL, "bootstrap", "system", str(ownuser.DAEMONS / f"{label}.plist")])
 
     def restart(self) -> None:
         if self.installed(ownuser.BRIDGE) or self.dry:
-            self.host.run([LAUNCHCTL, "kickstart", "-k", f"system/{ownuser.BRIDGE}"])
+            self.start(ownuser.BRIDGE)
 
     def bridge_pid(self) -> int | None:
         _, out = self.host.run([LAUNCHCTL, "print", f"system/{ownuser.BRIDGE}"], read_only=True)
@@ -832,9 +1036,10 @@ class Deploy:
             return 1
         old_pid = self.bridge_pid() if self.check_health else None
         previous = self.switch(release)
-        built = self.voice_source() if self.dry else release / VOICE_BINARY.parent  # a dry run built nothing
-        new_voice = _digest(built / VOICE_BINARY.name) if built is not None else None
-        voice_changed = previous is None or new_voice != _digest(previous / VOICE_BINARY)
+        if self.dry:  # nothing was built: a voice built now is a new one
+            voice_changed = previous is None or self.voice_built
+        else:
+            voice_changed = previous is None or _digest(release / VOICE_BINARY) != _digest(previous / VOICE_BINARY)
         restarted = self.clock()
         self.go(plists, voice_changed)
         problem = self.health(restarted, old_pid) if self.check_health else None
@@ -886,7 +1091,8 @@ def main(argv: list[str] | None = None) -> int:
         who = builder()
         if args.update_tools:
             return Deploy(host, who, Path("/"), uv="").update_tools()
-        checkout = args.checkout or default_checkout(host.path(ownuser.CODE))
+        # absolute: release.json's `source` is the next deploy's default, from whatever folder it runs
+        checkout = (args.checkout or default_checkout(host.path(ownuser.CODE))).resolve()
         if not (checkout / ".git").exists():
             raise DeployError(f"{checkout} is not a git checkout")
         try:

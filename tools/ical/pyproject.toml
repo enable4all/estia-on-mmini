@@ -1,7 +1,7 @@
 [project]
 name = "local-assistant-calendar"
 version = "0.1.0"
-description = "Calendar helper for local-assistant: one Google calendar per run (its iCal address), expanded in its own environment"
+description = "Calendar helper for local-assistant: one calendar per run (a Google iCal address or a CalDAV account, read only), expanded in its own environment"
 requires-python = ">=3.13"
 license = "MIT"
 # icalendar 7.3.0 (BSD-2-Clause, 2026-08-19) and recurring-ical-events 3.8.2 (LGPL-3.0-or-later, 2026-04-30; with

@@ -50,6 +50,7 @@ from local_assistant.hostsec import (
     Check,
     Host,
     estia_root,
+    signal_account,
     strays,
     tail,
 )
@@ -69,16 +70,23 @@ MARKER = CODE / "migration.json"  # the move: who, when, where her old folders a
 SAVED = CODE / "rollback"  # the old service files, kept for the rollback
 HELD = SAVED / "data"  # her old folders from your home, moved here (0700, root only) until the rollback or remove-old
 DAEMONS = Path("/Library/LaunchDaemons")
+# her services' output (stdout and stderr): launchd opens these files as root, so they are in a folder only root can
+# change (root's, 0755), never one of hers; each file is hers (0600), emptied in-process (app.cap_streams, LogCap)
+STREAM_LOGS = Path("/var/log/estia")
 NEWSYSLOG = Path("/etc/newsyslog.d/local-assistant.conf")  # the old log rotation rule (logs now rotate themselves)
 BRIDGE = "com.local-assistant.bridge"
 VOICE = "com.local-assistant.voice"
 LABELS = (BRIDGE, VOICE)
+STREAM_LOG = {BRIDGE: "launchd.log", VOICE: "voice.log"}  # each service's output file in STREAM_LOGS
+# her services' output in her own folder (an install from before STREAM_LOGS): the tools' update moves it
+LOGS_IN_HER_FOLDER = "its output is in her own folder, which launchd opens as root"
 ROLLBACK_DAYS = 7
 # her group's number (dseditgroup -i): the highest one in 450-499 no user and no group has. sysadminctl is given it as
 # -UID too, but ignores -UID (and -home) for a role account on macOS 27: her account's own number is the one it picks
 ROLE_IDS = range(499, 449, -1)
 CODE_UID = 0  # who owns the code: root
 NO_SHELL = "/usr/bin/false"
+DSCL_NATIVE = "dsAttrTypeNative:"  # dscl -read's prefix for a native attribute: "dsAttrTypeNative:IsHidden: 1"
 # her folders, the same place under the owner's home (old) and hers (new): config and keys, data, Signal, logs, and
 # the voice service's caches (its Neural Engine compile cache, about 15 minutes saved; FluidAudio's speech models)
 DATA_MAP: tuple[tuple[str, str], ...] = tuple(
@@ -97,6 +105,7 @@ CACHES = frozenset({"Library/Caches/voice-service", ".cache/fluidaudio"})  # cop
 OVERLAY = (".config/local-assistant", "Library/Application Support/local-assistant", ".local/share/signal-cli")
 DATABASES = frozenset({"account.db", "assistant.db"})  # signal-cli's and hers: SQLite in WAL mode
 JOURNALS = ("-wal", "-shm")  # SQLite replays a -wal into whatever database sits next to it
+PROGRAM = "a program (an execute bit)"  # in her data: never copied back into your folders
 HER_CONFIG = ".config/local-assistant/config.toml"
 AVATAR_MAX_BYTES = 5_000_000  # config.AVATAR_MAX_BYTES: a larger picture is never sent
 AVATAR_TYPES = (".png", ".jpg", ".jpeg")
@@ -105,6 +114,9 @@ HEAD = "/usr/bin/head"
 REALPATH = "/bin/realpath"
 TEE = "/usr/bin/tee"
 STAT = "/usr/bin/stat"
+CAT = "/bin/cat"
+MKDIR = "/bin/mkdir"
+MV = "/bin/mv"
 MIGRATE = "scripts/migrate-to-own-user.sh"
 SHARE = "scripts/share-projects.sh"  # her read-only access to your projects folder: as you, no sudo
 ESTIA = f"{SUDO} {BIN}/estia"  # always /usr/bin/sudo: a sudo planted earlier on your PATH would catch the password
@@ -220,10 +232,11 @@ def account_settings() -> list[tuple[str, ...]]:
 def account_problem(record: str) -> str | None:
     """What is wrong with her directory record as `dscl . -read` shows it (UserShell, IsHidden, Password,
     AuthenticationAuthority; None: no shell, hidden, no password). Its home stays /var/empty: macOS keeps it, and her
-    services get theirs explicitly."""
+    services get theirs explicitly. dscl names a native attribute with its prefix ("dsAttrTypeNative:IsHidden: 1",
+    live on macOS 27): the prefix is left out before the key is read."""
     values: dict[str, str] = {}
     for line in record.splitlines():
-        key, sep, value = line.partition(":")
+        key, sep, value = line.removeprefix(DSCL_NATIVE).partition(":")
         if sep and not line.startswith(" "):
             values[key.strip()] = value.strip()
     if values.get("UserShell") != NO_SHELL:
@@ -290,7 +303,13 @@ def find_brew_prefix() -> str:
 
 def plist_values() -> dict[str, str]:
     """The values both service files get: her user and group, her home, the root-owned release."""
-    return {"RUN_USER": ROLE_USER, "RUN_GROUP": ROLE_GROUP, "RUN_HOME": str(HOME), "CODE": str(CURRENT)}
+    return {
+        "RUN_USER": ROLE_USER,
+        "RUN_GROUP": ROLE_GROUP,
+        "RUN_HOME": str(HOME),
+        "CODE": str(CURRENT),
+        "LOG_DIR": str(STREAM_LOGS),
+    }
 
 
 def render(template: str, values: Mapping[str, str], *, plist: bool) -> str:
@@ -338,8 +357,9 @@ def read_plist(path: Path) -> dict[str, Any] | None:
 
 def plist_problem(plist: Mapping[str, Any], label: str) -> str | None:
     """What makes a service file anything but hers (None when it is): its label, her user and group, a program and
-    working folder under `current`, her home, a PATH of root-owned folders only, logs in her log folder, and no other
-    keys (no sockets, no other environment such as DYLD_* or PYTHON*)."""
+    working folder under `current`, her home, a PATH of root-owned folders only, its output in /var/log/estia (a
+    root-owned folder: launchd opens it as root), and no other keys (no sockets, no other environment such as DYLD_*
+    or PYTHON*)."""
     if plist.get("Label") != label:
         return f"Label is not {label}"
     extra = sorted(set(plist) - _PLIST_KEYS)
@@ -366,9 +386,54 @@ def plist_problem(plist: Mapping[str, Any], label: str) -> str | None:
         return f"WorkingDirectory is not under {CURRENT}"
     for key in ("StandardOutPath", "StandardErrorPath"):
         value = str(plist.get(key, ""))
-        if value and (not value.startswith(f"{HOME}/Library/Logs/local-assistant/") or ".." in value):
-            return f"{key} is not in her log folder"
+        if value and Path(value).parent == HOME / "Library/Logs/local-assistant" and ".." not in value:
+            return LOGS_IN_HER_FOLDER
+        if value and (Path(value).parent != STREAM_LOGS or ".." in value):
+            return f"{key} is not in {STREAM_LOGS}"
     return None
+
+
+def make_stream_logs(host: Host) -> None:
+    """/var/log/estia (root's, 0755) and each service's output file in it (0600; hers on the Mac), made before launchd
+    opens them as root: in a folder only root can change, so no link of hers is ever followed. A file there is kept
+    (never emptied). A name that is not a regular file of hers with one name (her account may `ln` her file from her
+    home: the same volume) is unlinked and made fresh, never followed and never refused: a refusal would let her
+    account stop every update."""
+    folder = host.path(STREAM_LOGS)
+    folder.parent.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(FileExistsError):
+        os.mkdir(folder, 0o755)
+    if not stat.S_ISDIR(os.lstat(folder).st_mode):
+        raise OSError(f"{STREAM_LOGS} is not a folder (a link?): nothing was opened there")
+    as_root = os.geteuid() == 0
+    if as_root:
+        os.chown(folder, 0, 0, follow_symlinks=False)
+    os.chmod(folder, 0o755, follow_symlinks=False)
+    her = pwd.getpwnam(ROLE_USER) if as_root else None
+    for name in STREAM_LOG.values():
+        path = folder / name
+        try:
+            info: os.stat_result | None = os.lstat(path)
+        except FileNotFoundError:
+            info = None
+        kept = (
+            info is not None
+            and stat.S_ISREG(info.st_mode)
+            and info.st_nlink == 1
+            and (her is None or info.st_uid == her.pw_uid)
+        )
+        if info is not None and not kept:
+            os.unlink(path)  # root's folder: only this name goes, whatever it led to
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | (0 if kept else os.O_EXCL)
+        fd = os.open(path, flags, 0o600)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise OSError(f"{STREAM_LOGS / name}: not a regular file")
+            if her is not None:
+                os.fchown(fd, her.pw_uid, her.pw_gid)
+            os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
 
 
 def moved(root: Path = Path("/")) -> bool:
@@ -422,12 +487,16 @@ def _user_check(root: Path, account: Callable[[], str] | None) -> Check:
     try:
         info = home.stat()
     except OSError:
+        marker = read_marker(root)
+        held = held_copy(marker) and time.time() < float((marker or {}).get("moved_at", 0)) + ROLLBACK_DAYS * 86400
         return Check(
             "own_user",
             "fail",
             "Own user",
             f"{HOME} is missing",
-            f"{ESTIA} rollback brings back your copy of her data (within {ROLLBACK_DAYS} days of the move)",
+            f"{ESTIA} rollback brings back your copy of her data (within {ROLLBACK_DAYS} days of the move)"
+            if held  # a new install keeps no copy; after the 7 days or remove-old none is left
+            else f"no copy of her data is held: restore {HOME} from your backup, if there is one",
         )
     if info.st_uid != uid or stat.S_IMODE(info.st_mode) & 0o077:
         return Check(
@@ -435,7 +504,7 @@ def _user_check(root: Path, account: Callable[[], str] | None) -> Check:
             "fail",
             "Own user",
             f"{HOME} is not hers alone (mode {stat.S_IMODE(info.st_mode):o})",
-            f"/usr/bin/sudo chown {ROLE_USER}:{ROLE_GROUP} {HOME} && /usr/bin/sudo chmod 700 {HOME}",
+            f"{SUDO} {CHOWN} {ROLE_USER}:{ROLE_GROUP} {HOME} && {SUDO} {CHMOD} 700 {HOME}",
         )
     if account is not None:
         problem = account_problem(account())
@@ -476,7 +545,7 @@ def _code_check(root: Path) -> Check:
                 "fail",
                 "Code",
                 f"{_shown(root, parent)} can be changed by an account other than root, and with it {CODE}",
-                f"/usr/bin/sudo chown root:wheel {_shown(root, parent)} && /usr/bin/sudo chmod go-w {_shown(root, parent)}",
+                f"{SUDO} {CHOWN} root:wheel {_shown(root, parent)} && {SUDO} {CHMOD} go-w {_shown(root, parent)}",
             )
     loose: list[Path] = []
     for folder, dirs, files in os.walk(code):
@@ -509,6 +578,7 @@ def _code_check(root: Path) -> Check:
 
 def _plists_check(root: Path, plists: Mapping[str, dict[str, Any] | None]) -> Check:
     wrong: list[str] = []
+    in_her_folder: list[str] = []
     daemons = root / DAEMONS.relative_to("/")
     for label, plist in plists.items():
         name = label.rsplit(".", 1)[1]
@@ -517,7 +587,9 @@ def _plists_check(root: Path, plists: Mapping[str, dict[str, Any] | None]) -> Ch
                 wrong.append("the bridge's service file is missing")
             continue
         problem = plist_problem(plist, label)
-        if problem:
+        if problem == LOGS_IN_HER_FOLDER:
+            in_her_folder.append(name)
+        elif problem:
             wrong.append(f"{name}: {problem}")
             continue
         info = (daemons / f"{label}.plist").lstat()
@@ -525,6 +597,10 @@ def _plists_check(root: Path, plists: Mapping[str, dict[str, Any] | None]) -> Ch
             wrong.append(f"{name}: its service file can be changed by an account other than root")
     if wrong:
         return Check("plists", "fail", "Services", "; ".join(wrong), f"{DEPLOY_CMD} (it renders both again)")
+    if in_her_folder:  # an install from before /var/log/estia: the tools' update, then a deploy
+        text = f"{' and '.join(in_her_folder)}: {LOGS_IN_HER_FOLDER}"
+        fix = f"{DEPLOY_CMD} --update-tools (read the diff), then {DEPLOY_CMD}: it moves them to {STREAM_LOGS}"
+        return Check("plists", "warn", "Services", text, fix)
     names = " and ".join(label.rsplit(".", 1)[1] for label, plist in plists.items() if plist is not None)
     return Check("plists", "ok", "Services", f"{names} run as {ROLE_USER} from {CURRENT}")
 
@@ -558,8 +634,7 @@ def program_check(programs: Sequence[tuple[str, Path]], root: Path = Path("/")) 
             "fail",
             "Her programs",
             f"{'; '.join(loose)}: whoever can change it runs code as her, with her data",
-            f"{DEPLOY_CMD} copies her programs into the release; then take the line out of her config "
-            f"(/usr/bin/sudo -u {ROLE_USER} -e {HOME}/{HER_CONFIG})",
+            f"{DEPLOY_CMD} copies her programs into the release; then take the line out of her config ({ESTIA} config)",
         )
     return Check("programs", "ok", "Her programs", "everything she runs is root's: the release and macOS's own")
 
@@ -614,9 +689,15 @@ def read_marker(root: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def held_copy(marker: Mapping[str, Any] | None) -> bool:
+    """Whether the move's record holds her old folders for a rollback: a move from an install that ran as you, not
+    rolled back and not removed. A new install (`fresh`) holds none."""
+    return marker is not None and not (marker.get("removed") or marker.get("rolled_back") or marker.get("fresh"))
+
+
 def _rollback_check(root: Path, now: float) -> Check | None:
     marker = read_marker(root)
-    if marker is None or marker.get("removed") or marker.get("rolled_back") or marker.get("fresh"):
+    if marker is None or not held_copy(marker):
         return None
     moved_at = float(marker.get("moved_at", 0))
     until = moved_at + ROLLBACK_DAYS * 86400
@@ -839,7 +920,7 @@ def _projects_note(text: str, out: str, old_home: Path) -> tuple[str, str]:
     if root is None:
         return out, (
             "projects.root: not an absolute path or ~/…: the project tools find nothing; set an absolute folder "
-            f"(/usr/bin/sudo -u {ROLE_USER} -e {HOME}/{HER_CONFIG})"
+            f"({ESTIA} config)"
         )
     new = _with_projects_root(out, root)
     if new is None:
@@ -1015,11 +1096,10 @@ def bot_number(config: Path) -> str | None:
 
 
 def has_account(signal_data: Path, number: str) -> bool:
-    try:
-        listed = json.loads((signal_data / "data" / "accounts.json").read_text(encoding="utf-8")).get("accounts", [])
-    except (OSError, ValueError, AttributeError):
-        return False
-    return any(isinstance(item, dict) and item.get("number") == number for item in listed)
+    """Whether signal-cli holds her number as a verified account: its own account file says `registered: true`.
+    signal-cli lists a number in accounts.json as soon as its registration starts, before Signal's code is entered."""
+    account = signal_account(signal_data, number) if number else None
+    return account is not None and account.get("registered") is True
 
 
 def _size(folder: Path) -> int:
@@ -1152,6 +1232,11 @@ class Migration:
     def _installed(self, label: str) -> bool:
         return (self.daemons / f"{label}.plist").exists()
 
+    def _hers(self, label: str) -> bool:
+        """Its service file runs as her own user (a failed try's, when no move is on record)."""
+        plist = read_plist(self.daemons / f"{label}.plist")
+        return plist is not None and plist.get("UserName") == ROLE_USER
+
     def _stop(self, labels: list[str]) -> None:
         for label in labels:
             self.host.run([LAUNCHCTL, "bootout", f"system/{label}"])
@@ -1176,12 +1261,8 @@ class Migration:
         if number is None:
             problems.append("no config in your home to move: set her up first (scripts/setup.sh)")
         elif not has_account(self.owner.home / ".local/share/signal-cli", number):
-            problems.append("signal-cli has no account for her number yet: scripts/setup.sh registers it")
-        if VOICE in labels and not (self.checkout / "tools/voice/.build/release/voice-service").is_file():
-            problems.append(
-                "her voice service runs, but this checkout has no build of it: "
-                "cd tools/voice && swift build -c release, then run this again"
-            )
+            problems.append("her number is not verified with Signal yet: scripts/setup.sh registers it")
+        # her voice service: the release builds it from the commit's own sources (deploy.build_voice)
         real = Path(os.path.realpath(self.owner.home))
         for old, _new in DATA_MAP:  # her copy must hold only her files: no link out, no pipe, socket or device
             for path, what in strays(self.owner.home / old, real / old, skip=[self.owner.home / VENDOR]):
@@ -1204,7 +1285,9 @@ class Migration:
             when = time.strftime("%Y-%m-%d", time.localtime(float(marker.get("moved_at", 0))))
             self.say(f"✓ She runs in her own user ({ROLE_USER}) since {when}. Updates: {DEPLOY_CMD}")
             return 0
-        labels = [label for label in LABELS if self._installed(label)]
+        # her old setup: the services that run as you (a service file of hers with no move on record is a failed
+        # try's: never kept as her old setup, and gone again if this try fails)
+        labels = [label for label in LABELS if self._installed(label) and not self._hers(label)]
         fresh = not labels
         unchanged = "Nothing changed." if fresh else "Nothing changed: she keeps running as before."
         problems = self.preflight(labels)
@@ -1237,7 +1320,7 @@ class Migration:
         self.say(f"Moving her into her own user {ROLE_USER} (home {HOME}, code {CODE}): {offline}.")
         try:
             self._save_old(labels)
-            self._stop(labels)
+            self._stop([label for label in LABELS if self._installed(label)])  # a failed try's service too
             self._make_user()
             self._copy_data()
             self._check_copy()
@@ -1269,7 +1352,10 @@ class Migration:
         elif not self.dry:
             if fresh:
                 self._remove_held()
-                self.say(f"✓ She runs as {ROLE_USER}, from {CURRENT}; her files are only in {HOME}.")
+                self.say(
+                    f"✓ She runs as {ROLE_USER}, from {CURRENT}; her files are only in {HOME}: a new install keeps "
+                    "no other copy, so it has no rollback."
+                )
             else:
                 self.say(
                     f"✓ She runs as {ROLE_USER}. Her old folders are held in {HELD}, for root only, until {until}: "
@@ -1361,8 +1447,10 @@ class Migration:
     def _copy_data(self) -> None:
         """Her folders, read by you (tar as your user: root never follows your links) and written by her (tar as
         _estia), then private (folders 0700, files 0600). The code in vendor/ is left out: it goes into the
-        release. An earlier copy in her home (after a rollback or a failed try) is kept aside, never deleted; the
-        folders holding it are root's, so her chmod names only the folders just copied (the ones doctor checks)."""
+        release. An earlier copy in her home (after a rollback or a failed try) is kept aside, never deleted, by her
+        own mkdir and mv: her home may hold links her account planted (.config to your ~/.config, .before-<time> to
+        /), so root never makes, moves or writes anything there by path. Her chmod names only the folders just
+        copied (the ones doctor checks). Her config is read and rewritten as her too."""
         stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(self.clock()))
         for _old, new in DATA_MAP:
             earlier = self.her_home / new
@@ -1373,10 +1461,10 @@ class Migration:
                     self.say(f"would keep any earlier copy of hers in {HOME}/.before-<time>")
                     break
                 continue
-            if earlier.exists():
+            if os.path.lexists(earlier):
                 aside = self.her_home / f".before-{stamp}" / new
-                aside.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                os.rename(earlier, aside)
+                self._run([*self._as(ROLE_USER), MKDIR, "-p", str(aside.parent)])
+                self._run([*self._as(ROLE_USER), MV, str(earlier), str(aside)])
                 self.say(f"kept her earlier copy of {new} in {HOME}/.before-{stamp}")
         old_folders = self._old_folders()
         sources = [str(folder.relative_to(self.owner.home)) for folder in old_folders]
@@ -1407,13 +1495,7 @@ class Migration:
         self._run([*self._as(ROLE_USER), CHMOD, "-R", "go-rwx", *copied])
         self._run([*self._as(ROLE_USER), CHMOD, "go-rwx", *on_the_way])  # made by her tar: hers
         config = self.her_home / HER_CONFIG
-        source = self.owner.home / HER_CONFIG if self.dry else config  # her copy, which your tar could read
-        try:
-            fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-            with os.fdopen(fd, encoding="utf-8") as handle:
-                original = handle.read()
-        except (OSError, UnicodeDecodeError):
-            original = None
+        original = self._read_config(config)
         text = ""
         notes: list[str] = []
         if original is not None:
@@ -1424,12 +1506,30 @@ class Migration:
             )
             self.projects_root = her_projects_root(original, self.owner.home)
             self.calls = calls_in(original)
-        if text and not self.dry:
-            fd = os.open(config, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(text)
+        if text and not self.dry:  # as her (tee): never root writing through a path in her home
+            code, _ = self.host.run([*self._as(ROLE_USER), TEE, str(config)], input=text, cwd=Path("/"))
+            if code != 0:
+                raise RuntimeError(f"her config {HOME / HER_CONFIG} could not be rewritten (exit {code})")
         for note in notes:
             self.say(f"config: {note}")
+
+    def _read_config(self, config: Path) -> str | None:
+        """Her copy of your config (your tar made it for her), read as her; in a dry run (as you, nothing copied)
+        your own. None when it cannot be read."""
+        if self.dry:
+            try:
+                fd = os.open(self.owner.home / HER_CONFIG, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                with os.fdopen(fd, encoding="utf-8") as handle:
+                    return handle.read()
+            except (OSError, UnicodeDecodeError):
+                return None
+        try:  # a FIFO swapped in never hangs the move: cat is stopped
+            code, out = self.host.run(
+                [*self._as(ROLE_USER), CAT, str(config)], read_only=True, cwd=Path("/"), timeout=AVATAR_SECONDS
+            )
+        except ValueError:  # not UTF-8
+            return None
+        return out if code == 0 else None
 
     def _copy_avatar(self, text: str) -> Path | None:
         """Her picture (the config's `avatar`) when it is a regular file in your home (not a link), at most 5 MB:
@@ -1527,29 +1627,63 @@ class Migration:
 
             self._do(f"install {target} (runs as {ROLE_USER} from {CURRENT})", install)
             self._run([CHOWN, "root:wheel", str(target)])
+        self._do(
+            f"make {STREAM_LOGS} (root's) and her services' output files in it", lambda: make_stream_logs(self.host)
+        )
 
     def _unhold(self, held: Sequence[tuple[str, str]]) -> None:
         """The held folders back into your home, by rename (yours, as they were). A folder made there since is kept
-        aside, never overwritten."""
+        aside, never overwritten. Root reaches each one a name at a time from your home (`_owner_folder`), never
+        through a link you made; one it cannot reach that way stays held and is printed with its command."""
         stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(self.clock()))
         for source_name, target_name in held:
             source, target = Path(source_name), Path(target_name)
             if not target.is_dir() or target.is_symlink():
                 continue
-            if source.exists() or source.is_symlink():
-                os.rename(source, source.with_name(f"{source.name}.before-rollback-{stamp}"))
-            self._parents_as_owner(source.parent)
-            os.rename(target, source)
+            fd = self._owner_folder(source.parent)
+            try:
+                with contextlib.suppress(FileNotFoundError):
+                    os.stat(source.name, dir_fd=fd, follow_symlinks=False)  # something there since: kept aside
+                    aside = f"{source.name}.before-rollback-{stamp}"
+                    os.rename(source.name, aside, src_dir_fd=fd, dst_dir_fd=fd)
+                os.rename(target, source.name, dst_dir_fd=fd)
+            finally:
+                os.close(fd)
 
-    def _parents_as_owner(self, folder: Path) -> None:
-        """Folders in your home that are gone, made again and yours (never root's)."""
-        missing: list[Path] = []
-        while not folder.exists() and folder != folder.parent:
-            missing.append(folder)
-            folder = folder.parent
-        for item in reversed(missing):
-            item.mkdir(mode=0o700)
-            os.chown(item, self.owner.uid, -1, follow_symlinks=False)
+    def _owner_folder(self, folder: Path) -> int:
+        """An open folder in your home, reached a name at a time with O_NOFOLLOW from your home itself: each one on
+        the way a real folder of yours (one gone since is made again, yours, 0700). A link on the way, a folder not
+        yours or a path outside your home raises: root never follows a link a program of yours put there."""
+        home = self.owner.home
+        if folder != home and not folder.is_relative_to(home):
+            raise OSError(f"{folder} is not in your home")
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        here = home
+        try:
+            fd = os.open(home, flags)
+        except OSError as exc:
+            raise OSError(f"{home}: not a folder of yours ({exc.strerror})") from exc
+        try:
+            for name in folder.relative_to(home).parts:
+                if os.fstat(fd).st_uid != self.owner.uid:
+                    raise OSError(f"{here} is not yours")
+                here = here / name
+                try:
+                    child = os.open(name, flags, dir_fd=fd)
+                except FileNotFoundError:
+                    os.mkdir(name, 0o700, dir_fd=fd)
+                    child = os.open(name, flags, dir_fd=fd)
+                    os.fchown(child, self.owner.uid, -1)
+                except OSError as exc:
+                    raise OSError(f"{here}: a link or no folder on the way, not followed ({exc.strerror})") from exc
+                os.close(fd)
+                fd = child
+            if os.fstat(fd).st_uid != self.owner.uid:
+                raise OSError(f"{here} is not yours")
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
 
     def _stale_journals(self, present: Sequence[str], owner: Owner) -> list[Path]:
         """The -wal and -shm files in your old folders next to a database her copy replaces: left by an unclean stop,
@@ -1562,22 +1696,71 @@ class Migration:
                     stale += [Path(f"{database}{end}") for end in JOURNALS if os.path.lexists(f"{database}{end}")]
         return stale
 
+    def _present(self) -> list[str]:
+        """Her data folders the copy back takes (those that are there)."""
+        return [rel for rel in OVERLAY if (self.her_home / rel).is_dir()]
+
+    def _overlay_problems(self, present: Sequence[str]) -> list[tuple[Path, str]]:
+        """What in her newer data must never reach your folders, where your bridge runs: a program (an execute bit),
+        a link out of her home, a FIFO or a device, as (path, what); her vendor/ is left out of the copy. Her data
+        holds none of them: one found means her account planted it, or a program of yours put it in your folder
+        before the move. Walked with lstat, nothing followed; a socket (a call's, left by a crash) is passed over:
+        tar never copies one."""
+        real = Path(os.path.realpath(self.her_home))
+        vendor = self.her_home / VENDOR
+        found: list[tuple[Path, str]] = []
+        for rel in present:
+            found += [
+                (path, what) for path, what in strays(self.her_home / rel, real, skip=[vendor]) if what != "a socket"
+            ]
+            for here, dirs, files in os.walk(self.her_home / rel):  # links are not followed
+                dirs[:] = [name for name in dirs if Path(here) / name != vendor]
+                for name in files:
+                    path = Path(here) / name
+                    with contextlib.suppress(OSError):
+                        info = path.lstat()
+                        if stat.S_ISREG(info.st_mode) and info.st_mode & 0o111:
+                            found.append((path, PROGRAM))
+        return found
+
+    def _in_her_home(self, path: Path) -> Path:
+        """A path under her home as the Mac names it (/var/estia/…), whatever the root."""
+        return HOME / path.relative_to(self.her_home)
+
+    @staticmethod
+    def _defuse_argv(path: Path, what: str) -> list[str]:
+        """Her own fix for what her data never holds: a program's execute bit off, anything else deleted."""
+        return [CHMOD, "a-x", "--", str(path)] if what == PROGRAM else [RM, "--", str(path)]
+
+    def _defuse(self, present: Sequence[str]) -> None:
+        """A failed move after she ran: what her data never holds is made harmless as her (her own files, so nothing
+        of yours is reached), each named, so the copy back can bring her Signal sessions with your old services."""
+        for path, what in self._overlay_problems(present):
+            code, out = self.host.run([*self._as(ROLE_USER), *self._defuse_argv(path, what)], cwd=Path("/"))
+            done = "its execute bit taken off" if what == PROGRAM else "deleted"
+            result = f"{done} as her" if code == 0 else f"not changed ({tail(out)})"
+            self.say(f"! {self._in_her_home(path)}: {what}; {result} before her newer data was copied back")
+
     def _overlay(self, owner: Owner) -> None:
         """What she saved since the move (her keys, messages and Signal sessions) on top of your old folders, read as
         her and written as you; her config stays the one from before the move. The old -wal and -shm next to each
-        database she replaces are removed first (as you), so SQLite never replays them into her newer one."""
-        present = [rel for rel in OVERLAY if (self.her_home / rel).is_dir()]
+        database she replaces are removed first (as you), so SQLite never replays them into her newer one. Anything
+        that stops the copy raises: your old services must never run on your old Signal sessions alone."""
+        present = self._present()
         if not present:
             return
+        problems = self._overlay_problems(present)
+        if problems:
+            path, what = problems[0]
+            raise RuntimeError(f"her newer data was not copied back ({self._in_her_home(path)}: {what})")
         stale = self._stale_journals(present, owner)
         if stale:
             code, out = self.host.run([*self._as(owner.name), RM, "-f", "--", *map(str, stale)], cwd=Path("/"))
             if code != 0:
-                self.say(
-                    f"! old database journals in your folders could not be removed ({tail(out)}); "
-                    f"her newer data stays in {HOME}"
+                raise RuntimeError(
+                    f"her newer data was not copied back: old database journals in your folders could not be "
+                    f"removed ({tail(out)})"
                 )
-                return
         reader = [
             *self._as(ROLE_USER),
             TAR,
@@ -1588,12 +1771,14 @@ class Migration:
             str(self.her_home),
             "--exclude",
             HER_CONFIG,
+            "--exclude",
+            VENDOR,  # code, never data (the move leaves it out too): your bridge runs what is there
             *present,
         ]
         writer = [*self._as(owner.name), TAR, "-x", "-f", "-", "-C", str(owner.home)]
         code, out = self.host.pipe(reader, writer, cwd=Path("/"))
         if code != 0:
-            self.say(f"! her newer data could not be copied back ({tail(out)}); it stays in {HOME}")
+            raise RuntimeError(f"her newer data was not copied back ({tail(out)})")
 
     def _restore(self, labels: list[str]) -> None:
         """Back to her old setup after a failed move: the new services out, the old folders and files back, with what
@@ -1607,7 +1792,10 @@ class Migration:
             try:
                 self._stop(list(self.started))
                 self.started.clear()
+                self._remove_new_plists(labels)
                 if self.mode != "rehearse" and not self.dry:
+                    if ran:  # before your folders are back: her own fix, as her
+                        self._defuse(self._present())
                     self._unhold(held)
                     if ran:
                         self._overlay(self.owner)
@@ -1617,6 +1805,17 @@ class Migration:
             finally:
                 problems = self._bring_back(labels)
             self._left_over(why, problems, held if self.mode != "rehearse" and not self.dry else [])
+
+    def _remove_new_plists(self, labels: list[str]) -> None:
+        """The service files of a failed move that were not her old setup (a fresh install's, a failed try's) are
+        booted out and deleted: a file left would say she moved and start her at the next boot from a half-made
+        copy. Her old setup's files are put back by `_bring_back`."""
+        for label in LABELS:
+            if label in labels or not self._installed(label):
+                continue
+            target = self.daemons / f"{label}.plist"
+            self._stop([label])
+            self._do(f"remove {DAEMONS / target.name}", functools.partial(target.unlink, missing_ok=True))
 
     def _bring_back(self, labels: list[str]) -> list[str]:
         """Her old service files and log rule put back, then her old services started: each step on its own, so one
@@ -1640,25 +1839,46 @@ class Migration:
         return problems
 
     def _left_over(self, why: str, problems: Sequence[str], held: Sequence[tuple[str, str]]) -> bool:
-        """What the restore could not do, said plainly: each folder still held as the exact command that puts it back
-        (a folder made in its place since is renamed aside first). True: nothing is left over."""
+        """What the restore could not do, said plainly: each folder still held as the exact commands that put it back.
+        Root moves it straight into your home under a fresh name (`mv -h`: no folder on the way, and a link at that
+        name is never followed), then you move it into place without admin rights (it is yours already); a folder made
+        in its place since is renamed aside first. True: nothing is left over."""
         stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(self.clock()))
         lines: list[str] = []
         for source, target in held:
             if not os.path.lexists(target):
                 continue
+            fresh = shlex.quote(str(self._restore_name(Path(source), stamp)))
+            lines.append(f"{SUDO} {MV} -h {shlex.quote(target)} {fresh}")  # every program by its full path
             if os.path.lexists(source):
-                lines.append(f"mv {shlex.quote(source)} {shlex.quote(f'{source}.before-rollback-{stamp}')}")
-            lines.append(f"{SUDO} mv {shlex.quote(target)} {shlex.quote(source)}")
+                lines.append(f"{MV} {shlex.quote(source)} {shlex.quote(f'{source}.before-rollback-{stamp}')}")
+            lines.append(f"{MKDIR} -p {shlex.quote(str(Path(source).parent))} && {MV} {fresh} {shlex.quote(source)}")
         if not (why or problems or lines):
             return True
         for problem in [why, *problems] if why else problems:
             self.say(f"✗ {problem}")
         if lines:
-            self.say(f"Her old folders still held in {HELD} (root only); put each back in your Terminal:")
+            self.say(
+                f"Her old folders still held in {HELD} (root only); put each back in your Terminal (root moves it "
+                "straight into your home, then you move it into place, no admin rights):"
+            )
             for line in lines:
                 self.say(f"  {line}")
         return False
+
+    def _restore_name(self, source: Path, stamp: str) -> Path:
+        """A fresh name directly in your home for a held folder on its way back (no folder in between to follow)."""
+        home = self.owner.home
+        rel = source.relative_to(home) if source.is_relative_to(home) else Path(source.name)
+        slug = "-".join(part.lstrip(".").replace(" ", "-") for part in rel.parts)
+        return home / f"estia-restore-{slug}-{stamp}"
+
+    def _start_again(self, labels: Sequence[str]) -> list[str]:
+        """Her own services started again after a rollback that stopped short: never your old services on your old
+        Signal sessions alone."""
+        for label in labels:
+            self.host.run([LAUNCHCTL, "bootstrap", "system", str(DAEMONS / f"{label}.plist")])
+        return []
 
     def _put_back(self, saved: Path, label: str) -> None:
         target = self.daemons / f"{label}.plist"
@@ -1697,7 +1917,7 @@ class Migration:
 
     def rollback(self) -> int:
         marker = read_marker(self.root)
-        if marker is None or marker.get("rolled_back") or marker.get("removed") or marker.get("fresh"):
+        if marker is None or not held_copy(marker):
             self.say("✗ Nothing to roll back to: no earlier setup is on record.")
             return 1
         until = float(marker.get("moved_at", 0)) + ROLLBACK_DAYS * 86400
@@ -1715,10 +1935,29 @@ class Migration:
             if isinstance(pair, list) and len(pair) == 2 and Path(str(pair[1])).is_relative_to(self.held)
         ]
         labels = [label for label in LABELS if (self.saved / f"{label}.plist").exists()]
+        problems = self._overlay_problems(self._present())
+        if problems:  # found before anything stops: she keeps running as her own user
+            self.say(
+                f"✗ Nothing changed: she keeps running as {ROLE_USER}. Her newer data holds what must never reach your "
+                "folders, where your bridge would run, and your old services never start without it (your old Signal "
+                "sessions alone would break decryption):"
+            )
+            for path, what in problems:
+                self.say(f"  {self._in_her_home(path)}: {what}")
+            self.say(
+                f"Her account, or a program of yours before the move, put it there; if you did not, follow SECURITY.md, "
+                f'"If the Mac is compromised". Otherwise fix each as her, then run {ESTIA} rollback again:'
+            )
+            for path, what in problems:
+                fix = [SUDO, "-u", ROLE_USER, *self._defuse_argv(self._in_her_home(path), what)]
+                self.say(f"  {shlex.join(fix)}")
+            return 1
+        stopped = [label for label in LABELS if self._installed(label)]
         with interruptions_ignored():  # a hang-up or a Ctrl-C never leaves her half way back
             why = ""
+            copied = False
             try:
-                self._stop([label for label in LABELS if self._installed(label)])
+                self._stop(stopped)
                 self.started = []
                 if not self.dry:
                     self._unhold(held)
@@ -1726,12 +1965,20 @@ class Migration:
                     f"copy what she saved since the move from {HOME} back into your folders",
                     lambda: self._overlay(owner),
                 )
+                copied = True
             except Exception as exc:
                 why = str(exc) or type(exc).__name__
-            finally:
-                problems = self._bring_back(labels)
-            if not self._left_over(why, problems, [] if self.dry else held):
-                self.say(f"Then run {SUDO} {BIN}/estia rollback again: it copies what she saved since the move.")
+            finally:  # your old services only with what she saved since: else hers again
+                problems_left = self._bring_back(labels) if copied else self._start_again(stopped)
+            if not copied:
+                self._left_over(why, problems_left, [] if self.dry else held)
+                self.say(
+                    f"She runs as {ROLE_USER} again: your old services never start without what she saved since "
+                    f"(Signal sessions, keys). Fix what this names, then run {ESTIA} rollback again."
+                )
+                return 1
+            if not self._left_over(why, problems_left, [] if self.dry else held):
+                self.say(f"Then run {ESTIA} rollback again: it copies what she saved since the move.")
                 return 1
         marker["rolled_back"] = True
         marker["rolled_back_at"] = self.clock()
@@ -1747,7 +1994,7 @@ class Migration:
         """Her old folders held for the rollback (when on record), and the earlier copies of hers a retried move kept
         aside in her home (kept_aside), each named."""
         marker = read_marker(self.root)
-        held = marker is not None and not (marker.get("rolled_back") or marker.get("removed") or marker.get("fresh"))
+        held = held_copy(marker)
         copies = kept_aside(self.her_home)
         if not (held or copies):  # the copies go even without a move on record (every try failed)
             self.say("✗ No old copies on record.")
@@ -1812,7 +2059,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "render":
         values = plist_values()
-        for key in ("RUN_USER", "RUN_GROUP", "RUN_HOME", "CODE"):
+        for key in ("RUN_USER", "RUN_GROUP", "RUN_HOME", "CODE", "LOG_DIR"):
             values[key] = os.environ.get(f"LA_{key}") or values[key]
         try:
             render_file(args.template, args.out, values)

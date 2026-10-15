@@ -89,6 +89,121 @@ _INTERRUPT: dict[str, tuple[str, ...]] = {
 }
 INTERRUPTIONS = frozenset(word for words in _INTERRUPT.values() for word in words)
 
+# On a call, "but" said alone over her stops her too, like "wait" (owner, 14 Oct)
+BUT: dict[str, tuple[str, ...]] = {
+    "en": ("but",),
+    "es": ("pero",),
+    "it": ("ma",),
+    "ko": ("하지만", "그런데"),
+    "pt": ("mas",),
+    "nl": ("maar",),
+    "pl": ("ale",),
+    "de": ("aber",),
+    "ja": ("でも",),
+    "ru": ("но",),
+    "fr": ("mais",),
+}
+BUT_WORDS = frozenset(word for words in BUT.values() for word in words)
+
+# On a call, a listener's acknowledgement over her answer ("okay", "yeah", "mm-hm"): a transcript of only these (and
+# fillers) in the call's language lets her carry on, as after a cough, unless she asked something or a device question
+# waits (calls.is_acknowledgement; owner, 14 Oct: a listener's "okay" ended two of her answers on a live call). Words
+# as Whisper writes them, lower case; a hyphen or a space between the parts of one is the same ("mm-hm", "mm hm").
+ACKNOWLEDGEMENTS: dict[str, tuple[str, ...]] = {
+    "en": (
+        "ok", "okay", "yes", "yeah", "yep", "yup", "mm", "mhm", "mm-hm", "uh-huh", "right", "sure", "alright",
+        "all right", "i see", "got it", "great", "good", "cool", "nice", "fine", "exactly", "true",
+    ),
+    "es": ("sí", "vale", "claro", "bien", "exacto"),
+    "it": ("sì", "va bene", "certo", "esatto", "giusto"),
+    "ko": ("네", "응", "예", "알겠어요"),
+    "pt": ("sim", "certo", "claro", "beleza", "exato"),
+    "nl": ("ja", "oké", "okee", "prima", "goed", "mooi", "klopt", "precies"),
+    "pl": ("tak", "dobrze", "jasne", "rozumiem"),
+    "de": ("ja", "okay", "gut", "genau", "stimmt", "alles klar"),
+    "ja": ("はい", "うん", "ええ", "なるほど", "そうですね"),
+    "ru": ("да", "ага", "хорошо", "понятно", "ясно"),
+    "fr": ("oui", "d'accord", "bien", "exactement", "ouais"),
+}  # fmt: skip
+# the sounds Whisper writes for a listener's hum, in any language
+ACKNOWLEDGEMENT_SOUNDS = ("mm", "mhm", "mhmm", "mm-hm", "mm-hmm", "uh-huh", "uh huh")
+
+
+def acknowledgements(code: str) -> tuple[str, ...]:
+    """A language's acknowledgement words on a call and the hums Whisper writes (only the hums for an unknown code)."""
+    return ACKNOWLEDGEMENTS.get(code, ()) + ACKNOWLEDGEMENT_SOUNDS
+
+
+# On a call, leave-taking ("I have to go", "I'm hanging up") ends the call once her reply is spoken (owner, 14 Oct;
+# calls.takes_leave). Conservative: only a sentence (or a part between commas) that is one of these, with at most the
+# language's soft words around it (LEAVING_SOFT, a filler or her name): "I have to go to the dentist" is none, and so
+# is "I have to go, uh, to the dentist" (CONTINUING). English, Dutch and German first; the others only phrases that
+# are clear on a phone.
+LEAVING: dict[str, tuple[str, ...]] = {
+    "en": (
+        "i'm hanging up", "i am hanging up", "i'll hang up", "i will hang up", "i'm going to hang up",
+        "i'm gonna hang up", "hanging up", "i have to go", "i really have to go", "i've got to go", "i've gotta go",
+        "i got to go", "i gotta go", "gotta go", "got to go", "i need to go", "i really need to go", "i must go",
+        "i'm off", "i am off",
+    ),
+    "es": ("tengo que irme", "me tengo que ir", "voy a colgar", "te cuelgo", "tengo que colgar"),
+    "it": ("devo andare", "devo scappare", "devo riattaccare", "riattacco"),
+    "ko": ("끊을게", "끊을게요", "가 봐야 해", "가봐야 해", "가 봐야 해요", "가봐야 해요", "가 봐야겠어요", "가봐야겠어요"),
+    "pt": ("tenho que ir", "tenho de ir", "preciso ir", "vou desligar", "tenho que desligar"),
+    "nl": (
+        "ik hang op", "ik hang nu op", "ik ga ophangen", "ik moet ophangen", "ik moet nu ophangen", "ik moet gaan",
+        "ik moet nu gaan", "ik moet ervandoor", "ik moet er nu vandoor", "ik ga ervandoor", "ik moet weg",
+        "ik moet nu weg",
+    ),
+    "pl": ("muszę iść", "muszę lecieć", "muszę kończyć", "rozłączam się"),
+    "de": (
+        "ich lege auf", "ich leg auf", "ich lege jetzt auf", "ich leg jetzt auf", "ich muss auflegen",
+        "ich muss jetzt auflegen", "ich muss los", "ich muss jetzt los", "ich muss gehen", "ich muss jetzt gehen",
+        "ich muss weg", "ich muss jetzt weg",
+    ),
+    # never "失礼します" alone: it is also "excuse me"
+    "ja": ("切るね", "切るよ", "切ります", "行かなきゃ", "そろそろ失礼します", "それでは失礼します"),
+    "ru": ("мне пора", "мне надо идти", "мне нужно идти", "кладу трубку", "я кладу трубку"),
+    "fr": ("je raccroche", "je dois raccrocher", "je dois y aller", "je dois partir", "il faut que j'y aille"),
+}  # fmt: skip
+# the short words that may come before or after leave-taking in its sentence ("okay, so, I have to go now"): a
+# language's "okay", never a "yes", "exactly" or "true" that answers her ("Yes, I have to go" is an answer); English's
+# count on every call
+LEAVING_SOFT: dict[str, tuple[str, ...]] = {
+    "en": (
+        "ok", "okay", "alright", "all right", "right", "so", "well", "anyway", "sorry", "now", "then", "bye",
+        "goodbye", "for now", "right now",
+    ),
+    "es": ("vale", "bueno", "pues", "ya", "ahora", "adiós"),
+    "it": ("va bene", "allora", "ora", "adesso", "ciao"),
+    "ko": ("알겠어요", "그럼", "이제", "안녕"),
+    "pt": ("certo", "beleza", "bem", "então", "agora", "tchau"),
+    "nl": ("oké", "okee", "prima", "nou", "zo", "dus", "even", "hoor", "doei", "dag"),
+    "pl": ("dobrze", "no", "dobra", "teraz", "pa"),
+    "de": ("alles klar", "so", "also", "na", "tschüss"),
+    "ja": ("じゃあ", "じゃ", "それじゃあ", "それじゃ", "では", "もう", "そろそろ"),
+    "ru": ("хорошо", "ну", "всё", "все", "ладно", "пока"),
+    "fr": ("d'accord", "bon", "bref", "maintenant", "salut"),
+}  # fmt: skip
+# leave-taking that also means something else alone ("I'm off" is a day off too): it counts only with a soft word
+# beside it ("Okay, I'm off.", "I'm off now")
+LEAVING_NOT_ALONE: dict[str, tuple[str, ...]] = {"en": ("i'm off", "i am off")}
+# a comma part that starts with one of these goes on from the part before it in its sentence: "I have to go, uh, to
+# the dentist" (Whisper writes a hesitation as a comma) is an errand, "See you, at eight" a plan; English's count on
+# every call. None for Japanese and Korean (their particles come after the word).
+CONTINUING: dict[str, tuple[str, ...]] = {
+    "en": ("to", "for", "at", "with", "back", "home", "into", "by", "on", "of"),
+    "es": ("a", "al", "para", "con", "de vuelta"),
+    "it": ("a", "al", "alla", "da", "per", "con"),
+    "pt": ("a", "ao", "à", "para", "pra", "com"),
+    "nl": ("naar", "om", "voor", "met", "terug"),
+    "pl": ("do", "na", "po", "z"),
+    "de": ("zu", "zum", "zur", "nach", "um", "für", "mit", "zurück"),
+    "ru": ("в", "на", "к", "домой"),
+    "fr": ("à", "au", "aux", "chez", "pour", "avec"),
+}  # fmt: skip
+
+
 # On a call, her own voice from a loud speaker is told from the caller's words by her content words (calls.is_own_voice):
 # these short function words are left out of the count ("the dentist at three" is two words of hers, not four).
 # Japanese, written without spaces, is compared by characters instead.
@@ -240,6 +355,11 @@ def _plain(text: str) -> str:
     """Casefolded, without accents: "Français" and "francais" are the same name."""
     decomposed = unicodedata.normalize("NFKD", text.strip().casefold())
     return "".join(char for char in decomposed if not unicodedata.combining(char))
+
+
+def stop_words(code: str) -> tuple[str, ...]:
+    """A language's words that stop her on a call ("wacht", "warte"; none for an unknown code)."""
+    return _INTERRUPT.get(code, ())
 
 
 def negations(code: str) -> tuple[str, ...]:

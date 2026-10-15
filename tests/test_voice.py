@@ -1,15 +1,22 @@
 import array
+import asyncio
 import json
 import math
+import re
 import socket
 import stat
+import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from local_assistant import prompts, voice
 from local_assistant.part_status import PartStatus, Record
 from local_assistant.voice import (
+    COMMANDS,
+    VAD_TIMEOUT,
     Transcript,
     VoiceClient,
     VoiceError,
@@ -17,6 +24,7 @@ from local_assistant.voice import (
     VoiceUnavailableError,
     VoiceUnreadableError,
     detector_state,
+    peer_is_ours,
     sentences,
     sniff,
     spoken_text,
@@ -97,9 +105,37 @@ def test_spoken_text_flattens_markdown() -> None:
     assert spoken_text(answer) == "Today. Buy milk. Call Anna. That's all for now."
 
 
+def test_spoken_text_never_says_markup_or_a_struck_word() -> None:
+    """The same reading as the text styles (signal_text): single *italics* and ~~struck~~ words too; a word crossed
+    out is not meant, so it is not said."""
+    answer = "**Today**: the *dentist* at 09:30 *(Prinsengracht 12)*, then dinner with ~~Bob~~ Anna."
+    assert spoken_text(answer) == "Today: the dentist at 09:30 (Prinsengracht 12), then dinner with Anna."
+    assert spoken_text("# Plan\n- *Gym* at 7\n- 2*3 is 6") == "Plan. Gym at 7. 2*3 is 6."
+
+
 def test_spoken_text_joins_wrapped_lines_and_drops_links_and_paths() -> None:
     answer = "The notes are in ~/dev/notes/todo.md\nand online (https://example.com/x), both current."
     assert spoken_text(answer) == "The notes are in and online, both current."
+
+
+def test_spoken_text_says_a_slash_command_instead_of_dropping_it_as_a_path() -> None:
+    assert spoken_text("Use /reminders to see them.") == "Use slash reminders to see them."
+    assert spoken_text("Type /help for the list, or /remind 8:00 call mum.", min_chars=1) == (
+        "Type slash help for the list, or slash remind 8:00 call mum."
+    )
+    assert (
+        spoken_text("Start with `/babble nl`, then /babble off.")
+        == "Start with slash babble nl, then slash babble off."
+    )
+    # a path is still left out, also one that starts like a command
+    assert spoken_text("It is in /reminders/old.txt and ~/new and /usr/bin/sudo, all three.") == (
+        "It is in and and, all three."
+    )
+
+
+def test_every_command_in_help_is_spoken_as_a_command() -> None:
+    named = set(re.findall(r"(?<![\w/])/([a-z]+)\b", prompts.HELP))
+    assert named and named <= set(COMMANDS), named - set(COMMANDS)
 
 
 def test_spoken_text_reads_tables_and_inline_code() -> None:
@@ -318,12 +354,31 @@ async def test_a_speech_detector_that_does_not_answer_is_an_http_failure() -> No
     assert await VoiceClient(closed_port_url(), voice="af_heart", speed=1.1).vad(CHUNK, stream="s1") == "http"
 
 
+def hers(port: int, local: int, seconds: float) -> bool | None:
+    return True
+
+
 async def test_a_slow_speech_detector_is_given_up_on_quickly_as_a_timeout() -> None:
     with FakeVoiceService() as service:
         service.vad, service.vad_delay = "ready", 0.8
         started = time.monotonic()
-        assert await VoiceClient(service.url, voice="af_heart", speed=1.1).vad(CHUNK, stream="s1") == "timeout"
+        assert (
+            await VoiceClient(service.url, voice="af_heart", speed=1.1, peer=hers).vad(CHUNK, stream="s1") == "timeout"
+        )
         assert time.monotonic() - started < 0.6  # a call never waits for the detector
+
+
+async def test_the_check_of_whose_program_it_is_counts_within_the_detectors_own_time() -> None:
+    def slow_check(port: int, local: int, seconds: float) -> bool | None:
+        time.sleep(0.25)
+        return True
+
+    with FakeVoiceService() as service:
+        service.vad, service.vad_delay = "ready", 0.2
+        started = time.monotonic()
+        client = VoiceClient(service.url, voice="af_heart", speed=1.1, peer=slow_check)
+        assert await client.vad(CHUNK, stream="s1") == "timeout"  # 0.25 checking + 0.2 answering: over 0.3
+        assert time.monotonic() - started < 0.5
 
 
 @pytest.mark.parametrize(
@@ -339,3 +394,132 @@ async def test_a_slow_speech_detector_is_given_up_on_quickly_as_a_timeout() -> N
 )
 def test_the_speech_detectors_state_from_the_health(health: dict[str, str] | None, state: str) -> None:
     assert detector_state(health) == state
+
+
+# the voice port: in her own user, a program of the owner's could hold 127.0.0.1:8150 whenever her voice service is not
+# bound (a deploy, a restart, the start of the Mac). Audio and text go only over a connection whose other end a program
+# of her own account holds: lsof, as the account that runs it, lists only that account's processes, so a connection it
+# does not show taken is not hers. The connection itself is checked, not only who listens, so a program that took it and
+# then left the port to her service still gets nothing
+
+
+def port_of(url: str) -> int:
+    return int(url.rsplit(":", 1)[1])
+
+
+def test_a_connection_a_program_of_this_account_took_is_ours() -> None:
+    with FakeVoiceService() as service, socket.create_connection(("127.0.0.1", port_of(service.url))) as connection:
+        assert peer_is_ours(port_of(service.url), connection.getsockname()[1], 1.0) is True
+
+
+def test_a_listener_of_ours_that_has_not_taken_the_connection_is_not_enough() -> None:
+    with socket.socket() as listening:
+        listening.bind(("127.0.0.1", 0))
+        listening.listen(1)  # never accepted: no program holds the other end
+        port = listening.getsockname()[1]
+        with socket.create_connection(("127.0.0.1", port)) as connection:
+            started = time.monotonic()
+            assert peer_is_ours(port, connection.getsockname()[1], 0.3) is False
+            assert time.monotonic() - started < 1.5  # it waits for the taking about the time it was given, no longer
+
+
+def lsof_runs(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    runs: list[list[str]] = []
+    run = subprocess.run
+
+    def counted(args: list[str], **kwargs: Any) -> Any:
+        runs.append(args)
+        return run(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", counted)
+    return runs
+
+
+def test_no_listener_of_ours_is_not_ours_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    runs = lsof_runs(monkeypatch)
+    assert peer_is_ours(port_of(closed_port_url()), 50000, 5.0) is False
+    assert len(runs) == 1  # nothing of ours listens: no waiting, no second look
+
+
+def test_a_listener_that_has_not_taken_the_connection_yet_is_looked_at_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    runs = lsof_runs(monkeypatch)
+    with socket.socket() as listening:
+        listening.bind(("127.0.0.1", 0))
+        listening.listen(1)
+        port = listening.getsockname()[1]
+        with socket.create_connection(("127.0.0.1", port)) as connection:
+            assert peer_is_ours(port, connection.getsockname()[1], 0.5) is False
+    assert len(runs) >= 2  # a connection waits for its accept: the taking is waited for
+
+
+def test_a_check_that_cannot_run_says_so(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(voice, "LSOF", str(tmp_path / "no-lsof"))
+    with FakeVoiceService() as service, socket.create_connection(("127.0.0.1", port_of(service.url))) as connection:
+        assert peer_is_ours(port_of(service.url), connection.getsockname()[1], 1.0) is None
+
+
+async def test_the_check_is_asked_about_this_very_connection_before_anything_is_sent() -> None:
+    asked: list[tuple[int, int, float]] = []
+
+    def checked(port: int, local: int, seconds: float) -> bool | None:
+        asked.append((port, local, seconds))
+        return peer_is_ours(port, local, seconds)
+
+    with FakeVoiceService() as service:
+        service.vad = "ready"
+        client = VoiceClient(service.url, voice="af_heart", speed=1.1, peer=checked)
+        assert await client.transcribe(M4A) == Transcript("Turn off the lamp.", 2.4)
+        assert isinstance(await client.vad(CHUNK, stream="s1"), float)
+    assert [port for port, _, _ in asked] == [port_of(service.url)] * 2
+    assert all(local != port_of(service.url) for _, local, _ in asked)
+    assert asked[1][2] <= VAD_TIMEOUT  # a call's detector check fits the detector's own time
+
+
+@pytest.mark.parametrize(
+    ("verdict", "said", "reason"), [(False, "not hers", "not_hers"), (None, "could not be checked", "no_answer")]
+)
+async def test_nothing_goes_to_a_program_that_is_not_hers_or_unchecked(
+    caplog: pytest.LogCaptureFixture, verdict: bool | None, said: str, reason: str
+) -> None:
+    """Another program at her voice service's address gets nothing, and the part says so (`not_hers`, finding 41):
+    doctor and /status name it, never "no answer"."""
+    status = PartStatus(None)
+    asked: list[int] = []
+
+    def check(port: int, local: int, seconds: float) -> bool | None:
+        asked.append(port)
+        return verdict
+
+    with FakeVoiceService() as service:
+        client = VoiceClient(service.url, voice="af_heart", speed=1.1, status=status, peer=check)
+        with pytest.raises(VoiceUnavailableError):
+            await client.transcribe(M4A)
+        with pytest.raises(VoiceUnavailableError):
+            await client.speak("Hello there.")
+        assert await client.vad(CHUNK, stream="s1") == "http"
+        assert await client.health() is None
+        await asyncio.sleep(0.2)
+        assert service.requests == []  # connected, then nothing sent: no audio, no text, no request
+    assert asked == [port_of(service.url)] * 4
+    assert status.snapshot()["voice"].reason == reason
+    assert len([r for r in caplog.records if said in r.getMessage()]) == 1  # said once, not per request
+
+
+async def test_her_own_service_again_is_said_once_and_used() -> None:
+    verdicts = [False, True]
+
+    def check(port: int, local: int, seconds: float) -> bool | None:
+        return verdicts.pop(0)
+
+    with FakeVoiceService() as service:
+        client = VoiceClient(service.url, voice="af_heart", speed=1.1, peer=check)
+        with pytest.raises(VoiceUnavailableError):
+            await client.transcribe(M4A)
+        assert await client.transcribe(M4A) == Transcript("Turn off the lamp.", 2.4)
+        assert len(service.requests) == 1
+
+
+async def test_localhost_is_reached_at_127_0_0_1_where_her_service_listens() -> None:
+    with FakeVoiceService() as service:
+        client = VoiceClient(service.url.replace("127.0.0.1", "localhost"), voice="af_heart", speed=1.1)
+        assert await client.transcribe(M4A) == Transcript("Turn off the lamp.", 2.4)

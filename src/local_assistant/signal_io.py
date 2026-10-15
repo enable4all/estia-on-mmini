@@ -16,10 +16,13 @@ import logging
 import os
 import re
 import time
+import urllib.parse
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from local_assistant.signal_text import valid
 
 log = logging.getLogger(__name__)
 
@@ -224,9 +227,16 @@ class SignalClient:
         result = await self.request("startCall", {"recipient": [aci]})
         return result if isinstance(result, dict) else {}
 
-    async def send(self, aci: str, text: str) -> int:
+    async def send(self, aci: str, text: str, *, styles: Sequence[str] = ()) -> int:
+        """Send a text, with Signal's text styles when given (signal_text: "start:length:STYLE", UTF-16 units). One
+        entry signal-cli would refuse fails its whole send, so then the text goes out without styles."""
         self._check_allowed(aci)
-        result = await self.request("send", {"recipient": [aci], "message": text})
+        params: dict[str, Any] = {"recipient": [aci], "message": text}
+        if styles and valid(text, styles):
+            params["textStyle"] = list(styles)
+        elif styles:
+            log.warning("send: %d text styles refused (unknown style or out of the text): sent without", len(styles))
+        result = await self.request("send", params)
         timestamp = result.get("timestamp") if isinstance(result, dict) else None
         if not isinstance(timestamp, int):
             raise SignalError("send returned no timestamp")
@@ -236,6 +246,19 @@ class SignalClient:
         """Send an audio file as a Signal voice note (signal-cli reads the file while sending)."""
         self._check_allowed(aci)
         result = await self.request("send", {"recipient": [aci], "attachments": [str(path)], "voiceNote": True})
+        timestamp = result.get("timestamp") if isinstance(result, dict) else None
+        if not isinstance(timestamp, int):
+            raise SignalError("send returned no timestamp")
+        return timestamp
+
+    async def send_document(self, aci: str, data: bytes, filename: str) -> int:
+        """Send a PDF back to the allowed user who asked (/docs send N): signal-cli 0.14.9's send takes
+        "attachments" as paths or RFC 2397 data links with a URL-encoded filename parameter. The bytes go inline, so
+        signal-cli opens no file in the documents folder (nothing a link swapped in could redirect)."""
+        self._check_allowed(aci)
+        name = urllib.parse.quote(filename, safe="")
+        link = f"data:application/pdf;filename={name};base64,{base64.b64encode(data).decode('ascii')}"
+        result = await self.request("send", {"recipient": [aci], "attachments": [link]})
         timestamp = result.get("timestamp") if isinstance(result, dict) else None
         if not isinstance(timestamp, int):
             raise SignalError("send returned no timestamp")

@@ -9,8 +9,12 @@ from local_assistant.claims import (
     CLAIMED_REMINDER_BROAD,
     NEGATION,
     REMINDER_WORDS,
+    about_earlier,
     claims_a_reminder,
+    claims_a_switch,
+    names_music,
     restates,
+    switch_clauses,
     without_reminder_talk,
 )
 from local_assistant.language import CODES
@@ -227,6 +231,31 @@ ORDINARY = [
 @pytest.mark.parametrize("text", ORDINARY)
 def test_the_precise_set_never_flags_an_everyday_sentence(text: str) -> None:
     assert not claims_a_reminder(text)
+
+
+# the phone shows a text without its markers (signal_text): a claim in markup is read as it is shown
+
+
+MARKUP_CLAIMS = [
+    "**Reminder set** (#5): Tue 13 Oct 07:00.",  # looks exactly like code's own bold note
+    "I **will call you** at 07:00.",
+    "I've **set a reminder** for 07:00.",
+    "Your reminder is **set**",
+    "- Reminder set for 7:00",  # a list item: "• Reminder set for 7:00"
+    "# Reminder set for 7:00",  # a heading: a bold line
+    "* I'll *remind* you at 7.",
+    "~~Maybe~~ I'll `call you` at 7.",
+]
+
+
+@pytest.mark.parametrize("text", MARKUP_CLAIMS)
+def test_markup_never_hides_a_claim(text: str) -> None:
+    assert claims_a_reminder(text) and claims_a_reminder(text, broad=True)
+
+
+@pytest.mark.parametrize("text", ORDINARY)
+def test_an_everyday_sentence_in_markup_is_still_none(text: str) -> None:
+    assert not claims_a_reminder(f"- **{text}**") and not claims_a_reminder(f"# {text}")
 
 
 def test_the_false_alarm_list_is_long_enough_in_english_and_dutch() -> None:
@@ -486,3 +515,109 @@ def test_a_bare_done_is_left_out_too(done: str) -> None:
 def test_a_noted_fact_stays_after_a_remember() -> None:
     answer = "Noted: you start work at 9:00. I'll remind you at 8:30."
     assert without_reminder_talk(answer, saved=True) == "Noted: you start work at 9:00."
+
+
+# a device claim: she says she switched, dimmed or set a light or plug (a change, never a report of its state); English
+# first. The guard (brain.py) adds code's "Nothing was switched." when no device_set in the answer returned "Done".
+
+SWITCH_CLAIMS = [
+    "I've turned off the living room lamp.",
+    "I turned the bedroom light on for you!",
+    "Done! I switched it off.",
+    "Okay, I just switched off the heater.",
+    "Turning off the living room lamp now.",
+    "Sure, switching the bedroom light on.",
+    "Dimming the bedroom light to 30 percent.",
+    "I've dimmed the bedroom light.",
+    "I've set the bedroom light to 30 percent, warm white.",
+    "I changed the living room lamp to blue.",
+    "The living room lamp has been switched off.",
+    "The lamps have been turned on.",
+    "The living room lamp is now off.",
+    "**I've turned off** the lamp.",
+    "- I switched the heater off",
+    "Turning the lamp off now so you can sleep.",
+    "Switching off the heater for you.",
+]
+NO_SWITCH_CLAIMS = [
+    "The bedroom light is off.",
+    "The living room lamp is on right now, at 80%.",
+    "Should I turn off the living room lamp?",
+    "I can't switch the fridge off: it may never be off.",
+    "I haven't switched anything yet.",
+    "I didn't turn the heater off.",
+    "If you like, I can turn it off.",
+    "I'll switch the heater off once you reply yes.",
+    "Reply yes and I'll turn it on.",
+    "I've set a reminder for 7:00.",
+    "I turned up the volume.",
+    "I turned down the music.",
+    "Shall I switch the heater off?",
+    "You can turn it off with the switch by the door.",
+    "Never turned off the fridge, it stays on.",
+    # a gerund followed by its own verb is advice or her ask-first wording, never a change (review of 14 Oct)
+    "Turning off the lights an hour before bed helps you sleep.",
+    "Dimming the lights in the evening can help you wind down.",
+    "- Switching off screens and lights at 22:00 tells your body it is night.",
+    "Okay, turning the lamp off would need your yes first.",
+    "Sure, switching it off needs your yes: reply yes within 2 minutes.",
+]
+
+
+@pytest.mark.parametrize("text", SWITCH_CLAIMS)
+def test_a_device_change_claim_is_seen(text: str) -> None:
+    assert claims_a_switch(text), text
+
+
+@pytest.mark.parametrize("text", NO_SWITCH_CLAIMS)
+def test_a_report_a_question_or_a_refusal_is_no_device_claim(text: str) -> None:
+    assert not claims_a_switch(text), text
+
+
+def test_after_a_status_read_is_now_reports_the_state() -> None:
+    assert claims_a_switch("The bedroom light is now on.")
+    assert not claims_a_switch("The bedroom light is now on.", read=True)  # she read it: a report, maybe a change
+    assert claims_a_switch("I've turned it on.", read=True)
+
+
+@pytest.mark.parametrize(
+    "text", ["It looks like the kitchen light has been turned off.", "Yes, the lamp has been switched off since 21:10."]
+)
+def test_after_a_status_read_the_passive_reports_the_state(text: str) -> None:
+    assert claims_a_switch(text)  # nothing read: a claim
+    assert not claims_a_switch(text, read=True)
+
+
+def test_the_claiming_clauses_are_named() -> None:
+    assert switch_clauses("Sure! I've turned off the lamp, and the heater stays on.") == ["I've turned off the lamp"]
+    assert switch_clauses("The lamp is on.") == []
+
+
+@pytest.mark.parametrize(
+    "clause",
+    [
+        "Yes, I turned off the living room lamp a few minutes ago",
+        "Earlier today I switched the heater on for you",
+        "I already switched it off",
+        "I turned it off yesterday",
+        "I switched the lamp off this morning",
+    ],
+)
+def test_a_clause_about_an_earlier_switch(clause: str) -> None:
+    assert about_earlier(clause)
+
+
+@pytest.mark.parametrize("clause", ["I've turned off the lamp", "Turning the heater on now"])
+def test_a_clause_about_this_answer(clause: str) -> None:
+    assert not about_earlier(clause)
+
+
+@pytest.mark.parametrize(
+    "text", ["I have turned off the music in the kitchen", "I set the kitchen speaker to 30%", "Spotify is now off"]
+)
+def test_music_is_named(text: str) -> None:
+    assert names_music(text)
+
+
+def test_a_light_is_no_music() -> None:
+    assert not names_music("I've turned off the kitchen light")

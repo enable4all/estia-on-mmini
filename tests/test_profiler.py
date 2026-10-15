@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -10,7 +11,7 @@ from local_assistant.context import SNAPSHOT_KEY, ContextBuilder
 from local_assistant.fetcher import Page
 from local_assistant.gemma import Completion
 from local_assistant.profile import Profile
-from local_assistant.profiler import LAST_LEARNED_KEY, LAST_RUN_KEY, UNANNOUNCED_KEY, LearnError, Profiler
+from local_assistant.profiler import FAILURES_KEY, LAST_LEARNED_KEY, LAST_RUN_KEY, UNANNOUNCED_KEY, LearnError, Profiler
 from local_assistant.store import Store
 from tests.conftest import ME, T0, TZ
 from tests.fakes.fake_gemma import FakeGemma, text
@@ -236,12 +237,105 @@ async def test_a_batch_that_keeps_failing_shrinks_then_is_skipped(store: Store) 
     assert await profiler.learn() == 1
 
 
-async def test_a_cut_off_learning_answer_is_a_failure(store: Store) -> None:
-    user(store, "I have a cat.", T0)
-    cut_off = Completion(content='{"operations": [', prompt_tokens=100, finish_reason="length")
-    _, _, profiler = make(store, FakeGemma(cut_off))
-    with pytest.raises(LearnError, match="cut off"):
+def cut_off() -> Completion:
+    return Completion(content='{"operations": [', prompt_tokens=100, finish_reason="length")
+
+
+async def test_a_cut_off_learning_answer_is_asked_again_in_halves(store: Store) -> None:
+    # live 14 Oct: "the learning answer was cut off at the token limit" twice, the same batch again each quiet time
+    ids = [user(store, f"I like the colour number {i}.", T0 + i) for i in range(4)]
+    gemma = FakeGemma(
+        cut_off(),  # all four, thinking first
+        cut_off(),  # all four again, without thinking: the answer itself is too long
+        ops(op("add", text_="The user likes colours 0 and 1.", source_message_id=ids[0])),
+        ops(op("add", text_="The user likes colours 2 and 3.", source_message_id=ids[2])),
+    )
+    profile, _, profiler = make(store, gemma)
+    assert await profiler.learn() == 2  # in the same pass
+    asked = [call["messages"][1]["content"] for call in gemma.calls]
+    assert all(f"#{i} " in asked[0] for i in ids) and asked[1] == asked[0]
+    assert f"#{ids[1]} " in asked[2] and f"#{ids[2]} " not in asked[2]
+    assert f"#{ids[2]} " in asked[3] and f"#{ids[1]} " not in asked[3]
+    assert [call["reasoning_effort"] for call in gemma.calls] == ["high", "none", "none", "none"]
+    assert [f.text for f in profile.facts()] == ["The user likes colours 0 and 1.", "The user likes colours 2 and 3."]
+    assert store.get_state(LAST_LEARNED_KEY) == str(ids[3])
+
+
+async def test_a_failure_after_a_half_was_learned_keeps_that_half_and_counts_for_the_rest(store: Store) -> None:
+    ids = [user(store, f"I like the colour number {i}.", T0 + i) for i in range(4)]
+    gemma = FakeGemma(
+        cut_off(), cut_off(), ops(op("add", text_="The user likes colours.", source_message_id=ids[0])), text("no")
+    )
+    profile, _, profiler = make(store, gemma)
+    with pytest.raises(LearnError, match="not JSON"):
         await profiler.learn()
+    assert [f.text for f in profile.facts()] == ["The user likes colours."]
+    assert store.get_state(LAST_LEARNED_KEY) == str(ids[1])  # the first half is kept
+    assert store.get_state(FAILURES_KEY) == f"{ids[1]}:1"  # a failure of the batch after it
+
+
+async def test_halves_go_down_to_one_message_and_one_still_cut_off_is_skipped_and_counted(
+    store: Store, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="local_assistant.profiler")
+    first = user(store, "a" * 100, T0)
+    second = user(store, "I have a cat called Miso.", T0 + 1)
+    third = user(store, "b" * 100, T0 + 2)
+    gemma = FakeGemma(
+        cut_off(),  # all three
+        cut_off(),  # all three without thinking
+        cut_off(),  # the first alone (without thinking): skipped
+        cut_off(),  # the second and third
+        ops(op("add", text_="The user has a cat called Miso.", source_message_id=second)),
+        cut_off(),  # the third alone: skipped
+    )
+    profile, _, profiler = make(store, gemma)
+    assert await profiler.learn() == 1
+    assert len(gemma.calls) == 6
+    assert [call["reasoning_effort"] for call in gemma.calls] == ["high"] + ["none"] * 5
+    assert [f.text for f in profile.facts()] == ["The user has a cat called Miso."]
+    assert store.get_state(LAST_LEARNED_KEY) == str(third)  # never asked again
+    lines = [record.getMessage() for record in caplog.records]
+    assert "learning: 2 messages skipped: the answer for each alone was cut off at the token limit" in lines
+    assert not any("a" * 20 in line or "Miso" in line for line in lines)  # counts only
+    assert first < second < third
+
+
+async def test_one_message_cut_off_while_thinking_is_asked_again_without_thinking(store: Store) -> None:
+    # review 14 Oct: a cut-off may be thinking that runs away (setup_local_model.md), not a long answer; halving does
+    # not help that, so the user's own fact would be lost
+    message = user(store, "I have a cat called Miso.", T0)
+    gemma = FakeGemma(cut_off(), ops(op("add", text_="The user has a cat called Miso.", source_message_id=message)))
+    profile, _, profiler = make(store, gemma)
+    assert await profiler.learn() == 1
+    assert [f.text for f in profile.facts()] == ["The user has a cat called Miso."]
+    assert [call["reasoning_effort"] for call in gemma.calls] == ["high", "none"]
+    assert store.get_state(LAST_LEARNED_KEY) == str(message)
+
+
+async def test_a_batch_cut_off_while_thinking_is_asked_whole_without_thinking_before_any_halves(store: Store) -> None:
+    ids = [user(store, f"I like the colour number {i}.", T0 + i) for i in range(4)]
+    gemma = FakeGemma(cut_off(), ops(op("add", text_="The user likes colours.", source_message_id=ids[0])))
+    _, _, profiler = make(store, gemma)
+    assert await profiler.learn() == 1
+    assert len(gemma.calls) == 2 and gemma.calls[1]["messages"] == gemma.calls[0]["messages"]
+    assert gemma.calls[1]["reasoning_effort"] == "none"
+    assert store.get_state(LAST_LEARNED_KEY) == str(ids[3])
+
+
+async def test_a_skipped_message_is_logged_even_when_the_pass_then_fails(
+    store: Store, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="local_assistant.profiler")
+    first = user(store, "a" * 100, T0)
+    user(store, "b" * 100, T0 + 1)
+    gemma = FakeGemma(cut_off(), cut_off(), cut_off(), text("no"))  # both, both again, the first alone, the second
+    _, _, profiler = make(store, gemma)
+    with pytest.raises(LearnError, match="not JSON"):
+        await profiler.learn()
+    assert store.get_state(LAST_LEARNED_KEY) == str(first)  # skipped: never asked again
+    lines = [record.getMessage() for record in caplog.records]
+    assert "learning: 1 messages skipped: the answer for each alone was cut off at the token limit" in lines
 
 
 async def test_soon_mode_ends_after_a_failed_pass(store: Store) -> None:

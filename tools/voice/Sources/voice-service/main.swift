@@ -65,18 +65,36 @@ actor Engines {
         detector = SpeechDetector(models: models)
     }
 
-    /// Loads both engines; when one fails the process exits, so launchd starts it again (KeepAlive), except when
-    /// Whisper's files are not the pinned ones: listening stays "failed" and the service stays up (speaking too). The
+    /// Loads both engines. Listening that fails exits the process, so launchd starts it again (KeepAlive), except
+    /// when Whisper's files are not the pinned ones: listening stays "failed" and the service stays up. Speaking that
+    /// fails stays "failed" with the service up (listening and the detector work on) and is tried again in the
+    /// process (`SpeakingRetry`: 1, 5 and 30 minutes, then every 30), never by a restart that reloads Whisper. The
     /// speech detector loads beside them, without waiting for Whisper's compile; when it fails it is only
     /// "unavailable" (the bridge keeps its loudness rule), and the service stays up.
     func load() async {
         let detector = self.detector
         Task { await detector.load() }
-        await loadEngines()
-        if (stt == .failed && !sttRefused) || tts == .failed {
-            log("a model failed to load; exiting so launchd tries again")
+        await loadWhisper()
+        await loadKokoro()
+        if stt == .failed && !sttRefused {
+            log("listening failed to load; exiting so launchd tries again")
             exit(1)
         }
+        if tts == .failed {
+            log("speaking failed to load; the service stays up and tries it again in 1 minute")
+            Task {
+                await SpeakingRetry.run(
+                    sleep: { try? await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000)) },
+                    load: { await self.retryKokoro() })
+            }
+        }
+    }
+
+    /// One more try at speaking: true once it is ready.
+    private func retryKokoro() async -> Bool {
+        await loadKokoro()
+        if tts != .ready { log("speaking failed to load again; tried again later") }
+        return tts == .ready
     }
 
     /// Whisper's pinned files, downloaded at their commits when missing: true when every one is the pinned one. A
@@ -132,8 +150,7 @@ actor Engines {
         }
     }
 
-    private func loadEngines() async {
-        await loadWhisper()
+    private func loadKokoro() async {
         let start = Date()
         do {
             let kokoro = KokoroAneManager(variant: .english)
@@ -369,6 +386,7 @@ do {
     exit(1)
 }
 pinSpeechModel()
+if KokoroAdvisory.crashProne(ProcessInfo.processInfo.operatingSystemVersion) { log(KokoroAdvisory.warning) }
 let port = CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--port" ? UInt16(CommandLine.arguments[2]) ?? 8150 : 8150
 let engines = Engines(models: models, temp: temp)
 let server = Server(engines: engines)

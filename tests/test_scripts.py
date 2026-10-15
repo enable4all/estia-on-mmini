@@ -1,6 +1,7 @@
 """The launchd templates and the shell scripts: no host-specific values, rendering works, every script parses."""
 
 import json
+import os
 import plistlib
 import re
 import shutil
@@ -48,7 +49,7 @@ def test_bridge_template_placeholders() -> None:
     text = BRIDGE.read_text(encoding="utf-8")
     assert "<string>@CODE@/.venv/bin/local-assistant</string>" in text
     assert "<string>@CODE@/.venv/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>" in text  # root-owned folders only
-    assert "<string>@RUN_HOME@/Library/Logs/local-assistant/launchd.log</string>" in text
+    assert "<string>@LOG_DIR@/launchd.log</string>" in text  # a root-owned folder: never one of hers
 
 
 @needs_plutil
@@ -61,7 +62,7 @@ def test_plist_templates_render_to_valid_plists(template: Path, tmp_path: Path) 
     assert not re.search(r"@[A-Z_]+@", text)
     assert text.count("<string>_estia</string>") == 2  # UserName and GroupName
     assert "<string>/var/estia</string>" in text
-    assert "/usr/local/estia/current/" in text and "/var/estia/Library/Logs/local-assistant/" in text
+    assert "/usr/local/estia/current/" in text and "<string>/var/log/estia/" in text
     assert subprocess.run(["plutil", "-lint", str(out)], capture_output=True, check=False).returncode == 0
 
 
@@ -105,7 +106,8 @@ def test_the_old_installers_are_thin_entries_into_her_own_user() -> None:
     daemon = (ROOT / "scripts" / "install-daemon.sh").read_text(encoding="utf-8")
     assert "scripts/migrate-to-own-user.sh" in daemon and "/usr/local/estia/bin/estia-deploy" in daemon
     voice = (ROOT / "scripts" / "install-voice-daemon.sh").read_text(encoding="utf-8")
-    assert "swift build -c release --force-resolved-versions" in voice
+    # estia-deploy builds her voice service from the commit's own sources: a build in the checkout would never be used
+    assert "swift build" not in voice.split("\nset -euo pipefail\n", 1)[1]
     assert '"$sudo" "$estia_deploy" --voice "$repo"' in voice and "/usr/local/estia/bin/estia-deploy --voice" in voice
     for text in (daemon, voice):
         body = text.split("\nset -euo pipefail\n", 1)[1]
@@ -131,73 +133,226 @@ def stub(folder: Path, name: str, body: str) -> None:
     path.chmod(0o755)
 
 
-def setup_dry_run(tmp_path: Path, *, tools: bool, script: Path = ROOT / "scripts" / "setup.sh") -> tuple[str, Path]:
-    """scripts/setup.sh --dry-run in a fresh clone (no .venv) on a pretend Apple-silicon Mac, with only stubs on
-    PATH: with `tools`, brew, uv, ollama, signal-cli and curl are there but log and fail when called."""
+REAL_TOOLS = ("dirname", "grep", "mktemp", "rm", "chmod", "cat", "seq", "touch", "mkdir", "cp")
+
+
+def fake_mac(tmp_path: Path, *, git: bool = True) -> tuple[Path, Path, Path, dict[str, str]]:
+    """A fresh clone of scripts/setup.sh on a pretend Apple-silicon Mac: the clone (a git clone unless `git` is
+    false), the stub folder (the only folder on PATH, with a few real tools linked), the call log and the
+    environment. ESTIA_TEST_ROOT is a fake tree: the Mac's own /opt/homebrew is never found or run."""
     clone = tmp_path / "clone"
     (clone / "scripts").mkdir(parents=True)
-    shutil.copy2(script, clone / "scripts" / "setup.sh")
+    shutil.copy2(ROOT / "scripts" / "setup.sh", clone / "scripts" / "setup.sh")
+    if git:
+        (clone / ".git").mkdir()
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    called = tmp_path / "called.log"
     stub(bin_dir, "uname", 'case "$1" in -s) echo Darwin ;; -m) echo arm64 ;; esac')
-    dirname = shutil.which("dirname")
-    assert dirname is not None
-    (bin_dir / "dirname").symlink_to(dirname)
+    stub(bin_dir, "sleep", "exit 0")
+    stub(bin_dir, "open", f'echo "open $*" >> "{tmp_path / "called.log"}"')
+    for name in REAL_TOOLS:
+        real = shutil.which(name, path="/usr/bin:/bin")
+        assert real is not None, name
+        (bin_dir / name).symlink_to(real)
+    env = {"PATH": str(bin_dir), "HOME": str(tmp_path / "home"), "ESTIA_TEST_ROOT": str(tmp_path / "root")}
+    return clone, bin_dir, tmp_path / "called.log", env
+
+
+def in_a_terminal(argv: list[str], env: dict[str, str], typed: str = "") -> subprocess.CompletedProcess[str]:
+    """Run with a terminal on stdin (a pty, `typed` already in it), as in the person's own Terminal window."""
+    master, slave = os.openpty()
+    try:
+        if typed:
+            os.write(master, typed.encode())
+        return subprocess.run(argv, stdin=slave, env=env, capture_output=True, text=True, check=False, timeout=60)
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+def setup_sh(clone: Path) -> list[str]:
+    return [shutil.which("bash") or "/bin/bash", str(clone / "scripts" / "setup.sh")]
+
+
+def setup_dry_run(tmp_path: Path, *, tools: bool) -> tuple[str, Path]:
+    """scripts/setup.sh --dry-run in a fresh clone (no .venv) on a pretend Apple-silicon Mac, with only stubs on
+    PATH: with `tools`, brew, uv, ollama, signal-cli and curl are there but log and fail when called."""
+    clone, bin_dir, called, env = fake_mac(tmp_path)
     if tools:
         for name in ("brew", "uv", "ollama", "signal-cli", "curl"):
             stub(bin_dir, name, f'echo "{name} $*" >> "{called}"; exit 1')
     result = subprocess.run(
-        [shutil.which("bash") or "/bin/bash", str(clone / "scripts" / "setup.sh"), "--dry-run"],
-        env={"PATH": str(bin_dir), "HOME": str(tmp_path / "home")},
-        capture_output=True,
-        text=True,
-        check=False,
+        [*setup_sh(clone), "--dry-run"], env=env, capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert not called.exists(), called.read_text(encoding="utf-8")  # no tool was run
-    assert [p.name for p in clone.iterdir()] == ["scripts"]  # no .venv, nothing else
+    assert sorted(p.name for p in clone.iterdir()) == [".git", "scripts"]  # no .venv, nothing else
     assert not (tmp_path / "home").exists()
     return result.stdout, clone
 
 
 @pytest.mark.parametrize("tools", [False, True], ids=["fresh-mac", "tools-there"])
 def test_setup_dry_run_installs_runs_and_creates_nothing(tmp_path: Path, tools: bool) -> None:
-    """The first step SETUP-WITH-YOUR-AI.md gives: it only prints, even on a fresh clone."""
+    """The first step SETUP-WITH-YOUR-AI.md gives: it only prints, even on a fresh clone, and needs no terminal."""
     out, _ = setup_dry_run(tmp_path, tools=tools)
     assert "$ uv python install 3.13" in out and "$ uv sync --frozen" in out and "Then: the model" in out
     assert ("Homebrew: would offer to install it" in out) is not tools
     assert ("$ brew install signal-cli ollama uv" in out) is not tools
 
 
+def tools_stubs(bin_dir: Path, called: Path, *, signal_version: str = "0.14.9", ollama_formula: bool = True) -> None:
+    """brew logs every call: `install` puts the tools it names on PATH, `services start` brings Ollama up, `list
+    --formula ollama` says whether Homebrew installed it; curl answers once Ollama is up; uv logs."""
+    up = bin_dir.parent / "ollama-up"
+    tool = {
+        "signal-cli": f'printf "#!/bin/sh\\necho signal-cli {signal_version}\\n" > "{bin_dir}/signal-cli"',
+        "ollama": f'printf "#!/bin/sh\\nexit 0\\n" > "{bin_dir}/ollama"',
+        "uv": f'printf "#!/bin/sh\\necho \\"uv \\$*\\" >> {called}\\n" > "{bin_dir}/uv"',
+    }
+    installs = "\n".join(f'    {name}) {make}; chmod +x "{bin_dir}/{name}" ;;' for name, make in tool.items())
+    stub(
+        bin_dir,
+        "brew",
+        f'echo "${{HOMEBREW_NO_ANALYTICS:-unset}} brew $*" >> "{called}"\n'
+        'case "$1" in\n'
+        f'  install) shift; for t in "$@"; do case "$t" in\n{installs}\n  esac; done ;;\n'
+        f'  services) touch "{up}" ;;\n'
+        f"  list) exit {0 if ollama_formula else 1} ;;\n"
+        "esac",
+    )
+    stub(bin_dir, "curl", f'[ -e "{up}" ]')
+
+
 def test_setup_runs_homebrew_without_its_analytics(tmp_path: Path) -> None:
     """Homebrew sends usage analytics unless told not to: every brew call setup makes carries HOMEBREW_NO_ANALYTICS=1
     (a real run on a pretend Mac whose tools are stubs: two missing, Ollama not answering yet)."""
-    clone = tmp_path / "clone"
-    (clone / "scripts").mkdir(parents=True)
-    shutil.copy2(ROOT / "scripts" / "setup.sh", clone / "scripts" / "setup.sh")
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    called = tmp_path / "called.log"
-    stub(bin_dir, "uname", 'case "$1" in -s) echo Darwin ;; -m) echo arm64 ;; esac')
-    dirname = shutil.which("dirname")
-    assert dirname is not None
-    (bin_dir / "dirname").symlink_to(dirname)
-    stub(bin_dir, "brew", f'echo "${{HOMEBREW_NO_ANALYTICS:-unset}} brew $*" >> "{called}"')
+    clone, bin_dir, called, env = fake_mac(tmp_path)
+    tools_stubs(bin_dir, called)
     stub(bin_dir, "uv", f'echo "uv $*" >> "{called}"')
-    stub(bin_dir, "curl", "exit 1")
-    stub(bin_dir, "seq", "echo 1")
-    stub(bin_dir, "sleep", "exit 0")
-    result = subprocess.run(
-        [shutil.which("bash") or "/bin/bash", str(clone / "scripts" / "setup.sh")],
-        env={"PATH": str(bin_dir), "HOME": str(tmp_path / "home")},
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    result = in_a_terminal(setup_sh(clone), env)
     assert result.returncode == 0, result.stdout + result.stderr
     brew = [line for line in called.read_text(encoding="utf-8").splitlines() if " brew " in f" {line}"]
-    assert brew == ["1 brew install signal-cli ollama", "1 brew services start ollama"]
+    assert brew == [
+        "1 brew install signal-cli ollama",
+        "1 brew list --formula ollama",
+        "1 brew services start ollama",
+    ]
+
+
+def test_setup_without_a_terminal_stops_before_anything(tmp_path: Path) -> None:
+    """An AI's command tool has no terminal: setup asks questions and Signal's one-time codes, so it says where to run
+    it and runs nothing (finding 19, 38)."""
+    clone, bin_dir, called, env = fake_mac(tmp_path)
+    tools_stubs(bin_dir, called)
+    result = subprocess.run(setup_sh(clone), env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    assert result.returncode == 1
+    assert "run scripts/setup.sh in your own Terminal window" in result.stderr
+    assert not called.exists()
+
+
+@pytest.mark.parametrize("dry", [False, True], ids=["real", "dry"])
+def test_setup_refuses_a_folder_that_is_not_a_git_clone(tmp_path: Path, dry: bool) -> None:
+    """Every update is built from git: a folder from a ZIP download can never be installed, so setup says so first."""
+    clone, bin_dir, called, env = fake_mac(tmp_path, git=False)
+    tools_stubs(bin_dir, called)
+    result = in_a_terminal([*setup_sh(clone), *(["--dry-run"] if dry else [])], env)
+    assert result.returncode == 1
+    assert "git clone https://github.com/enable4all/estia-on-mmini.git ~/estia" in result.stderr
+    assert not called.exists()
+
+
+def homebrew_in(root: Path, called: Path) -> Path:
+    """Homebrew installed in the fake tree's /opt/homebrew, which is not on PATH (a new Terminal window without its
+    line in ~/.zprofile); its brew logs and puts its folder on PATH for `shellenv`."""
+    folder = root / "opt/homebrew/bin"
+    folder.mkdir(parents=True)
+    stub(
+        folder,
+        "brew",
+        f'echo "${{HOMEBREW_NO_ANALYTICS:-unset}} brew $*" >> "{called}"\n'
+        f'[ "$1" = shellenv ] && echo \'export PATH="{folder}:$PATH"\'\nexit 0',
+    )
+    for name in ("ollama", "uv"):
+        stub(folder, name, f'echo "{name} $*" >> "{called}"')
+    stub(folder, "signal-cli", "echo signal-cli 0.14.9")
+    return folder
+
+
+def test_homebrew_off_path_is_found_and_added_to_new_terminal_windows(tmp_path: Path) -> None:
+    """Homebrew installed but not on PATH: setup finds it (never offers to install it again) and adds its line to
+    ~/.zprofile once, so the next Terminal window finds brew, uv and ollama (finding 5, 52)."""
+    clone, bin_dir, called, env = fake_mac(tmp_path)
+    homebrew_in(tmp_path / "root", called)
+    stub(bin_dir, "curl", "exit 0")
+    (tmp_path / "home").mkdir()
+    said = []
+    for _ in range(2):
+        result = in_a_terminal(setup_sh(clone), env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "Install Homebrew now?" not in result.stdout + result.stderr
+        said.append(result.stdout)
+    profile = (tmp_path / "home" / ".zprofile").read_text(encoding="utf-8")
+    assert profile.count('eval "$(/opt/homebrew/bin/brew shellenv)"') == 1
+    assert "1 brew shellenv" in called.read_text(encoding="utf-8")
+    assert "added to new Terminal windows" in said[0] and "added to new Terminal windows" not in said[1]
+
+
+def test_a_failed_homebrew_download_names_the_network_and_runs_nothing(tmp_path: Path) -> None:
+    """curl fails (offline): setup says so and stops, instead of running an empty installer (finding 6, 62)."""
+    clone, bin_dir, called, env = fake_mac(tmp_path)
+    stub(bin_dir, "curl", f'echo "curl $*" >> "{called}"; exit 7')
+    result = in_a_terminal(setup_sh(clone), env, typed="y\n")
+    assert result.returncode == 1
+    assert "Could not download Homebrew's installer: check the internet connection" in result.stderr
+    assert "brew: command not found" not in result.stderr
+
+
+def test_the_homebrew_installer_is_shown_as_one_line_never_its_text(tmp_path: Path) -> None:
+    """The installer is downloaded first, then run: the screen shows the one command, not its thousand lines
+    (finding 6, 45, 62)."""
+    clone, bin_dir, _called, env = fake_mac(tmp_path)
+    folder = tmp_path / "root/opt/homebrew/bin"
+    installer = (
+        "# INSTALLER-BODY: Homebrew's own script, about a thousand lines\n"
+        f'mkdir -p "{folder}"\n'
+        f'printf \'#!/bin/sh\\n[ "$1" = shellenv ] && echo export PATH="{folder}:$PATH"\\nexit 0\\n\' > "{folder}/brew"\n'
+        f'chmod +x "{folder}/brew"\n'
+    )
+    script = tmp_path / "install.sh"
+    script.write_text(installer, encoding="utf-8")
+    stub(bin_dir, "curl", f'for a; do [ "$prev" = -o ] && cp "{script}" "$a"; prev="$a"; done')
+    result = in_a_terminal(setup_sh(clone), env, typed="y\n")
+    out = result.stdout + result.stderr
+    assert '$ /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"' in out
+    assert "INSTALLER-BODY" not in out
+    assert (folder / "brew").exists()
+
+
+def test_ollama_from_its_app_is_started_with_the_app_never_brew_services(tmp_path: Path) -> None:
+    """Ollama installed from ollama.com (not Homebrew): `brew services start ollama` would fail, so setup opens the
+    app; an Ollama that never answers stops setup with what to do (finding 4)."""
+    clone, bin_dir, called, env = fake_mac(tmp_path)
+    tools_stubs(bin_dir, called, ollama_formula=False)
+    stub(bin_dir, "ollama", "exit 0")
+    (tmp_path / "root/Applications/Ollama.app").mkdir(parents=True)
+    stub(bin_dir, "curl", "exit 7")  # Ollama never answers
+    result = in_a_terminal(setup_sh(clone), env)
+    assert result.returncode == 1
+    log = called.read_text(encoding="utf-8")
+    assert "brew services" not in log and "open -a Ollama" in log
+    assert "Ollama does not answer yet" in result.stderr and "open the Ollama app" in result.stderr
+
+
+def test_a_signal_cli_of_another_version_is_refused(tmp_path: Path) -> None:
+    """Registration uses signal-cli 0.14's requests: another version is named before it fails obscurely (finding 20)."""
+    clone, bin_dir, called, env = fake_mac(tmp_path)
+    tools_stubs(bin_dir, called)
+    stub(bin_dir, "signal-cli", "echo signal-cli 0.13.24")
+    stub(bin_dir, "ollama", "exit 0")
+    stub(bin_dir, "uv", "exit 0")
+    result = in_a_terminal(setup_sh(clone), env)
+    assert result.returncode == 1
+    assert "signal-cli 0.14" in result.stderr and "0.13.24" in result.stderr
 
 
 SET_CALENDAR = ROOT / "scripts" / "set-calendar-url.sh"
@@ -263,6 +418,68 @@ def test_set_calendar_url_refuses_bad_names_and_links(tmp_path: Path, args: list
     result = set_calendar(tmp_path, link, *args)
     assert result.returncode == code
     assert env.read_text() == "CALENDAR_ICS_URL=old\n" and sorted(p.name for p in env.parent.iterdir()) == [
+        "calendar.env"
+    ]
+
+
+SET_PASSWORD = ROOT / "scripts" / "set-calendar-password.sh"
+APP_PASSWORD = "abcd-efgh-ijkl-mnop"  # privacy-ok: made up, an app-specific password's shape
+
+
+def set_password(home: Path, password: str, *args: str) -> subprocess.CompletedProcess[str]:
+    """scripts/set-calendar-password.sh with the password typed at its hidden prompt, under the macOS bash (3.2)."""
+    return subprocess.run(
+        ["/bin/bash", str(SET_PASSWORD), *args],
+        input=f"  {password}  \n",
+        env={"PATH": "/usr/bin:/bin", "HOME": str(home), "ESTIA_TEST_ROOT": str(home / "no-own-user")},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_set_calendar_password_merges_one_key_and_keeps_the_others(tmp_path: Path) -> None:
+    folder = tmp_path / ".config" / "local-assistant"
+    env = folder / "calendar.env"
+    folder.mkdir(parents=True)
+    env.write_text(f"CALENDAR_ICS_URL={FAMILY_LINK}\nCALENDAR_SAVED_AT=1\nCALDAV_PASSWORD_FAMILY=old\n")
+    began = int(time.time())
+    named = set_password(tmp_path, APP_PASSWORD, "family")
+    assert named.returncode == 0, named.stderr
+    default = set_password(tmp_path, APP_PASSWORD.upper())  # the calendar named calendar: CALDAV_PASSWORD
+    assert default.returncode == 0, default.stderr
+    lines = env.read_text().splitlines()
+    assert [
+        line.partition("=")[0] if "SAVED_AT_" in line or line.startswith("CALENDAR_SAVED_AT=") else line
+        for line in lines
+    ] == [
+        f"CALENDAR_ICS_URL={FAMILY_LINK}",
+        f"CALDAV_PASSWORD_FAMILY={APP_PASSWORD}",
+        "CALENDAR_SAVED_AT_FAMILY",
+        f"CALDAV_PASSWORD={APP_PASSWORD.upper()}",
+        "CALENDAR_SAVED_AT",
+    ]
+    assert began <= int(lines[2].partition("=")[2]) <= time.time()  # for doctor: when saved
+    assert (env.stat().st_mode & 0o777, folder.stat().st_mode & 0o777) == (0o600, 0o700)
+    assert sorted(p.name for p in folder.iterdir()) == ["calendar.env"]
+    for result in (named, default):  # the password is never shown
+        assert APP_PASSWORD.lower() not in (result.stdout + result.stderr).lower()
+    assert "CALDAV_PASSWORD_FAMILY" in named.stdout
+
+
+@pytest.mark.parametrize(
+    ("args", "password", "code"),
+    [(["Family"], APP_PASSWORD, 2), (["../x"], APP_PASSWORD, 2), (["a", "b"], APP_PASSWORD, 2), (["family"], "", 1)],
+)
+def test_set_calendar_password_refuses_bad_names_and_an_empty_password(
+    tmp_path: Path, args: list[str], password: str, code: int
+) -> None:
+    env = tmp_path / ".config" / "local-assistant" / "calendar.env"
+    env.parent.mkdir(parents=True)
+    env.write_text("CALDAV_PASSWORD_FAMILY=old\n")
+    result = set_password(tmp_path, password, *args)
+    assert result.returncode == code
+    assert env.read_text() == "CALDAV_PASSWORD_FAMILY=old\n" and [p.name for p in env.parent.iterdir()] == [
         "calendar.env"
     ]
 
@@ -360,13 +577,17 @@ def run_script(script: str, *args: str, env: dict[str, str], stdin: str = "") ->
     ("args", "expected"),
     [
         (["doctor"], ".venv/bin/python -I -m local_assistant.doctor"),
-        (["logs", "voice", "-n", "20"], "/usr/bin/tail -n 20 /var/estia/Library/Logs/local-assistant/voice.log"),
+        (["logs", "voice", "-n", "20"], "/usr/bin/tail -n 20 /var/log/estia/voice.log"),
+        (["logs", "launchd"], "/usr/bin/tail -n 50 /var/log/estia/launchd.log"),
         (["logs"], "/usr/bin/tail -n 50 /var/estia/Library/Logs/local-assistant/bridge.log"),
         (["check"], "/bin/bash"),
         (["mail-login", "info@example.com", "--mail-only"], "--mail-login info@example.com --mail-only"),
         (["spotify-login"], ".venv/bin/local-assistant --spotify-login"),
         (["secret", "set", "web.env", "BRAVE_API_KEY"], "-m local_assistant.secretfile set web.env BRAVE_API_KEY"),
         (["tapo-discover"], "scripts/tapo-discover.sh"),
+        (["hue-pair"], "scripts/hue-pair.sh"),
+        (["hue-pair", "192.168.1.40"], "scripts/hue-pair.sh 192.168.1.40"),
+        (["config"], "TERM=xterm-256color /usr/bin/nano /var/estia/.config/local-assistant/config.toml"),
     ],
 )
 def test_the_estia_wrapper_runs_each_command_as_her_user(tmp_path: Path, args: list[str], expected: str) -> None:
@@ -384,6 +605,150 @@ def test_the_estia_wrapper_runs_each_command_as_her_user(tmp_path: Path, args: l
     assert not log.exists() and snapshot(tmp_path) == before
 
 
+def test_estia_config_runs_nano_as_her_so_no_copy_of_her_config_lands_in_your_account(tmp_path: Path) -> None:
+    """sudoedit would copy her config into your account and run the editor as you: a program of yours could read it
+    or add an allowed number before it is written back. `estia config` runs /usr/bin/nano by its full path as her, in
+    a clean environment; `config soul` copies the example as her (0600) the first time (review 15 Oct, 2)."""
+    env = {"PATH": "/usr/bin:/bin", "ESTIA_ROOT": str(tmp_path), "TERM": "xterm-ghostty"}
+    done = run_script("estia", "--dry-run", "config", env=env)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip().endswith(
+        "LANG=en_US.UTF-8 TERM=xterm-ghostty /usr/bin/nano /var/estia/.config/local-assistant/config.toml"
+    )
+    assert "/usr/bin/sudo -u _estia -H -- /usr/bin/env -i HOME=/var/estia " in done.stdout
+    odd = run_script("estia", "--dry-run", "config", env=env | {"TERM": "x;rm -rf ~"})
+    assert "TERM=xterm-256color /usr/bin/nano" in odd.stdout  # an odd TERM is never passed on
+    soul = run_script("estia", "--dry-run", "config", "soul", env=env)
+    lines = soul.stdout.strip().splitlines()
+    assert soul.returncode == 0 and len(lines) == 2, soul.stdout
+    assert lines[0].endswith(
+        "/usr/bin/install -m 600 /usr/local/estia/current/soul.example.md /var/estia/.config/local-assistant/soul.md"
+        " (only when she has none)"
+    )
+    assert lines[1].endswith("TERM=xterm-ghostty /usr/bin/nano /var/estia/.config/local-assistant/soul.md")
+    assert run_script("estia", "--dry-run", "config", "other", env=env).returncode == 2
+
+
+# what may follow sudo before the program: options, and those that take a value; -l, -v, -k and -e run no program here
+_SUDO_FLAGS = {"-n", "-H", "-i", "-s", "-b", "-S", "-E", "-P", "--"}
+_SUDO_VALUED = {"-u", "-U", "-g", "-p", "-C", "-D", "-h", "-r", "-t", "-T"}
+_NO_PROGRAM = {"-l", "-v", "-k", "-e"}
+# a bare sudo is caught by tests/test_docs.py; with one of these after it, it is a command too
+_SYSTEM_TOOLS = r"grep|cat|rm|mv|cp|tee|kill|launchctl|chown|chmod|pmset|fdesetup|install|lsof|visudo|mkdir|tail|dscl"
+_SUDO_AT = re.compile(rf'/usr/bin/sudo\b|\{{SUDO\}}|"\$sudo"|\$sudo\b|(?<![/\w-])sudo(?= +(?:{_SYSTEM_TOOLS})\b)')
+
+
+def programs_after_sudo(line: str) -> list[str]:
+    """The program each sudo in `line` runs, when it is named without its full path ("" for none)."""
+    bare: list[str] = []
+    for found in _SUDO_AT.finditer(line):
+        words = [word.strip("`'\"(),;") for word in line[found.end() :].split()]
+        index = 0
+        while index < len(words) and (words[index] in _SUDO_FLAGS or words[index] in _SUDO_VALUED):
+            index += 2 if words[index] in _SUDO_VALUED else 1
+        word = words[index] if index < len(words) else ""
+        if word not in _NO_PROGRAM and re.fullmatch(r"[a-z][a-z0-9_.+-]*", word):
+            bare.append(word)
+    return bare
+
+
+def test_every_program_after_sudo_is_named_by_its_full_path() -> None:
+    """sudo looks a bare name up in your PATH (macOS sets no secure_path), where Homebrew's folder and ~/.local/bin
+    come first and are yours: a planted `launchctl` there runs as root the moment you type your password. Every
+    command code prints, every fix line and every command a script shows or runs names the program by its full path
+    (or goes through /usr/local/estia/bin/estia)."""
+    assert programs_after_sudo("/usr/bin/sudo launchctl kickstart -k x") == ["launchctl"]
+    assert programs_after_sudo("{SUDO} mv a b; sudo grep -l x") == ["mv", "grep"]
+    assert programs_after_sudo("/usr/bin/sudo -u _estia -e /var/estia/x; /usr/bin/sudo -n -l -U alex (as root)") == []
+    assert programs_after_sudo('"$sudo" "$estia" doctor; /usr/bin/sudo /bin/launchctl print x') == []
+    sources = [
+        *sorted((ROOT / "src/local_assistant").glob("*.py")),
+        *sorted((ROOT / "scripts").glob("*.sh")),
+        ROOT / "scripts/estia",
+        ROOT / "scripts/estia-deploy",
+    ]
+    found = [
+        f"{path.relative_to(ROOT)}:{number}: {programs_after_sudo(line)}"
+        for path in sources
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if programs_after_sudo(line)
+    ]
+    assert found == []
+
+
+def test_every_sudo_a_script_shows_or_runs_is_named_by_its_full_path() -> None:
+    """A usage line copied from a script's head runs whatever `sudo` comes first on your PATH: a planted one catches
+    the password. The scripts name it /usr/bin/sudo (or "$sudo" from own-user.sh), in comments too."""
+    bare = re.compile(r'(?:^|[^/\w$"-])sudo +[/-]')
+    sources = [*sorted((ROOT / "scripts").glob("*.sh")), ROOT / "scripts/estia", ROOT / "scripts/estia-deploy"]
+    found = [
+        f"{path.relative_to(ROOT)}:{number}"
+        for path in sources
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if bare.search(line)
+    ]
+    assert found == []
+
+
+@pytest.mark.parametrize(
+    ("args", "line"),
+    [
+        (["stop"], "would run: /bin/launchctl bootout system/com.local-assistant.bridge"),
+        (["stop", "voice"], "would run: /bin/launchctl bootout system/com.local-assistant.voice"),
+        (
+            ["start"],
+            "would run: /bin/launchctl bootstrap system /Library/LaunchDaemons/com.local-assistant.bridge.plist",
+        ),
+        (
+            ["start", "voice"],
+            "would run: /bin/launchctl bootstrap system /Library/LaunchDaemons/com.local-assistant.voice.plist",
+        ),
+    ],
+)
+def test_estia_stops_and_starts_her_services_as_root(tmp_path: Path, args: list[str], line: str) -> None:
+    """A stop the docs give (her compromise steps, the voice service's undo) goes through her wrapper, by its full
+    path: never a launchctl found on your PATH."""
+    done = run_script("estia", "--dry-run", *args, env={"PATH": "/usr/bin:/bin", "ESTIA_ROOT": str(tmp_path)})
+    assert done.returncode == 0 and done.stdout.strip() == line
+    refused = run_script(
+        "estia", "--dry-run", args[0], "other", env={"PATH": "/usr/bin:/bin", "ESTIA_ROOT": str(tmp_path)}
+    )
+    assert refused.returncode == 2
+
+
+def test_estia_usage_names_every_command_with_the_full_sudo_path(tmp_path: Path) -> None:
+    done = run_script("estia", "--dry-run", "nothing", env={"PATH": "/usr/bin:/bin", "ESTIA_ROOT": str(tmp_path)})
+    commands = [line for line in done.stderr.splitlines() if re.match(r"\s*\S*sudo /usr/local/estia/bin/estia ", line)]
+    assert len(commands) >= 15 and all(line.lstrip().startswith("/usr/bin/sudo ") for line in commands), done.stderr
+    assert "--dry-run (first)" in done.stderr  # the notes at the end of the header are shown too
+
+
+def test_estia_doctor_hands_her_doctor_your_sudo_rules_as_root_lists_them(tmp_path: Path) -> None:
+    """Her user cannot read sudo's rules: root lists yours (sudo -l -U, no password for root) and her doctor reads the
+    list from stdin, so passwordless sudo counts against the hardened level in her own user too."""
+    env = {"PATH": "/usr/bin:/bin", "ESTIA_ROOT": str(tmp_path), "SUDO_USER": "alex"}
+    done = run_script("estia", "--dry-run", "doctor", env=env)
+    lines = done.stdout.strip().splitlines()
+    assert done.returncode == 0 and lines[0].endswith("-I -m local_assistant.doctor")
+    assert " LANG=en_US.UTF-8 ESTIA_OWNER_SUDO=stdin /" in lines[0]  # a release's doctor from before ignores it
+    assert lines[1] == "would run: /usr/bin/sudo -n -l -U alex (as root: your sudo rules, read by her doctor)"
+
+
+@pytest.mark.skipif(not Path("/usr/libexec/PlistBuddy").exists(), reason="PlistBuddy is macOS only")
+def test_estia_logs_reads_her_output_where_her_service_file_puts_it(tmp_path: Path) -> None:
+    """An install from before /var/log/estia keeps its output in her folder until the tools' update and a deploy."""
+    root = tmp_path / "root"
+    (root / "Library/LaunchDaemons").mkdir(parents=True)
+    old = "/var/estia/Library/Logs/local-assistant/voice.log"
+    plist = {"Label": "com.local-assistant.voice", "StandardOutPath": old}
+    (root / "Library/LaunchDaemons/com.local-assistant.voice.plist").write_bytes(plistlib.dumps(plist))
+    env = {"PATH": "/usr/bin:/bin", "ESTIA_ROOT": str(root)}
+    done = run_script("estia", "--dry-run", "logs", "voice", env=env)
+    assert done.returncode == 0 and done.stdout.strip().endswith(f"/usr/bin/tail -n 50 {old}")
+    done = run_script("estia", "--dry-run", "logs", "launchd", env=env)  # no service file names another: the new one
+    assert done.stdout.strip().endswith("/usr/bin/tail -n 50 /var/log/estia/launchd.log")
+
+
 @pytest.mark.parametrize(
     "args",
     [
@@ -397,6 +762,9 @@ def test_the_estia_wrapper_runs_each_command_as_her_user(tmp_path: Path, args: l
         ["signal"],
         ["rollback", "now"],
         ["restart", "x"],
+        ["hue-pair", "192.168.1.40;rm"],
+        ["hue-pair", "bridge.example.com"],
+        ["hue-pair", "192.168.1.40", "192.168.1.41"],
     ],
 )
 def test_the_estia_wrapper_refuses_anything_else(tmp_path: Path, args: list[str]) -> None:
@@ -471,7 +839,11 @@ def fake_home(home: Path, *, projects: bool = False) -> None:
         ".config/local-assistant/config.toml": (config, 0o600),
         ".config/local-assistant/web.env": ("BRAVE_API_KEY=sk-made-up-0000\n", 0o600),
         ".local/share/signal-cli/data/111111.d/account.db": ("x", 0o644),
-        ".local/share/signal-cli/data/accounts.json": ('{"accounts": [{"number": "+306900000000"}]}', 0o644),
+        ".local/share/signal-cli/data/accounts.json": (
+            '{"accounts": [{"path": "111111", "number": "+306900000000"}]}',
+            0o644,
+        ),
+        ".local/share/signal-cli/data/111111": ('{"registered": true, "number": "+306900000000"}', 0o600),
     }
     for name, (text, mode) in files.items():
         path = home / name
@@ -585,6 +957,15 @@ def test_a_calendar_address_goes_through_a_pipe(tmp_path: Path) -> None:
     assert given.read_text() == f"{FAMILY_LINK}\n" and "calendar.google.com" not in done.stdout + done.stderr
 
 
+def test_a_calendar_password_goes_through_a_pipe(tmp_path: Path) -> None:
+    stubs, log, given = owner_stubs(tmp_path)
+    estia = own_user(tmp_path / "root")
+    done = run_script("set-calendar-password.sh", "family", env=owner_env(tmp_path, stubs), stdin=f"{APP_PASSWORD}\n")
+    assert done.returncode == 0, done.stderr
+    assert log.read_text().splitlines() == [f"sudo {estia} secret set calendar.env CALDAV_PASSWORD_FAMILY"]
+    assert given.read_text() == f"{APP_PASSWORD}\n" and APP_PASSWORD not in done.stdout + done.stderr
+
+
 def test_the_tp_link_login_goes_through_pipes(tmp_path: Path) -> None:
     stubs, log, given = owner_stubs(tmp_path)
     estia = own_user(tmp_path / "root")
@@ -605,6 +986,8 @@ def test_the_tp_link_login_goes_through_pipes(tmp_path: Path) -> None:
         ("mail-login.sh", ["info@example.com", "--mail-only"], "mail-login info@example.com --mail-only"),
         ("spotify-login.sh", [], "spotify-login"),
         ("tapo-discover.sh", [], "tapo-discover"),
+        ("hue-pair.sh", [], "hue-pair"),
+        ("hue-pair.sh", ["192.168.1.40"], "hue-pair 192.168.1.40"),
     ],
 )
 def test_sign_ins_run_as_her_through_the_wrapper(tmp_path: Path, script: str, args: list[str], passed: str) -> None:
@@ -620,7 +1003,7 @@ def test_sign_ins_run_as_her_through_the_wrapper(tmp_path: Path, script: str, ar
     [
         ("doctor.sh", "/usr/bin/sudo /usr/local/estia/bin/estia doctor"),
         ("check.sh", "/usr/bin/sudo /usr/local/estia/bin/estia check"),
-        ("run.sh", "sudo launchctl kickstart -k system/com.local-assistant.bridge"),
+        ("run.sh", "/usr/bin/sudo /usr/local/estia/bin/estia restart"),
     ],
 )
 def test_the_owners_checks_point_to_her_wrapper(tmp_path: Path, script: str, says: str) -> None:
@@ -631,7 +1014,7 @@ def test_the_owners_checks_point_to_her_wrapper(tmp_path: Path, script: str, say
     assert not log.exists()  # it says what to run; it never runs sudo itself
 
 
-@pytest.mark.parametrize("nuclear", [False, True], ids=["default", "nuclear"])
+@pytest.mark.parametrize("nuclear", [False, True], ids=["hardened", "nuclear"])
 def test_the_harden_dry_run_changes_nothing_and_never_calls_sudo(tmp_path: Path, nuclear: bool) -> None:
     stubs, log = system_stubs(tmp_path)
     home, root = tmp_path / "home", tmp_path / "root"
@@ -643,7 +1026,11 @@ def test_the_harden_dry_run_changes_nothing_and_never_calls_sudo(tmp_path: Path,
     assert "Linked devices" in done.stdout and "would ask" in done.stdout
     assert ("other services on this Mac:" in done.stdout.splitlines()[0]) is nuclear  # said first
     assert (" Firewall: " in done.stdout) is nuclear
-    assert ("○ Nuclear option: " in done.stdout) is not nuclear  # without --nuclear: one neutral line
+    assert ("○ Nuclear level: " in done.stdout) is not nuclear  # without --nuclear: one neutral line
+    # the level by name, never "default" (owner, 14 Oct): hardened is setup's security step, nuclear is --nuclear
+    assert f"Security level: {'nuclear' if nuclear else 'hardened'}" in done.stdout
+    assert "default" not in done.stdout.lower()
+    assert "Doctor names the level reached: scripts/doctor.sh" in done.stdout  # not her own user here
     assert "would run: /usr/bin/sudo -n /bin/chmod -R go-rwx" not in done.stdout  # not her own user: no sudo for it
     assert not log.exists() and snapshot(tmp_path) == before
 
@@ -788,6 +1175,54 @@ def test_share_projects_without_her_user_changes_nothing(tmp_path: Path) -> None
     assert done.returncode == 1 and "does not exist yet" in done.stdout
 
 
+def test_share_documents_dry_run_names_your_documents_folder_and_changes_nothing(tmp_path: Path) -> None:
+    stubs, log, _ = owner_stubs(tmp_path)
+    home = tmp_path / "home"
+    folder = home / "Estia-KB"
+    folder.mkdir(parents=True)
+    (folder / "lease.pdf").write_bytes(b"%PDF-1.7\n")
+    before = snapshot(tmp_path)
+    done = run_script("share-documents.sh", "--dry-run", env=owner_env(tmp_path, stubs))
+    assert done.returncode == 0, done.stdout + done.stderr
+    add = "'user:_estia allow add_file'"
+    assert f"would run: /bin/chmod -h +a {add} {folder}" in done.stdout
+    assert f"would write: {folder / '.estia-share'}" in done.stdout
+    assert done.stdout.splitlines()[-1].startswith("Nothing changed (a dry run)")
+    assert not log.exists() and snapshot(tmp_path) == before
+    revoke = run_script("share-documents.sh", "--dry-run", "--revoke", env=owner_env(tmp_path, stubs))
+    assert revoke.returncode == 0 and "take back" in revoke.stdout
+    other = run_script("share-documents.sh", "--dry-run", str(tmp_path), env=owner_env(tmp_path, stubs))
+    assert other.returncode == 2 and "always your ~/Estia-KB" in other.stderr
+
+
+def test_share_documents_without_her_user_changes_nothing(tmp_path: Path) -> None:
+    import pwd
+
+    try:
+        pwd.getpwnam("_estia")
+        pytest.skip("her user exists on this Mac: the share would set real entries")
+    except KeyError:
+        pass
+    stubs, _log, _ = owner_stubs(tmp_path)
+    (tmp_path / "home").mkdir()
+    done = run_script("share-documents.sh", env=owner_env(tmp_path, stubs))
+    assert done.returncode == 1 and "does not exist yet" in done.stdout
+    assert not (tmp_path / "home" / "Estia-KB").exists()
+
+
+def test_the_documents_helper_is_built_and_tested() -> None:
+    """tools/documents (Swift): run.sh builds it where the config's default looks before the bridge starts; verify.sh
+    builds it before the tests (the end-to-end test reads PDFs with it, never skipped there) and runs its own tests.
+    estia-deploy builds it into a release (tests/test_deploy.py)."""
+    run, verify = (ROOT / "scripts/run.sh").read_text(), (ROOT / "scripts/verify.sh").read_text()
+    build = "(cd tools/documents && swift build -c release --quiet)"
+    assert build in run and run.index(build) < run.index("exec .venv/bin/local-assistant")
+    # documents are an extra: a failed build (an older Swift) is said, and the bridge still starts
+    assert f"{build} ||" in run and "Swift 6.0 or later" in run[run.index(build) :].splitlines()[0]
+    assert verify.index(build) < verify.index("export DOCUMENTS_HELPER_REQUIRED=1") < verify.index("uv run pytest -q")
+    assert verify.index("uv run pytest -q") < verify.index("(cd tools/documents && swift test --quiet)")
+
+
 def test_every_python_helper_is_synced_tested_and_built() -> None:
     """Each helper in its own uv environment (tools/<name>/pyproject.toml): run.sh syncs it, verify.sh runs its tests
     and mypy, and estia-deploy builds it into the release and checks that it imports."""
@@ -801,3 +1236,204 @@ def test_every_python_helper_is_synced_tested_and_built() -> None:
         assert f'release / "tools" / "{name}"' in deploy and f'release / "tools/{name}/.venv/bin/python"' in deploy, (
             name
         )
+
+
+# ------------------------------------------------------------------ run from anywhere (finding 9), doctor.sh (22, 52)
+
+
+@pytest.mark.parametrize("script", sorted((ROOT / "scripts").glob("*.sh")), ids=lambda p: p.name)
+def test_no_script_reads_its_own_folder_from_a_relative_0_after_a_cd(script: Path) -> None:
+    """`dirname "$0"` is relative to where the script was started: after a `cd` it points elsewhere (./mail-login.sh
+    run from scripts/ would look for ./own-user.sh in the repo root)."""
+    moved = False
+    for line in script.read_text(encoding="utf-8").splitlines():
+        assert not (moved and 'dirname "$0"' in line), line
+        moved = moved or bool(re.match(r"\s*cd\s", line))  # the cd's own line reads $0 before it moves
+
+
+@pytest.mark.parametrize(
+    ("script", "args", "passed"),
+    [
+        ("mail-login.sh", ["info@example.com"], "run --quiet local-assistant --mail-login info@example.com"),
+        ("spotify-login.sh", [], "run --quiet local-assistant --spotify-login"),
+    ],
+)
+def test_a_script_started_from_its_own_folder_finds_its_helpers(
+    tmp_path: Path, script: str, args: list[str], passed: str
+) -> None:
+    stub(tmp_path, "uv", 'echo "$*"')
+    result = subprocess.run(
+        ["/bin/bash", f"./{script}", *args],
+        cwd=ROOT / "scripts",
+        env={"PATH": f"{tmp_path}:/usr/bin:/bin", "HOME": str(tmp_path), "ESTIA_TEST_ROOT": NO_TREE},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (result.returncode, result.stdout.strip()) == (0, passed), result.stderr
+
+
+def doctor_clone(tmp_path: Path, *, venv: bool) -> tuple[Path, Path]:
+    """doctor.sh and own-user.sh in a clone, with or without its environment (.venv/bin/python logs its arguments)."""
+    clone = tmp_path / "clone"
+    (clone / "scripts").mkdir(parents=True)
+    for name in ("doctor.sh", "own-user.sh"):
+        shutil.copy2(ROOT / "scripts" / name, clone / "scripts" / name)
+    log = tmp_path / "called.log"
+    if venv:
+        (clone / ".venv/bin").mkdir(parents=True)
+        stub(clone / ".venv/bin", "python", f'echo "python $*" >> "{log}"')
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    stub(stubs, "uv", f'echo "uv $*" >> "{log}"')
+    return clone, log
+
+
+def test_doctor_reads_with_the_environment_setup_made_and_installs_nothing(tmp_path: Path) -> None:
+    """doctor.sh is read-only: never `uv run`, which may download packages and needs uv on PATH."""
+    clone, log = doctor_clone(tmp_path, venv=True)
+    env = {"PATH": f"{tmp_path / 'stubs'}:/usr/bin:/bin", "HOME": str(tmp_path), "ESTIA_TEST_ROOT": NO_TREE}
+    done = subprocess.run(
+        ["/bin/bash", str(clone / "scripts/doctor.sh"), "--x"], env=env, capture_output=True, text=True
+    )
+    assert done.returncode == 0, done.stderr
+    assert log.read_text().splitlines() == ["python -I -m local_assistant.doctor --x"]
+
+
+def test_doctor_before_setup_says_to_run_setup(tmp_path: Path) -> None:
+    clone, log = doctor_clone(tmp_path, venv=False)
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "ESTIA_TEST_ROOT": NO_TREE}  # no uv on PATH either
+    done = subprocess.run(["/bin/bash", str(clone / "scripts/doctor.sh")], env=env, capture_output=True, text=True)
+    assert done.returncode == 1
+    assert "scripts/setup.sh" in done.stderr and "command not found" not in done.stderr
+    assert not log.exists()
+
+
+def test_doctor_finds_homebrew_off_path(tmp_path: Path) -> None:
+    """Homebrew installed but not on PATH (a new Terminal without its line): doctor's tools check sees its tools."""
+    clone, log = doctor_clone(tmp_path, venv=True)
+    root = tmp_path / "root"
+    folder = root / "opt/homebrew/bin"
+    folder.mkdir(parents=True)
+    stub(folder, "brew", f'[ "$1" = shellenv ] && echo \'export PATH="{folder}:$PATH"\'')
+    stub(clone / ".venv/bin", "python", f'echo "$PATH" >> "{log}"')
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "ESTIA_TEST_ROOT": str(root)}
+    done = subprocess.run(["/bin/bash", str(clone / "scripts/doctor.sh")], env=env, capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    assert log.read_text().startswith(f"{folder}:")
+
+
+# ------------------------------------------------------------------ the web keys (findings 17, 54)
+
+
+def keychain_stub(folder: Path, log: Path, *, items: dict[str, str], locked: bool) -> None:
+    """security: `items` are the keychain's (service: key); with `locked`, a key's value (-w) is refused until
+    unlock-keychain ran, while finding an item without its value works, as on a locked login keychain."""
+    unlocked = folder / "unlocked"
+    cases = "\n".join(f'    *"-s {service}"*) found="{key}" ;;' for service, key in items.items())
+    stub(
+        folder,
+        "security",
+        f'echo "security $*" >> "{log}"\n'
+        f'[ "$1" = unlock-keychain ] && {{ touch "{unlocked}"; exit 0; }}\n'
+        'found=""\n'
+        f'case "$*" in\n{cases}\nesac\n'
+        '[ -n "$found" ] || exit 44\n'
+        'case "$*" in *" -w"*) ;; *) exit 0 ;; esac\n'
+        f"{'[ -e ' + chr(34) + str(unlocked) + chr(34) + ' ] || exit 36' if locked else ''}\n"
+        'echo "$found"',
+    )
+
+
+def test_web_keys_without_any_key_say_how_to_add_one_and_never_unlock(tmp_path: Path) -> None:
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    log = tmp_path / "security.log"
+    keychain_stub(stubs, log, items={}, locked=False)
+    done = run_script("set-web-keys.sh", env={"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(tmp_path / "home")})
+    assert done.returncode == 1
+    assert 'security add-generic-password -U -a "$USER" -s brave-search -w' in done.stderr
+    assert "unlock" not in log.read_text() and "locked" not in done.stdout + done.stderr
+
+
+def test_web_keys_in_a_locked_keychain_are_read_after_unlocking_it(tmp_path: Path) -> None:
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    log = tmp_path / "security.log"
+    keychain_stub(stubs, log, items={"brave-search": "sk-brave-made-up"}, locked=True)
+    done = run_script("set-web-keys.sh", env={"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(tmp_path / "home")})
+    assert done.returncode == 0, done.stderr
+    assert "The login keychain is locked: unlocking it." in done.stdout
+    assert "Brave key 16" in done.stdout and "made-up" not in done.stdout + done.stderr
+    web = tmp_path / "home/.config/local-assistant/web.env"
+    assert web.read_text() == "BRAVE_API_KEY=sk-brave-made-up\n"
+
+
+def test_web_keys_in_her_own_user_without_a_key_name_her_hidden_prompt(tmp_path: Path) -> None:
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    keychain_stub(stubs, tmp_path / "security.log", items={}, locked=False)
+    own_user(tmp_path / "root")
+    done = run_script("set-web-keys.sh", env=owner_env(tmp_path, stubs))
+    assert done.returncode == 1
+    assert "/usr/bin/sudo /usr/local/estia/bin/estia secret set web.env BRAVE_API_KEY" in done.stderr
+
+
+# ------------------------------------------------------------------ places and routes' setup (finding 12)
+
+
+def gcloud_stub(folder: Path, log: Path, *, existing: str = "") -> None:
+    """gcloud: signed in, one open billing account; `projects list` finds `existing` by its name."""
+    stub(
+        folder,
+        "gcloud",
+        f'echo "gcloud $*" >> "{log}"\n'
+        'case "$*" in\n'
+        '  "config get-value account") echo alex@example.com ;;\n'
+        f'  "projects list"*) echo "{existing}" ;;\n'
+        f'  "projects describe"*) exit {0 if existing else 1} ;;\n'
+        '  "billing accounts list"*) echo billingAccounts/000000-000000-000000 ;;\n'
+        '  "billing accounts describe"*) echo "My billing" ;;\n'
+        "esac\nexit 0",
+    )
+
+
+def test_maps_setup_without_gcloud_says_how_to_install_it(tmp_path: Path) -> None:
+    done = run_script("setup-google-maps.sh", env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)})
+    assert done.returncode == 1
+    assert "brew install --cask gcloud-cli" in done.stderr and "Not signed in" not in done.stderr
+
+
+def test_maps_setup_run_again_reuses_its_project_and_says_how_to_go_on(tmp_path: Path) -> None:
+    """A second run after a no at the billing question: the project named "Estia AI" is used again, never a new one,
+    and the line to go on later names it."""
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    log = tmp_path / "gcloud.log"
+    gcloud_stub(stubs, log, existing="estia-ai-0a1b2c")
+    done = run_script(
+        "setup-google-maps.sh", env={"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(tmp_path)}, stdin="n\n"
+    )
+    assert done.returncode == 1 and "Stopped: nothing was linked." in done.stderr
+    assert "projects create" not in log.read_text()
+    assert 'scripts/setup-google-maps.sh "Estia AI" estia-ai-0a1b2c' in done.stdout + done.stderr
+
+
+def test_maps_setup_shows_why_a_key_could_not_be_made(tmp_path: Path) -> None:
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    log = tmp_path / "gcloud.log"
+    gcloud_stub(stubs, log, existing="estia-ai-0a1b2c")
+    text = (stubs / "gcloud").read_text()
+    text = text.replace(
+        "esac\nexit 0",
+        '  "services api-keys describe"*) exit 1 ;;\n'
+        '  "services api-keys create"*) echo "PERMISSION_DENIED: API keys API not ready" >&2; exit 1 ;;\nesac\nexit 0',
+    )
+    (stubs / "gcloud").write_text(text)
+    done = run_script(
+        "setup-google-maps.sh", env={"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(tmp_path)}, stdin="y\n"
+    )
+    assert done.returncode == 1
+    assert "PERMISSION_DENIED: API keys API not ready" in done.stderr
+    assert 'scripts/setup-google-maps.sh "Estia AI" estia-ai-0a1b2c' in done.stderr

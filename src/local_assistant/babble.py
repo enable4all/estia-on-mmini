@@ -1,4 +1,4 @@
-"""Language practice (/babble): a session in one of nine languages at A2 or B1, then a short recap.
+"""Language practice (/babble): a session in one of eight languages at A2 or B1, then a short recap.
 
 Started and ended only by the user's typed /babble (never a voice note, a call or Gemma: no tool). A session has its
 own conversation (store kind "practice"), so the tutor style and the roleplay never reach her normal history; learning,

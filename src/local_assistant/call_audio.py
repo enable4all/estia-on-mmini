@@ -273,6 +273,7 @@ class Barge:
         self.stopped = dict.fromkeys(RULES, 0)  # stops by each rule while it was in charge
         self.would = dict.fromkeys(RULES, 0)  # stops each rule would have made as the shadow
         self.own_voice = 0
+        self.acknowledged = 0  # a listener's "okay" over her: she carried on (calls.is_acknowledgement)
         self._last: asyncio.Task[float | str] | None = None
         self._asking: set[asyncio.Task[float | str]] = set()
 
@@ -336,10 +337,14 @@ class Barge:
             self.least = max(self.least, OWN_VOICE_FACTOR * level)
         self.own_voice += 1
 
+    def acknowledgement(self) -> None:
+        """A stop was a listener's acknowledgement alone ("okay", "mm-hm"; calls.py): she carried on. Only counted."""
+        self.acknowledged += 1
+
     def summary(self) -> str:
         """The call's end line (metadata): the configured rule and, when loudness took over, why; for each rule
-        measured, how often it stopped her in charge and would have as the shadow; her own voice; the detector's
-        chunks, slowest answer and failures by kind."""
+        measured, how often it stopped her in charge and would have as the shadow; her own voice; the acknowledgements
+        she carried on after; the detector's chunks, slowest answer and failures by kind."""
         head = f"calls: barge-in {self.rule}"
         if not self.measured:
             head += " (no speech detector)" if self.rule == "loudness" else " (loudness: no speech detector)"
@@ -352,7 +357,7 @@ class Barge:
             for rule in rules
             if rule == "loudness" or self.measured
         )
-        line = f"{head}: {counts}; her own voice {self.own_voice}"
+        line = f"{head}: {counts}; her own voice {self.own_voice}; acknowledgements {self.acknowledged}"
         if not self.measured:
             return line
         failed = sum(self.failed.values())

@@ -1,6 +1,10 @@
+import errno
+import io
 import json
 import os
+import re
 import tempfile
+from collections.abc import Collection
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,7 +13,8 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from local_assistant import doctor, prompts
+from local_assistant import config as config_module
+from local_assistant import doctor, ownuser, prompts
 from local_assistant.config import Config, load_config
 from local_assistant.doctor import Finding, Probe, exit_code, render, run
 from local_assistant.hostsec import Check
@@ -48,6 +53,32 @@ class FakeProbe(Probe):
         self.own = False  # she runs as her own user here
         self.her = False  # this doctor runs as her (_estia)
         self.programs: list[Check] = []
+        self.launchd: str | None = None  # `launchctl print` of the bridge's service; None: could not be read
+        self.hue: dict[str, Any] | None = None  # the device helper's hue-check answer; None: not checked
+        self.hue_asked: list[list[str]] = []
+        self.pmset: str | None = None  # `pmset -g`; None: could not be read
+        self.signal_version: str | None = "signal-cli 0.14.9"  # `signal-cli --version`; None: could not be read
+        self.versions_asked: list[str] = []
+        self.home_open: tuple[list[Path], bool] = ([], True)  # what in your home every account may open; all read
+        self.homes_opened: list[tuple[Path, set[Path]]] = []
+
+    def power(self) -> str | None:
+        return self.pmset
+
+    def open_home(self, home: Path, shared: Collection[Path]) -> tuple[list[Path], bool]:
+        self.homes_opened.append((home, set(shared)))
+        return self.home_open
+
+    def signal_cli_version(self, program: str) -> str | None:
+        self.versions_asked.append(program)
+        return self.signal_version
+
+    def bridge_launchd(self) -> str | None:
+        return self.launchd
+
+    def hue_check(self, cfg: Config, lights: list[str]) -> dict[str, Any] | None:
+        self.hue_asked.append(lights)
+        return self.hue
 
     def moved(self) -> bool:
         return self.own
@@ -91,6 +122,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     accounts = tmp_path / ".local/share/signal-cli/data/accounts.json"
     accounts.parent.mkdir(parents=True)
     accounts.write_text(json.dumps({"accounts": [{"number": NUMBER, "path": "123456"}]}))
+    (accounts.parent / "123456").write_text(json.dumps({"version": 8, "registered": True}))  # its own account file
     return tmp_path
 
 
@@ -157,6 +189,15 @@ def test_ollama_must_run_and_have_the_model(home: Path) -> None:
     assert down.status == "fail" and "brew services start ollama" in down.fix
 
 
+def test_a_missing_alias_points_to_setup_which_picks_the_model_for_this_macs_memory(home: Path) -> None:
+    """On a 16 or 24 GB Mac setup chose gemma4:12b: the fix never names the 26b, which does not fit (finding 63)."""
+    probe = FakeProbe(home)
+    probe.answers["http://127.0.0.1:11434/api/tags"] = {"models": [{"name": "gemma4:12b"}]}
+    model = by_part(run(write_config(home, MINIMAL), probe))["Model"]
+    assert model.status == "fail" and "gemma4:26b" not in model.fix
+    assert "scripts/setup.sh" in model.fix and "fits this Mac's memory" in model.fix
+
+
 def test_a_cloud_model_under_the_alias_is_a_fail(home: Path) -> None:
     """Ollama's own entry marks a model that runs on its servers: answers pause, so doctor says ✗ and how to fix it."""
     probe = FakeProbe(home)
@@ -164,7 +205,28 @@ def test_a_cloud_model_under_the_alias_is_a_fail(home: Path) -> None:
     probe.answers["http://127.0.0.1:11434/api/tags"] = {"models": [{"name": "local-worker:latest", **remote}]}
     model = by_part(run(write_config(home, MINIMAL), probe))["Model"]
     assert model.status == "fail" and "cloud model" in model.text and "Ollama's servers" in model.text
-    assert "create local-worker from it" in model.fix
+    assert "ollama rm local-worker, then run scripts/setup.sh" in model.fix and "gemma4:26b" not in model.fix
+
+
+def test_a_number_whose_registration_did_not_finish_is_named(home: Path) -> None:
+    """signal-cli lists a number as soon as register starts: only its account file says it was verified (20, 53)."""
+    (home / ".local/share/signal-cli/data/123456").write_text(json.dumps({"version": 8, "registered": False}))
+    signal = by_part(run(write_config(home, MINIMAL), FakeProbe(home)))["Signal number"]
+    assert signal.status == "fail" and "did not finish" in signal.text and "2.3" in signal.fix
+    assert NUMBER not in signal.text + signal.fix
+
+
+@pytest.mark.parametrize(("version", "status"), [("signal-cli 0.14.9", "ok"), ("signal-cli 0.15.0", "warn")])
+def test_doctor_names_a_signal_cli_of_another_version(home: Path, version: str, status: str) -> None:
+    """Registration and the bridge use signal-cli 0.14's requests (finding 20)."""
+    probe = FakeProbe(home)
+    probe.signal_version = version
+    found = by_part(run(write_config(home, MINIMAL), probe))["signal-cli"]
+    assert found.status == status and version.split()[1] in found.text
+    if status == "warn":
+        assert "0.14" in found.text and "brew install signal-cli" in found.fix
+    probe.signal_version = None  # not read: no line
+    assert "signal-cli" not in by_part(run(write_config(home, MINIMAL), probe))
 
 
 def test_the_bot_number_must_be_registered(home: Path) -> None:
@@ -264,6 +326,21 @@ def test_mail_names_each_mailbox_that_still_needs_a_sign_in(home: Path) -> None:
     mail = by_part(findings)["Mail"]
     assert mail.status == "fail" and mail.text == "not signed in: work (1 of 2 signed in)"
     assert mail.fix == "scripts/mail-login.sh <address of work>" and "rt-home" not in render(findings)
+
+
+def test_the_signal_number_line_reads_only_signal_clis_own_account_file(home: Path, tmp_path: Path) -> None:
+    """One reader for doctor, setup and the move (hostsec): an account file named by a path elsewhere is never read
+    (review 15 Oct, 6)."""
+    elsewhere = tmp_path / "elsewhere.json"
+    elsewhere.write_text(json.dumps({"registered": False}))
+    accounts = home / ".local/share/signal-cli/data/accounts.json"
+    accounts.write_text(json.dumps({"accounts": [{"number": NUMBER, "path": str(elsewhere)}]}))
+    line = by_part(run(write_config(home, MINIMAL), FakeProbe(home)))["Signal number"]
+    assert line.status == "ok"  # not read: as unreadable, which changes nothing
+    (accounts.parent / "111111").write_text(json.dumps({"registered": False}))
+    accounts.write_text(json.dumps({"accounts": [{"number": NUMBER, "path": "111111"}]}))
+    line = by_part(run(write_config(home, MINIMAL), FakeProbe(home)))["Signal number"]
+    assert line.status == "fail"
 
 
 def test_the_example_placeholders_must_be_replaced(home: Path) -> None:
@@ -492,6 +569,13 @@ def test_spotify_signed_in_again_since_its_failure_is_not_tested_yet(
         ("devices", "Lights and plugs", "login", "tapo.env", "untested"),  # scripts/set-tapo-credentials.sh
         ("devices", "Lights and plugs", "no_answer", "tapo.env", "fail"),  # a new login does not wake a device
         ("devices", "Lights and plugs", "helper_missing", "helper", "untested"),  # cd tools/tapo && uv sync
+        ("devices", "Lights and plugs", "hue_key", "hue.env", "untested"),  # scripts/hue-pair.sh
+        ("devices", "Lights and plugs", "certificate", "hue.env", "untested"),
+        ("devices", "Lights and plugs", "not_paired", "hue.env", "untested"),
+        ("devices", "Lights and plugs", "no_light", "hue.env", "fail"),  # pairing again does not bring a light back
+        ("devices", "Lights and plugs", "no_light", "config", "untested"),  # the light's id corrected in config.toml
+        ("devices", "Lights and plugs", "login", "config", "fail"),  # a config edit is no TP-Link login
+        ("devices", "Lights and plugs", "hue_key", "tapo.env", "fail"),  # the TP-Link login is not the bridge's key
         ("calendar", "Calendar", "gone", "calendar.env", "untested"),  # scripts/set-calendar-url.sh
         ("calendar", "Calendar", "no_answer", "calendar.env", "fail"),
         ("calendar", "Calendar", "helper_missing", "helper", "untested"),  # cd tools/ical && uv sync
@@ -505,17 +589,19 @@ def test_a_saved_login_address_or_helper_counts_only_for_the_failure_it_fixes(
     helpers_at(monkeypatch, helper)
     folder = home / ".config/local-assistant"
     folder.mkdir(parents=True, exist_ok=True)
-    for name in ("tapo.env", "calendar.env"):
+    for name in ("tapo.env", "calendar.env", "hue.env"):
         (folder / name).write_text(
             "SAVED=yes\nCALENDAR_ICS_URL=https://calendar.google.com/calendar/ical/x/basic.ics\n"
         )
         (folder / name).chmod(0o600)
-    for file in (folder / "tapo.env", folder / "calendar.env", helper):
+    for file in (folder / "tapo.env", folder / "calendar.env", folder / "hue.env", helper):
         os.utime(file, (OLD, OLD), follow_symlinks=False)
     text = MINIMAL + '[calendar]\n[[tapo.devices]]\nname = "lamp"\nhost = "192.168.1.20"\nkind = "light"\n'
     path = write_config(home, text)
+    os.utime(path, (OLD, OLD))  # the config saved long before the failure
     recorded(path).failed(part, reason)
-    os.utime(helper if saved == "helper" else folder / saved, (NOW - 60, NOW - 60), follow_symlinks=False)
+    changed = {"helper": helper, "config": path}.get(saved, folder / saved)
+    os.utime(changed, (NOW - 60, NOW - 60), follow_symlinks=False)
     assert by_part(run(path, FakeProbe(home)))[label].status == state
 
 
@@ -842,26 +928,44 @@ def test_doctor_says_her_own_messages_are_off_until_turned_on_and_who_turned_the
     assert found == Finding("ok", "Initiative", prompts.DOCTOR_INITIATIVE_OFF_BY_USER)
 
 
+def test_in_her_own_user_the_speech_detectors_fix_names_her_voice_log_command(home: Path) -> None:
+    """Her voice service's output is in /var/log/estia, readable only through her wrapper: never a path in a home."""
+    probe = FakeProbe(home)
+    probe.own = True
+    short = tempfile.mkdtemp(prefix="c", dir="/tmp")  # socket paths are at most 104 bytes
+    path = write_config(home, MINIMAL + VOICE + f'[calls]\nsocket_dir = "{short}"\n')
+    for vad in ("loading", "unavailable"):
+        probe.answers[HEALTH] = {"stt": "ready", "tts": "ready", "vad": vad}
+        found = by_part(run(path, probe))["Speech detector"]
+        assert found.fix.endswith("see /usr/bin/sudo /usr/local/estia/bin/estia logs voice"), found.fix
+        assert "Library/Logs" not in found.fix
+
+
 def test_with_speech_stopping_her_doctor_shows_the_speech_detector(home: Path) -> None:
     probe = FakeProbe(home)
     short = tempfile.mkdtemp(prefix="c", dir="/tmp")  # socket paths are at most 104 bytes
     calls = f'[calls]\nsocket_dir = "{short}"\n'
-    loudness = write_config(home, MINIMAL + VOICE + calls)
+    sound = write_config(home, MINIMAL + VOICE + calls + 'interrupt = "any sound"\n')
     probe.answers[HEALTH] = {"stt": "ready", "tts": "ready", "vad": "ready"}
-    assert "Speech detector" not in by_part(run(loudness, probe))  # loudness, the default: nothing to show
-    path = write_config(home, MINIMAL + VOICE + calls + 'barge = "speech"\n')
+    assert "Speech detector" not in by_part(run(sound, probe))  # any sound stops her: nothing to show
+    path = write_config(home, MINIMAL + VOICE + calls)  # only speech, the default
     assert by_part(run(path, probe))["Speech detector"] == Finding("ok", "Speech detector", "ready")
     probe.answers[HEALTH] = {"stt": "ready", "tts": "ready", "vad": "loading"}
     waiting = by_part(run(path, probe))["Speech detector"]
+    log = "~/Library/Logs/local-assistant/voice.log"
     assert waiting == Finding(
-        "warn", "Speech detector", prompts.DOCTOR_DETECTOR_LOADING, prompts.DOCTOR_DETECTOR_LOADING_FIX
+        "warn", "Speech detector", prompts.DOCTOR_DETECTOR_LOADING, prompts.DOCTOR_DETECTOR_LOADING_FIX.format(log=log)
     )
-    assert waiting.text == "loading: loudness stops her on calls until it is ready"
+    assert waiting.text == "loading: any sound stops her on calls until it is ready"
     probe.answers[HEALTH] = {"stt": "ready", "tts": "ready", "vad": "unavailable"}
     broken = by_part(run(path, probe))["Speech detector"]
     assert broken == Finding(
-        "warn", "Speech detector", prompts.DOCTOR_DETECTOR_UNAVAILABLE, prompts.DOCTOR_DETECTOR_UNAVAILABLE_FIX
+        "warn",
+        "Speech detector",
+        prompts.DOCTOR_DETECTOR_UNAVAILABLE,
+        prompts.DOCTOR_DETECTOR_UNAVAILABLE_FIX.format(log=log),
     )
+    assert "any sound stops her on calls until it is fixed" in broken.text
     assert broken.fix == (  # its own fix: the model folder downloads again at the next start
         "delete ~/Library/Application Support/local-assistant/voice-models/silero-vad, then run"
         " scripts/install-voice-daemon.sh (asks for sudo: run it yourself); see ~/Library/Logs/local-assistant/voice.log"
@@ -869,10 +973,45 @@ def test_with_speech_stopping_her_doctor_shows_the_speech_detector(home: Path) -
     probe.answers[HEALTH] = {"stt": "ready", "tts": "ready"}
     old = by_part(run(path, probe))["Speech detector"]
     assert old == Finding("warn", "Speech detector", prompts.DOCTOR_DETECTOR_OLD, prompts.DOCTOR_VOICE_REINSTALL)
-    assert old.text == "old voice service: loudness stops her on calls until it is updated"
+    assert old.text == "old voice service: any sound stops her on calls until it is updated"
     del probe.answers[HEALTH]
     silent = by_part(run(path, probe))["Speech detector"]
     assert silent.status == "warn" and silent.text.startswith("not ready")  # the Voice line fails already
+    for finding in (waiting, broken, old, silent):
+        assert "loudness" not in finding.text + finding.fix  # the old rule's name stays in the logs
+
+
+@pytest.mark.parametrize(
+    ("line", "new"),
+    [
+        ('barge = "speech"', 'interrupt = "only speech"'),
+        ('barge = "loudness"', 'interrupt = "any sound"'),
+        ('interrupt = "sound"', 'interrupt = "any sound"'),
+    ],
+)
+def test_doctor_suggests_the_new_wording_for_what_stops_her(home: Path, line: str, new: str) -> None:
+    probe = FakeProbe(home)
+    probe.answers[HEALTH] = {"stt": "ready", "tts": "ready", "vad": "ready"}
+    short = tempfile.mkdtemp(prefix="c", dir="/tmp")
+    path = write_config(home, MINIMAL + VOICE + f'[calls]\nsocket_dir = "{short}"\n{line}\n')
+    found = by_part(run(path, probe))["Calls setting"]
+    assert found == Finding("warn", "Calls setting", f"{line} still works", f"write {new} in [calls] instead")
+    current = write_config(home, MINIMAL + VOICE + f'[calls]\nsocket_dir = "{short}"\n{new}\n')
+    assert "Calls setting" not in by_part(run(current, probe))
+
+
+def test_doctor_says_an_old_barge_beside_interrupt_is_not_read(home: Path) -> None:
+    probe = FakeProbe(home)
+    probe.answers[HEALTH] = {"stt": "ready", "tts": "ready", "vad": "ready"}
+    short = tempfile.mkdtemp(prefix="c", dir="/tmp")
+    both = f'[calls]\nsocket_dir = "{short}"\ninterrupt = "any sound"\nbarge = "speech"\n'
+    found = by_part(run(write_config(home, MINIMAL + VOICE + both), probe))["Calls setting"]
+    assert found == Finding(
+        "warn",
+        "Calls setting",
+        'barge = "speech" is not read: interrupt = "any sound" wins',
+        "remove barge from [calls]",
+    )
 
 
 # hardening: her Signal account's devices, the safety number, the model's pin, retention, the Mac and her own user
@@ -998,9 +1137,10 @@ def test_in_her_own_user_the_pin_says_how_to_edit_her_config_and_restart_her(hom
     path = write_config(home, MINIMAL)
     pin = by_part(run(path, probe))["Model pin"]
     assert (
-        f"/usr/bin/sudo -u _estia -e {path}" in pin.fix
+        "/usr/bin/sudo /usr/local/estia/bin/estia config," in pin.fix
         and "/usr/bin/sudo /usr/local/estia/bin/estia restart" in pin.fix
     )
+    assert "sudo -u _estia -e" not in pin.fix  # nano as her: no copy of her config in your account (review 15 Oct, 2)
     assert f'model_digest = "sha256:{DIGEST}"' in pin.fix
 
 
@@ -1012,7 +1152,7 @@ def test_in_her_own_user_a_soul_others_can_read_is_fixed_as_her(home: Path) -> N
     soul.write_text("Warm.\n")
     soul.chmod(0o644)
     found = by_part(run(path, probe))["Personality"]
-    assert found.status == "warn" and found.fix.startswith(f"/usr/bin/sudo -u _estia chmod 600 {soul}")
+    assert found.status == "warn" and found.fix.startswith(f"/usr/bin/sudo -u _estia /bin/chmod 600 {soul}")
 
 
 def test_her_programs_follow_her_own_users_checks(home: Path) -> None:
@@ -1039,6 +1179,45 @@ def test_run_as_her_the_tools_line_leaves_your_tools_out(home: Path) -> None:
 def test_the_safety_number_and_linked_device_fixes_name_her_signal_command() -> None:
     assert "/usr/bin/sudo /usr/local/estia/bin/estia signal listIdentities" in prompts.SAFETY_NUMBER_FIX
     assert "/usr/bin/sudo /usr/local/estia/bin/estia signal removeDevice" in prompts.LINKED_FIX
+
+
+# her way through your home (finding 32): with Projects or Documents on, her account passes through your home by name,
+# and opens what in it lets every account in
+
+
+@pytest.mark.parametrize(
+    ("section", "shared"),
+    [
+        ('[documents]\nfolder = "/Users/alex/Estia-KB"\n', {Path("/Users/alex/Estia-KB")}),
+        ('[projects]\nroot = "/Users/alex/dev"\n', {Path("/Users/alex/dev")}),
+    ],
+)
+def test_doctor_names_what_every_account_may_open_in_your_home(home: Path, section: str, shared: set[Path]) -> None:
+    probe = FakeProbe(home)
+    probe.own = True
+    probe.home_open = ([Path("/Users/alex/.zshrc"), Path("/Users/alex/.config")], False)
+    found = by_part(run(write_config(home, MINIMAL + section), probe))["Your home"]
+    assert found.status == "warn"
+    assert found.text.startswith("every account may open .zshrc, .config, and her account passes through your home")
+    assert "(the usual names only: her account cannot list your home)" in found.text
+    assert found.fix == "Close what should stay yours, as you: chmod o-rwx /Users/alex/.zshrc /Users/alex/.config"
+    assert probe.homes_opened == [(Path("/Users/alex"), shared)]
+
+
+def test_doctor_has_no_home_line_without_her_way_through_it(home: Path) -> None:
+    """Before her own user she runs as you; without a share she never passes through your home; nothing open: no
+    line either way."""
+    documents = '[documents]\nfolder = "/Users/alex/Estia-KB"\n'
+    for own, section, opened in (
+        (False, documents, ([Path("/Users/alex/.zshrc")], True)),
+        (True, "", ([Path("/Users/alex/.zshrc")], True)),
+        (True, '[documents]\nfolder = "/var/estia/Estia-KB"\n', ([Path("/Users/alex/.zshrc")], True)),
+        (True, documents, ([], False)),
+    ):
+        probe = FakeProbe(home)
+        probe.own = own
+        probe.home_open = opened
+        assert "Your home" not in by_part(run(write_config(home, MINIMAL + section), probe)), (own, section)
 
 
 # her projects folder: read as whoever runs doctor (as her: /usr/bin/sudo /usr/local/estia/bin/estia doctor)
@@ -1127,7 +1306,120 @@ def test_the_always_on_line_reads_the_service_file_under_the_root_it_checks(
     assert always_on.status == "warn"
     (root / "Library/LaunchDaemons/com.local-assistant.bridge.plist").write_bytes(b"x")
     always_on = by_part(run(write_config(home, MINIMAL), FakeProbe(home)))["Always on"]
-    assert always_on.status == "ok"
+    assert (always_on.status, always_on.text) == ("untested", "installed; whether it runs could not be read")
+
+
+# "Always on" means alive, not just installed: launchd's state and last exit code, and the bridge's last sign of life
+# (last_alive, written every minute); read-only, fixed argv, no fix applied
+
+RUNNING = "system/com.local-assistant.bridge = {\n\tstate = running\n\tpid = 4242\n\truns = 3\n}\n"
+RESTARTING = "system/com.local-assistant.bridge = {\n\tstate = spawn scheduled\n\truns = 40\n\tlast exit code = 1\n}\n"
+STOPPED = "system/com.local-assistant.bridge = {\n\tstate = not running\n\truns = 1\n\tlast exit code = 0\n}\n"
+NOT_LOADED = 'Bad request.\nCould not find service "com.local-assistant.bridge" in domain for system\n'
+
+
+def always_on(
+    home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    launchd: str | None,
+    alive: float | None,
+    *,
+    own: bool = False,
+) -> Finding:
+    root = tmp_path / "root"
+    (root / "Library/LaunchDaemons").mkdir(parents=True, exist_ok=True)
+    (root / "Library/LaunchDaemons/com.local-assistant.bridge.plist").write_bytes(b"x")
+    monkeypatch.setenv("ESTIA_ROOT", str(root))
+    config = write_config(home, MINIMAL)
+    if alive is not None:
+        store = Store.open(load_config(config).db_path)
+        store.set_state("last_alive", f"{alive:.0f}")
+        store.close()
+    probe = FakeProbe(home)
+    probe.launchd, probe.own = launchd, own
+    return by_part(run(config, probe))["Always on"]
+
+
+def test_always_on_is_running_with_a_fresh_sign_of_life(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    found = always_on(home, tmp_path, monkeypatch, RUNNING, NOW - 50)
+    assert (found.status, found.text) == ("ok", "running, last sign of life 11:39")
+
+
+def test_always_on_says_how_long_there_was_no_sign_of_life(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    found = always_on(home, tmp_path, monkeypatch, RUNNING, NOW - 12 * 60, own=True)
+    assert (found.status, found.text) == ("fail", "installed, no sign of life for 12 min")
+    assert found.fix == "/usr/bin/sudo /usr/local/estia/bin/estia logs bridge"
+    found = always_on(home, tmp_path, monkeypatch, RUNNING, NOW - 2 * 60)  # within about 3 minutes: alive
+    assert found.status == "ok"
+    found = always_on(home, tmp_path, monkeypatch, RUNNING, NOW - 3 * 86_400)
+    assert found.text == "installed, no sign of life since 5 Oct 11:40"
+
+
+def test_always_on_tells_restarting_from_stopped(home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    found = always_on(home, tmp_path, monkeypatch, RESTARTING, NOW - 12 * 60, own=True)
+    assert (found.status, found.text) == ("fail", "restarting, last exit code 1")
+    assert found.fix == "/usr/bin/sudo /usr/local/estia/bin/estia logs launchd"
+    found = always_on(home, tmp_path, monkeypatch, STOPPED, NOW - 12 * 60, own=True)
+    assert (found.status, found.text) == ("fail", "installed, stopped (last exit code 0)")
+    assert found.fix == "/usr/bin/sudo /usr/local/estia/bin/estia restart"
+    found = always_on(home, tmp_path, monkeypatch, NOT_LOADED, None, own=True)
+    assert (found.status, found.text) == ("fail", "installed, not loaded: launchd does not run it")
+    assert found.fix == (
+        "/usr/bin/sudo /bin/launchctl bootstrap system /Library/LaunchDaemons/com.local-assistant.bridge.plist"
+    )
+
+
+def test_always_on_before_the_move_points_to_the_owners_files(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    found = always_on(home, tmp_path, monkeypatch, RESTARTING, None)
+    assert found.text == "restarting, last exit code 1"
+    assert (
+        found.fix == f"tail -n 50 {load_config(home / '.config/local-assistant/config.toml').log_dir / 'launchd.log'}"
+    )
+    found = always_on(home, tmp_path, monkeypatch, NOT_LOADED, None)
+    assert found.fix == (
+        "/usr/bin/sudo /bin/launchctl bootstrap system /Library/LaunchDaemons/com.local-assistant.bridge.plist"
+    )
+    found = always_on(home, tmp_path, monkeypatch, STOPPED, None)
+    assert found.fix == "/usr/bin/sudo /bin/launchctl kickstart -k system/com.local-assistant.bridge"
+
+
+def test_always_on_reads_an_unreadable_launchd_as_unknown(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only "Could not find service" means not loaded; any other answer without a state is launchd not read."""
+    found = always_on(home, tmp_path, monkeypatch, "Operation not permitted\n", NOW - 30)
+    assert (found.status, found.text) == ("ok", "installed, last sign of life 11:39")
+
+
+def test_always_on_running_without_a_sign_of_life_on_record(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    found = always_on(home, tmp_path, monkeypatch, RUNNING, None)
+    assert (found.status, found.text) == ("warn", "running, no sign of life on record yet")
+
+
+def test_always_on_without_launchd_reads_the_sign_of_life_alone(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    found = always_on(home, tmp_path, monkeypatch, None, None)
+    # review of 14 Oct: installed is not alive; nothing more can be known, so no ✓ (○, with the log to read)
+    assert (found.status, found.text) == ("untested", "installed; whether it runs could not be read")
+    assert found.fix.endswith("bridge.log")
+    found = always_on(home, tmp_path, monkeypatch, None, NOW - 12 * 60)
+    assert (found.status, found.text) == ("fail", "installed, no sign of life for 12 min")
+    found = always_on(home, tmp_path, monkeypatch, None, NOW - 30)
+    assert (found.status, found.text) == ("ok", "installed, last sign of life 11:39")
+
+
+def test_the_real_probe_never_reads_the_live_launchd_under_a_test_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert Probe().bridge_launchd() is None  # conftest gives every test its own ESTIA_ROOT
 
 
 # YouTube: always on with read_link; doctor checks the helper is in place and names its version (from its files: no
@@ -1184,3 +1476,545 @@ def test_a_failing_youtube_read_names_the_next_step(home: Path, monkeypatch: pyt
     recorded(path).failed("youtube", "bad_answer")
     youtube = by_part(run(path, FakeProbe(home)))["YouTube"]
     assert youtube.status == "fail" and "tools/youtube" in youtube.fix
+
+
+def test_always_on_reads_the_bridges_own_alive_mark() -> None:
+    from local_assistant import app
+
+    assert doctor.ALIVE_KEY == app.ALIVE_KEY and doctor.ALIVE_SECONDS >= 3 * app.ALIVE_SECONDS
+
+
+# Documents ([documents]): the folder shared and readable (she lists it and reads the share's token file), the helper
+# in place, then what her last look did
+
+
+def documents_at(monkeypatch: pytest.MonkeyPatch, helper: Path, owner_home: Path | None = None) -> None:
+    """The documents helper at `helper`; with `owner_home`, the test's home stands in for a home on a Mac
+    (/Users/<name>), so its Estia-KB is the owner's ~/Estia-KB."""
+
+    def load(path: Path) -> Config:
+        return replace(load_config(path), documents_helper=(str(helper),))
+
+    monkeypatch.setattr(doctor, "load_config", load)
+    if owner_home is not None:
+        monkeypatch.setattr(config_module, "OWNER_HOME", re.compile(re.escape(str(owner_home))))
+
+
+def documents_config(home: Path, folder: Path) -> Path:
+    return write_config(home, MINIMAL + f'[documents]\nfolder = "{folder}"\n')
+
+
+def shared_folder(home: Path) -> Path:
+    folder = home / "Estia-KB"
+    folder.mkdir(parents=True)
+    (folder / ".estia-share").write_text("0123456789abcdef0123456789abcdef\n")
+    return folder
+
+
+def built_helper(home: Path) -> Path:
+    helper = home / "tools/documents/.build/release/documents-helper"
+    helper.parent.mkdir(parents=True)
+    helper.write_text("#!/bin/sh\n")
+    helper.chmod(0o755)
+    return helper
+
+
+def test_documents_off_have_no_line(home: Path) -> None:
+    assert "Documents" not in by_part(run(write_config(home, MINIMAL), FakeProbe(home)))
+
+
+def test_a_shared_folder_and_the_helper_in_place_then_her_last_look(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    documents_at(monkeypatch, built_helper(home), home)
+    folder = shared_folder(home)
+    path = documents_config(home, folder)
+    probe = FakeProbe(home)
+    probe.own = True
+    found = by_part(run(path, probe))["Documents"]
+    assert (found.status, found.text) == ("untested", f"set up, not tested yet ({folder}: shared and readable)")
+    recorded(path).ok("documents")
+    assert by_part(run(path, probe))["Documents"].status == "ok"
+    recorded(path).failed("documents", "not_shared")
+    failing = by_part(run(path, probe))["Documents"]
+    assert failing.status == "fail" and "scripts/share-documents.sh" in failing.fix
+
+
+def test_a_folder_she_cannot_read_names_the_share(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    documents_at(monkeypatch, built_helper(home), home)
+    folder = shared_folder(home)
+    probe = FakeProbe(home)
+    probe.own = True
+    folder.chmod(0)
+    try:
+        findings = run(documents_config(home, folder), probe)
+    finally:
+        folder.chmod(0o700)
+    found = by_part(findings)["Documents"]
+    assert found.status == "fail" and exit_code(findings) == 1
+    assert found.text == f"{folder} cannot be read: not shared with her"
+    assert found.fix == "as you, in your checkout (no admin rights): scripts/share-documents.sh"
+
+
+def test_a_missing_folder_or_share_token_names_the_share(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    documents_at(monkeypatch, built_helper(home), home)
+    folder = home / "Estia-KB"
+    probe = FakeProbe(home)
+    probe.own = True
+    missing = by_part(run(documents_config(home, folder), probe))["Documents"]
+    assert missing.status == "fail" and missing.text == f"no folder {folder}"
+    assert "scripts/share-documents.sh" in missing.fix and "makes it" in missing.fix
+    folder.mkdir(parents=True)
+    unshared = by_part(run(documents_config(home, folder), probe))["Documents"]
+    assert unshared.status == "fail" and unshared.text == f"{folder} is not shared with her yet (no share token)"
+    probe.own = False  # she runs as you: your own folder needs no share
+    assert by_part(run(documents_config(home, folder), probe))["Documents"].status == "untested"
+
+
+def test_a_missing_documents_helper_is_a_failure_with_its_build(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    documents_at(monkeypatch, home / "no-helper", home)
+    folder = shared_folder(home)
+    found = by_part(run(documents_config(home, folder), FakeProbe(home)))["Documents"]
+    assert (found.status, found.text) == ("fail", "the documents helper is not built: PDFs cannot be read")
+    assert found.fix == "cd tools/documents && swift build -c release"
+
+
+def test_a_documents_helper_built_after_its_failure_is_not_tested_yet(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = built_helper(home)
+    documents_at(monkeypatch, helper, home)
+    path = documents_config(home, shared_folder(home))
+    recorded(path).failed("documents", "helper_missing")
+    os.utime(helper, (OLD, OLD))
+    assert by_part(run(path, FakeProbe(home)))["Documents"].status == "fail"  # the record stands
+    os.utime(helper, (NOW - 60, NOW - 60))  # built after the failure (swift build, or a deploy)
+    found = by_part(run(path, FakeProbe(home)))["Documents"]
+    assert (found.status, found.text.split(" (", 1)[0]) == ("untested", "set up again, not tested yet")
+
+
+def test_in_her_own_user_a_missing_documents_helper_names_the_deploy(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A release holds the helper only when estia-deploy built it: a release from root-run tools older than that has
+    none, so the fix is the deploy, with the tools' review first (her user builds nothing)."""
+    documents_at(monkeypatch, home / "no-helper", home)
+    folder = shared_folder(home)
+    probe = FakeProbe(home)
+    probe.own = True
+    found = by_part(run(documents_config(home, folder), probe))["Documents"]
+    assert found.status == "fail" and "swift" not in found.fix
+    assert found.fix == prompts.DOCTOR_YOUTUBE_DEPLOY_FIX.format(deploy=ownuser.DEPLOY_CMD)
+    assert f"{ownuser.DEPLOY_CMD} --update-tools" in found.fix
+
+
+def test_doctor_reads_your_sudo_from_roots_listing_or_as_you(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """In her own user, estia doctor (root) lists your sudo rules and hands them to her doctor; before it, doctor
+    reads them as you without a password. Never as her and never under a test's root."""
+    listing = "User alex may run the following commands on mini:\n    (ALL) ALL\n    (ALL) NOPASSWD: ALL\n"
+    from_root = doctor.Probe(tmp_path, owner_sudo=listing).sudo_check()
+    assert from_root is not None and from_root.status == "warn" and "NOPASSWD" in from_root.text
+    assert doctor.Probe(tmp_path).sudo_check() is None  # a test's root: sudo is never run
+    seen: list[str | None] = []
+
+    def run(path: Path, probe: doctor.Probe) -> list[doctor.Finding]:
+        seen.append(probe.owner_sudo)
+        return []
+
+    monkeypatch.setattr(doctor, "run", run)
+    monkeypatch.setattr("sys.stdin", io.StringIO(listing))
+    assert doctor.main(["--config", str(tmp_path / "config.toml")]) == 0
+    monkeypatch.setenv("ESTIA_OWNER_SUDO", "stdin")  # an environment value: a doctor from before ignores it
+    assert doctor.main(["--config", str(tmp_path / "config.toml")]) == 0
+    assert seen == [None, listing]
+
+
+def test_a_release_built_without_the_documents_helper_says_so(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A deploy whose documents build failed goes live without the helper (documents are an extra): doctor names that
+    release and the Swift it needs, not a missing tools update."""
+    documents_at(monkeypatch, home / "no-helper", home)
+    release = home / "release"
+    release.mkdir()
+    (release / "release.json").write_text(json.dumps({"name": "r1", "documents": False}))
+    monkeypatch.setattr(doctor, "CODE_ROOT", release)
+    probe = FakeProbe(home)
+    probe.own = True
+    found = by_part(run(documents_config(home, shared_folder(home)), probe))["Documents"]
+    assert (found.status, found.text) == ("fail", prompts.DOCTOR_DOCUMENTS_NOT_BUILT)
+    assert "its build failed" in found.text and "PDFs cannot be read" in found.text
+    assert found.fix.startswith(ownuser.DEPLOY_CMD) and "Swift 6.0 or later" in found.fix
+
+
+def test_a_folder_macos_itself_refuses_is_named_apart_from_the_share(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """EPERM is macOS's own refusal (its privacy protection of Documents, Desktop and Downloads; live, 14 Oct), not a
+    missing share (EACCES): doctor says so, and names ~/Estia-KB, which macOS does not guard, instead of sharing the
+    same folder again. Before her own user the config may name any folder."""
+    documents_at(monkeypatch, built_helper(home), home)
+    folder = home / "papers"
+    folder.mkdir()
+
+    def refused(path: object) -> object:
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(os, "scandir", refused)
+    found = by_part(run(documents_config(home, folder), FakeProbe(home)))["Documents"]
+    assert found.status == "fail" and found.text == prompts.DOCTOR_DOCUMENTS_REFUSED.format(folder=folder)
+    assert "operation not permitted" in found.text and "scripts/share-documents.sh" not in found.text
+    assert "Documents, Desktop and Downloads" in found.fix and '"/Users/<you>/Estia-KB"' in found.fix
+
+
+def test_estia_kb_itself_refused_by_macos_is_unexpected_never_a_move_there(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fix "use your ~/Estia-KB" for a folder that already is ~/Estia-KB would go in a circle: macOS refusing it
+    is unexpected, and her log says what she gets."""
+    documents_at(monkeypatch, built_helper(home), home)
+    folder = shared_folder(home)
+
+    def refused(path: object) -> object:
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(os, "scandir", refused)
+    for own in (True, False):
+        probe = FakeProbe(home)
+        probe.own = own
+        found = by_part(run(documents_config(home, folder), probe))["Documents"]
+        assert found.status == "fail" and found.text == prompts.DOCTOR_DOCUMENTS_REFUSED.format(folder=folder)
+        assert found.fix == prompts.DOCTOR_DOCUMENTS_REFUSED_KB_FIX
+        assert found.fix.startswith("macOS refuses ~/Estia-KB itself (unexpected)") and "Use your" not in found.fix
+        assert "bridge.log (EPERM)" in found.fix and "SECURITY.md, known gaps" in found.fix
+
+
+def refused_at(monkeypatch: pytest.MonkeyPatch, folder: Path, code: int) -> None:
+    """The folder's own details refused with `code` (EACCES: not shared with her; EPERM: macOS itself)."""
+    real_lstat = os.lstat
+
+    def lstat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+        if str(path) == str(folder):
+            raise PermissionError(code, os.strerror(code))
+        return real_lstat(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "lstat", lstat)
+
+
+def test_in_her_own_user_a_folder_that_is_not_your_estia_kb_names_her_config(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The share opens only ~/Estia-KB to her: a config that still names another folder of yours (the first share's,
+    in Documents) stays closed however often the share runs, so the fix is her config, never the share. A folder in
+    Documents, Desktop or Downloads also gets why."""
+    documents_at(monkeypatch, built_helper(home))  # the real homes: /Users/<name>
+    probe = FakeProbe(home)
+    probe.own = True
+    guarded = Path("/Users/alex/Documents/papers")
+    refused_at(monkeypatch, guarded, errno.EACCES)  # her account cannot pass through Documents
+    found = by_part(run(documents_config(home, guarded), probe))["Documents"]
+    assert found.status == "fail"
+    assert found.text == f"{guarded} is not your ~/Estia-KB: the share opens only ~/Estia-KB to her"
+    assert found.fix == f"{prompts.DOCTOR_DOCUMENTS_HERS_FIX}. {prompts.DOCTOR_DOCUMENTS_WHY_HOME}"
+    assert "macOS guards Documents, Desktop and Downloads; a folder in your home needs no extra permission" in found.fix
+    assert "share-documents.sh" not in found.fix
+    for elsewhere in (Path("/Users/alex/papers"), Path("/Users/Shared/Estia-KB"), Path("/Users/alex/a/Estia-KB")):
+        found = by_part(run(documents_config(home, elsewhere), probe))["Documents"]
+        assert found.text == f"{elsewhere} is not your ~/Estia-KB: the share opens only ~/Estia-KB to her"
+        assert found.fix == prompts.DOCTOR_DOCUMENTS_HERS_FIX  # no folder macOS guards: no why
+    desktop = Path("/Users/alex/desktop/Estia-KB")  # a Mac's usual disk ignores case
+    assert prompts.DOCTOR_DOCUMENTS_WHY_HOME in by_part(run(documents_config(home, desktop), probe))["Documents"].fix
+
+
+def test_in_her_own_user_your_estia_kb_passes_the_name_check(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """/Users/<you>/Estia-KB, as the share prints it, is your ~/Estia-KB: doctor goes on to read it."""
+    documents_at(monkeypatch, built_helper(home))
+    probe = FakeProbe(home)
+    probe.own = True
+    folder = Path("/Users/alex/Estia-KB")
+    refused_at(monkeypatch, folder, errno.EPERM)
+    found = by_part(run(documents_config(home, folder), probe))["Documents"]
+    assert found.text == prompts.DOCTOR_DOCUMENTS_REFUSED.format(folder=folder)
+    assert found.fix == prompts.DOCTOR_DOCUMENTS_REFUSED_KB_FIX
+
+
+def test_in_her_own_user_a_folder_in_her_home_names_yours(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The folder is always the owner's ~/Estia-KB: in her own user ~ is her home (/var/estia), so the config names the
+    owner's folder in full."""
+    documents_at(monkeypatch, built_helper(home), home)
+    probe = FakeProbe(home)
+    probe.own = True
+    found = by_part(run(documents_config(home, Path("/var/estia/Estia-KB")), probe))["Documents"]
+    assert found.status == "fail" and found.text == prompts.DOCTOR_DOCUMENTS_HERS
+    assert found.fix == prompts.DOCTOR_DOCUMENTS_HERS_FIX and '"/Users/<you>/Estia-KB"' in found.fix
+    assert found.text.endswith("documents are always your ~/Estia-KB")
+
+
+def test_a_folder_macos_refuses_at_its_first_step_is_named_too(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """macOS may refuse even the folder's own details (EPERM from lstat): still its own refusal, never the share."""
+    documents_at(monkeypatch, built_helper(home), home)
+    folder = shared_folder(home)
+    real_lstat = os.lstat
+
+    def lstat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+        if str(path) == str(folder):
+            raise PermissionError(errno.EPERM, "Operation not permitted")
+        return real_lstat(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "lstat", lstat)
+    probe = FakeProbe(home)
+    probe.own = True
+    found = by_part(run(documents_config(home, folder), probe))["Documents"]
+    assert found.text == prompts.DOCTOR_DOCUMENTS_REFUSED.format(folder=folder)
+
+
+def test_her_last_look_refused_by_macos_names_no_share(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Her own look met macOS's refusal: in another folder the fix is ~/Estia-KB (live, 14 Oct); in ~/Estia-KB itself
+    that would go in a circle, so it is unexpected."""
+    documents_at(monkeypatch, built_helper(home), home)
+    folder = shared_folder(home)
+    path = documents_config(home, folder)
+    probe = FakeProbe(home)
+    probe.own = True
+    recorded(path).failed("documents", "os_refused")
+    found = by_part(run(path, probe))["Documents"]
+    assert found.status == "fail" and "macOS refuses it" in found.text
+    assert found.fix == prompts.PART_FIXES["documents/os_refused/estia_kb"]
+    assert found.fix.startswith("macOS refuses ~/Estia-KB itself (unexpected)") and "use your" not in found.fix
+    assert "bridge.log" in found.fix and "SECURITY.md" in found.fix
+    elsewhere = home / "papers"  # before her own user the config may name any folder
+    elsewhere.mkdir()
+    path = documents_config(home, elsewhere)
+    recorded(path).failed("documents", "os_refused")
+    found = by_part(run(path, FakeProbe(home)))["Documents"]
+    assert "bridge.log" in found.fix and "SECURITY.md" in found.fix
+    assert "Documents, Desktop and Downloads" in found.fix and "use your ~/Estia-KB" in found.fix
+
+
+def test_before_her_own_user_a_missing_folder_is_made_by_you(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Before her own user the bridge runs as you: no share is needed (the script refuses without her user), only the
+    folder."""
+    documents_at(monkeypatch, built_helper(home), home)
+    folder = home / "Estia-KB"
+    found = by_part(run(documents_config(home, folder), FakeProbe(home)))["Documents"]
+    assert found.text == f"no folder {folder}" and found.fix == f"as you: mkdir -p {folder}"
+    assert "share-documents.sh" not in found.fix
+
+
+ICLOUD_FAMILY = (
+    '[calendar]\n[[calendar.sources]]\nname = "family"\ncaldav = "https://caldav.icloud.com"\n'
+    'user = "alex@example.com"\ncalendar = "Family"\n'
+)
+
+
+def test_a_caldav_calendar_needs_its_password(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    helper = home / "python"
+    helper.write_text("#!/bin/sh\n")
+    helpers_at(monkeypatch, helper)
+    path = write_config(home, MINIMAL + ICLOUD_FAMILY)
+    save_addresses(home, f"CALENDAR_ICS_URL={GOOGLE}\n")  # another calendar's secret only
+    family = by_part(run(path, FakeProbe(home)))["Calendar (family)"]
+    assert (family.status, family.fix) == ("fail", "scripts/set-calendar-password.sh family")
+    assert family.text == "no app-specific password saved in calendar.env (CALDAV_PASSWORD_FAMILY)"
+    save_addresses(home, f"CALDAV_PASSWORD_FAMILY=x\nCALENDAR_SAVED_AT_FAMILY={OLD:.0f}\n")
+    family = by_part(run(path, FakeProbe(home)))["Calendar (family)"]
+    assert (family.status, family.text) == ("untested", "set up, not tested yet (iCloud)")
+    recorded(path).ok("calendar:family")
+    family = by_part(run(path, FakeProbe(home)))["Calendar (family)"]
+    assert (family.status, family.text) == ("ok", "working, last read 11:35 (iCloud)")
+
+
+@pytest.mark.parametrize(
+    ("reason", "text", "fix"),
+    [
+        (
+            "password_refused",
+            "user name or password refused",
+            "a new app-specific password, then scripts/set-calendar-password.sh family",
+        ),
+        ("no_calendar", "no calendar by that name", "check caldav and calendar in config.toml"),
+        ("no_answer", "no answer", "check the service and the Mac's internet connection"),
+    ],
+)
+def test_a_caldav_calendar_failing_says_why_with_the_fix(
+    home: Path, monkeypatch: pytest.MonkeyPatch, reason: Reason, text: str, fix: str
+) -> None:
+    helper = home / "python"
+    helper.write_text("#!/bin/sh\n")
+    helpers_at(monkeypatch, helper)
+    path = write_config(home, MINIMAL + ICLOUD_FAMILY)
+    os.utime(path, (OLD, OLD))
+    save_addresses(home, f"CALDAV_PASSWORD_FAMILY=x\nCALENDAR_SAVED_AT_FAMILY={OLD:.0f}\n")
+    recorded(path).failed("calendar:family", reason)
+    family = by_part(run(path, FakeProbe(home)))["Calendar (family)"]
+    assert family.status == "fail" and family.text == f"failing since 11:35: {text} (iCloud)"
+    assert family.fix.startswith(fix)
+
+
+def test_a_caldav_fix_saved_after_the_failure_is_not_tested_yet(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    helper = home / "python"
+    helper.write_text("#!/bin/sh\n")
+    helpers_at(monkeypatch, helper)
+    path = write_config(home, MINIMAL + ICLOUD_FAMILY)
+    os.utime(path, (OLD, OLD))
+    save_addresses(home, f"CALDAV_PASSWORD_FAMILY=x\nCALENDAR_SAVED_AT_FAMILY={OLD:.0f}\n")
+    recorded(path).failed("calendar:family", "password_refused")
+    save_addresses(home, f"CALDAV_PASSWORD_FAMILY=y\nCALENDAR_SAVED_AT_FAMILY={NOW - 60:.0f}\n")  # a new password
+    assert by_part(run(path, FakeProbe(home)))["Calendar (family)"].status == "untested"
+    recorded(path).failed("calendar:family", "no_calendar")
+    assert by_part(run(path, FakeProbe(home)))["Calendar (family)"].status == "fail"  # a password fixes no name
+    os.utime(path, (NOW - 60, NOW - 60))  # the calendar's name corrected in config.toml
+    assert by_part(run(path, FakeProbe(home)))["Calendar (family)"].status == "untested"
+
+
+HALL = "11111111-1111-4111-8111-111111111111"
+PORCH = "22222222-2222-4222-8222-222222222222"
+HUE = (
+    '[[tapo.devices]]\nname = "lamp"\nhost = "192.168.1.20"\nkind = "light"\n'
+    f'[[tapo.devices]]\nname = "hall light"\nbrand = "hue"\nlight = "{HALL}"\n'
+    f'[[tapo.devices]]\nname = "porch light"\nbrand = "hue"\nlight = "{PORCH}"\nrule = "ask first"\n'
+)
+
+
+def paired(home: Path, mode: int = 0o600) -> None:
+    """hue.env as scripts/hue-pair.sh saves it (doctor reads only which keys it has, never their values)."""
+    path = home / ".config/local-assistant/hue.env"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"HUE_BRIDGE=192.168.1.40\nHUE_KEY=made-up-key\nHUE_FINGERPRINT={'ab' * 32}\n")
+    path.chmod(mode)
+
+
+def test_the_hue_bridge_reachable_with_its_certificate_and_every_light(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helpers_at(monkeypatch, Path(os.__file__))
+    paired(home)
+    probe = FakeProbe(home)
+    probe.hue = {"ok": True, "found": [HALL, PORCH], "missing": []}
+    findings = run(write_config(home, MINIMAL + HUE), probe)
+    bridge = by_part(findings)["Hue Bridge"]
+    assert (bridge.status, bridge.text) == (
+        "ok",
+        "reachable, its certificate the one saved at pairing, 2 of 2 lights found",
+    )
+    assert probe.hue_asked == [[HALL, PORCH]]  # the config's Hue lights, by their ids
+    assert "made-up-key" not in render(findings)
+
+
+@pytest.mark.parametrize(
+    ("answer", "text", "fix"),
+    [
+        (
+            {"ok": True, "found": [HALL], "missing": [PORCH]},
+            "reachable, its certificate the one saved at pairing; not on the bridge: porch light",
+            "scripts/tapo-discover.sh lists the bridge's lights; fix the light id in [[tapo.devices]]",
+        ),
+        (
+            {"ok": False, "error": "unreachable"},
+            "no answer at the address saved at pairing",
+            "check that the bridge is plugged in; a new address: scripts/hue-pair.sh <address>",
+        ),
+        (
+            {"ok": False, "error": "certificate"},
+            "its certificate is not the one saved at pairing: nothing was sent to it",
+            "if the bridge was replaced or reset: scripts/hue-pair.sh",
+        ),
+        ({"ok": False, "error": "key"}, "the bridge refused its key", "scripts/hue-pair.sh"),
+        ({"ok": False, "error": "not_paired"}, "not paired yet", "scripts/hue-pair.sh"),
+        ({"ok": False, "error": "failed"}, "the bridge's answer could not be read", "run doctor again later"),
+    ],
+)
+def test_a_hue_bridge_problem_is_named_with_its_fix(
+    home: Path, monkeypatch: pytest.MonkeyPatch, answer: dict[str, Any], text: str, fix: str
+) -> None:
+    helpers_at(monkeypatch, Path(os.__file__))
+    paired(home)
+    probe = FakeProbe(home)
+    probe.hue = answer
+    bridge = by_part(run(write_config(home, MINIMAL + HUE), probe))["Hue Bridge"]
+    assert (bridge.status, bridge.text, bridge.fix) == ("fail", text, fix)
+
+
+def test_a_hue_light_the_bridge_cannot_reach_is_named(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    helpers_at(monkeypatch, Path(os.__file__))
+    paired(home)
+    probe = FakeProbe(home)
+    probe.hue = {"ok": True, "found": [HALL, PORCH], "missing": [], "disconnected": [PORCH]}
+    bridge = by_part(run(write_config(home, MINIMAL + HUE), probe))["Hue Bridge"]
+    assert (bridge.status, bridge.text, bridge.fix) == (
+        "warn",
+        "reachable, its certificate the one saved at pairing; not answering the bridge: porch light",
+        "if it was switched off at the wall, switch it on there",
+    )
+
+
+@pytest.mark.parametrize("mode", [None, 0o644])
+def test_without_a_private_pairing_the_bridge_is_not_asked(
+    home: Path, monkeypatch: pytest.MonkeyPatch, mode: int | None
+) -> None:
+    helpers_at(monkeypatch, Path(os.__file__))
+    if mode is not None:
+        paired(home, mode)
+    probe = FakeProbe(home)
+    bridge = by_part(run(write_config(home, MINIMAL + HUE), probe))["Hue Bridge"]
+    assert (bridge.status, bridge.text, bridge.fix) == ("fail", "not paired yet", "scripts/hue-pair.sh")
+    assert probe.hue_asked == []
+
+
+def test_a_bridge_not_checked_says_so(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    helpers_at(monkeypatch, Path(os.__file__))
+    paired(home)
+    bridge = by_part(run(write_config(home, MINIMAL + HUE), FakeProbe(home)))["Hue Bridge"]
+    assert (bridge.status, bridge.text) == ("untested", "paired, not checked: the device helper did not answer")
+
+
+def test_without_hue_lights_there_is_no_bridge_line(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    helpers_at(monkeypatch, Path(os.__file__))
+    probe = FakeProbe(home)
+    text = MINIMAL + '[[tapo.devices]]\nname = "lamp"\nhost = "192.168.1.20"\nkind = "light"\n'
+    assert "Hue Bridge" not in by_part(run(write_config(home, text), probe))
+    assert probe.hue_asked == []
+
+
+def test_the_real_probe_never_reaches_a_bridge_under_a_test_root(home: Path) -> None:
+    cfg = load_config(write_config(home, MINIMAL + HUE))
+    assert Probe(home).hue_check(cfg, [HALL]) is None  # conftest gives every test its own ESTIA_ROOT
+
+
+# ------------------------------------------------------------------ keep it running: sleep and power failures (finding 57)
+
+PMSET = """System-wide power settings:
+Currently in use:
+ standby              0
+ Sleep On Power Button 1
+ autorestart          {restart}
+ powernap             1
+ networkoversleep     0
+ disksleep            10
+ sleep                {sleep} (sleep prevented by sharingd)
+ ttyskeepawake        1
+ displaysleep         10
+"""
+
+
+@pytest.mark.parametrize(
+    ("sleep", "restart", "status"),
+    [("0", "1", "ok"), ("1", "1", "warn"), ("0", "0", "warn"), ("10", "0", "warn")],
+)
+def test_doctor_warns_when_the_mac_sleeps_or_stays_off_after_a_power_failure(
+    home: Path, sleep: str, restart: str, status: str
+) -> None:
+    """She stops when the Mac sleeps, and stays off after a power cut without autorestart (setup_assistant.md, 2.8)."""
+    probe = FakeProbe(home)
+    probe.pmset = PMSET.format(sleep=sleep, restart=restart)
+    power = by_part(run(write_config(home, MINIMAL), probe))["Power"]
+    assert power.status == status
+    if status == "warn":
+        assert "/usr/bin/sudo /usr/bin/pmset -a sleep 0 autorestart 1" in power.fix and "2.8" in power.fix
+        assert ("sleeps" in power.text) is (sleep != "0")
+        assert ("power failure" in power.text) is (restart != "1")
+
+
+def test_power_settings_that_cannot_be_read_add_no_line(home: Path) -> None:
+    assert "Power" not in by_part(run(write_config(home, MINIMAL), FakeProbe(home)))
+    probe = FakeProbe(home)
+    probe.pmset = PMSET.format(sleep="0", restart="1").replace(" autorestart          1\n", "")  # a laptop has none
+    assert by_part(run(write_config(home, MINIMAL), probe))["Power"].status == "ok"

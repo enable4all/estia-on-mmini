@@ -17,11 +17,21 @@ user). These patterns are a safety net beside it, never the proof:
   aviso", "je krijgt een herinnering", "I've prepared a reminder"), and a negation counts only near the claim, never in
   a purpose clause after it ("zodat je het niet vergeet").
 
-Both sets read the clauses split at punctuation, then again also at dashes and colons ("No problem — I'll remind you
-at 7"). A clause is no claim when it is a question, is negated (in English or that language), is an English "if", or
+Both sets read the text as the phone shows it (`shown`: no markers, no list or heading start; "**Reminder set** (#5)" is
+what code's own bold note looks like), its clauses split at punctuation, then again also at dashes and colons ("No
+problem — I'll remind you at 7"). A clause is no claim when it is a question, is negated (in English or that language), is an English "if", or
 points to the /remind or /reminders command. A reminder that exists is told apart with `restates` (brain.py: an answer
 that listed them). `without_reminder_talk` leaves out every sentence about a reminder, waking or a call (brain.py: an
 answer whose set_reminder stored nothing).
+
+A device change she claims (`switch_clauses`, English first): she switched, dimmed or set a light or plug ("I've turned
+off the lamp", "Turning it on now", "the lamp has been switched off", "the lamp is now off"), never a report of its state
+("the lamp is on"), a question, an offer ("if you like, I can turn it off"), a promise ("I'll switch it off once you reply
+yes"), a gerund with a verb of its own ("Turning off the lights before bed helps you sleep", "turning it off would need
+your yes") or a negated clause; after a status read in the answer, "is now on" and "has been switched off" report the
+state and are left out. The guard (tools.Tools.unmade_switch, devices.Devices.unmade) adds code's "Nothing was
+switched." for a claiming clause whose device no device_set changed: a clause that names music (`names_music`) is
+never one, and one about an earlier switch (`about_earlier`) counts what changed lately.
 """
 
 from __future__ import annotations
@@ -30,6 +40,7 @@ import re
 from collections.abc import Iterable
 
 from local_assistant.language import CODES, ENGLISH
+from local_assistant.signal_text import unmarked
 
 _EN_PROMISE = r"\b(?:i'll|i will|i'm going to|i am going to|i'm gonna|i shall|we'll)\b[^.!?\n]{0,30}?"
 _EN_THING = r"(?:reminders?|alarms?|wake-?up calls?|wake-?ups?)"  # a call only as a wake-up call
@@ -297,16 +308,28 @@ def _refused(clause: str, found: re.Match[str], code: str, broad: bool) -> bool:
     return _NEGATED[code].search(clause[start:end]) is not None or _COMMAND.search(clause[:end]) is not None
 
 
+# a line's start that the phone shows as a bullet or a bold line (signal_text): "- ", "* ", "• " or "# "
+_LINE_START = re.compile(r"(?m)^[ \t]*(?:#{1,6}|[-*•])[ \t]+")
+
+
+def shown(text: str) -> str:
+    """The text as the phone shows it, for reading: no list or heading start and no markers (signal_text turns markup
+    into text styles), so "**Reminder set** (#5)" reads like code's own bold note and "I **will call you**" like the
+    words."""
+    return unmarked(_LINE_START.sub("", text))
+
+
 def claiming_clauses(
     text: str, languages: Iterable[str] = CODES, *, broad: bool = False, saved: bool = False
 ) -> list[str]:
     """The clauses of the text that say a reminder or a call is set (or will come), in any of `languages` (all 11 by
     default): a clause that matches a language's claim and is no question, with no negation of English or that
-    language near it and no /remind command; in English also no "no", "cannot", "unable" or "if". `broad`: the evals'
-    stricter set; `saved`: the answer saved a fact, so a "Noted:" that starts a sentence is left out (a claim after it
-    still counts)."""
+    language near it and no /remind command; in English also no "no", "cannot", "unable" or "if". The text is read as
+    the phone shows it (`shown`). `broad`: the evals' stricter set; `saved`: the answer saved a fact, so a "Noted:"
+    that starts a sentence is left out (a claim after it still counts)."""
     chosen = [code for code in languages if code in _PRECISE]
     patterns = _BROAD if broad else _PRECISE
+    text = shown(text)
     if saved:
         text = _without_noted_facts(text)
     if not broad:
@@ -352,6 +375,80 @@ def without_reminder_talk(text: str, *, saved: bool = False) -> str:
         if kept or not parts:
             lines.append(" ".join(kept))
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
+_EN_I_DID = r"\b(?:i've|i have|i just|i)\s+(?:just\s+|already\s+|also\s+|now\s+)?"
+_EN_SURE = r"^\W*(?:(?:ok(?:ay)?|sure|done|alright|right|got it)\W+)*"  # at the clause's start
+_COLOURS = r"(?:warm white|cool white|daylight|red|orange|yellow|green|blue|purple|pink)"  # devices.COLOURS
+# a gerund that starts a clause is a change going on only when no verb of its own follows it before "so", "because",
+# "for", "to", …: "Turning off the lights an hour before bed helps you sleep" is advice, "turning the lamp off would
+# need your yes first" her ask-first wording, "Turning the lamp off now so you can sleep" a claim
+_EN_VERB = (
+    r"(?:helps?|can(?:not|'t)?|could(?:n't)?|needs?|would(?:n't)?|will|won't|may|might|should(?:n't)?|must|shall"
+    r"|is|isn't|are|aren't|was|wasn't|were|makes?|tells?|keeps?|saves?|means?|requires?|takes?|works?|does|doesn't"
+    r"|did|gives?|lets?|signals?|reduces?|lowers?|cuts?|uses?|costs?|wastes?|matters?|stops?|prevents?|sends?)"
+)
+_EN_UNTIL = r"\b(?:so|because|as|since|while|for|to|then|until)\b"
+_EN_ALONE = rf"(?!(?:(?!{_EN_UNTIL}){_GAP})*?\b{_EN_VERB}\b)"
+_SWITCH_PASSIVE = r"\b(?:has|have) been (?:turned|switched|powered|dimmed|brightened|shut)\b"
+# a device change she claims, in English: first person done, a clause of only a gerund going on, or the passive; on
+# and off only (never "turned down the music"); a set, change or make only with a brightness or a colour
+CLAIMED_SWITCH: dict[str, str] = {
+    "en": rf"{_EN_I_DID}(?:turned|switched|powered|shut|flipped)\b{_GAP}{{0,40}}?\b(?:on|off)\b"
+    rf"|{_EN_I_DID}(?:dimmed|brightened)\b"
+    rf"|{_EN_I_DID}(?:set|changed|made)\b{_GAP}{{0,40}}?(?:\b\d{{1,3}}\s*(?:%|percent\b)|\b{_COLOURS}\b)"
+    rf"|{_EN_SURE}(?:turning|switching|powering)\b{_EN_ALONE}{_GAP}{{0,40}}?\b(?:on|off)\b"
+    rf"|{_EN_SURE}(?:dimming|brightening)\b{_EN_ALONE}"
+    rf"|{_SWITCH_PASSIVE}",
+}
+# after a status read in the answer, "is now off" and "has been switched off" report the state she read
+_SWITCH_READ = CLAIMED_SWITCH[ENGLISH].removesuffix(f"|{_SWITCH_PASSIVE}")
+_SWITCH_NOW = r"\b(?:is|are) now (?:on|off|dimmed)\b"  # a change, unless she just read the device's state
+_SWITCH = re.compile(_SWITCH_READ, re.IGNORECASE)
+_SWITCH_OR_NOW = re.compile(f"{CLAIMED_SWITCH[ENGLISH]}|{_SWITCH_NOW}", re.IGNORECASE)
+# a clause about an earlier switch, not this answer's ("I turned it off a few minutes ago", "Earlier today I switched
+# the heater on"): true only when the device was switched then (devices.Devices.unmade)
+_EARLIER = re.compile(
+    r"\b(?:ago|earlier|already|before|previously|yesterday|since|last (?:night|time|week)"
+    r"|this (?:morning|afternoon|evening))\b",
+    re.IGNORECASE,
+)
+# music has its own tools and notes: a clause that names it is never a light or plug claim
+_MUSIC = re.compile(
+    r"\b(?:music|songs?|spotify|speakers?|volume|playlists?|tracks?|albums?|podcasts?|radio|playback)\b",
+    re.IGNORECASE,
+)
+
+
+def switch_clauses(text: str, *, read: bool = False) -> list[str]:
+    """The text's clauses that say she changed a light or plug (English first): each matches `CLAIMED_SWITCH`, is no
+    question and has no negation, "no", "cannot", "unable" or "if" before the claim's end. Read as the phone shows it
+    (`shown`). `read`: the answer read a device's state, so "is now on" and "has been switched off" are reports, not
+    claims."""
+    pattern = _SWITCH if read else _SWITCH_OR_NOW
+    text = shown(text)
+    found_in: list[str] = []
+    for fine in (False, True):
+        for clause, question in clauses(text, fine=fine):
+            found = None if question or clause.strip() in found_in else pattern.search(clause)
+            if found is not None and _NEGATED[ENGLISH].search(clause[: found.end()]) is None:
+                found_in.append(clause.strip())
+    return found_in
+
+
+def claims_a_switch(text: str, *, read: bool = False) -> bool:
+    """Whether the text says she changed a light or plug: see `switch_clauses`."""
+    return bool(switch_clauses(text, read=read))
+
+
+def about_earlier(clause: str) -> bool:
+    """Whether a claiming clause is about an earlier switch ("a few minutes ago", "earlier today", "already")."""
+    return _EARLIER.search(clause) is not None
+
+
+def names_music(text: str) -> bool:
+    """Whether the text names music, Spotify, a speaker or the volume (music's own tools, never a light or plug)."""
+    return _MUSIC.search(text) is not None
 
 
 _ID = re.compile(r"#(\d+)\b")

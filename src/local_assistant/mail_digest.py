@@ -1,9 +1,17 @@
 """The mail part of the morning digest (morning_digest.py sends it) and the day's mail numbers.
 
-Two blocks, both mailboxes together: mail that needs a reply (urgent first, then oldest; unanswered,
-still in the Inbox, at most `reply_days` old; unlabelled mail from people the user writes to is
-listed with its subject) and actions that arrived since the previous digest. Numbers are kept for the
-whole day, so "read 2" means the same mail in the digest, in search results and to Gemma's tools.
+Mail that needs a reply (urgent first, then oldest; unanswered, still in the Inbox, at most `reply_days`
+old; unlabelled mail from people the user writes to is listed with its subject) and actions that arrived
+since the previous digest. The morning digest gives each mailbox its own block under a bold heading
+(`digest_part`); the mail_digest tool (`compose`) keeps both mailboxes together, each line tagged with its
+mailbox. Both show the same mail: at most `BLOCK_LIMIT` replies and `BLOCK_LIMIT` actions over all mailboxes.
+Numbers are kept for the whole day, so "read 2" means the same mail in the digest, in search results and to
+Gemma's tools; the digest and the tool give them in the digest's order, so the digest reads 1..n whichever runs
+first.
+
+A mailbox that has not been read (its part in status.json failing for a sync round at least, its last good read older
+than `STALE_ROUNDS` sync rounds: one bad round is not flagged, also not after a long downtime) gets one line from code, whatever else the digest shows: "[work] not read since
+Mon 09:10: needs sign-in." in the digest and the mail tools' headers, and counts and times only in the call's glance.
 """
 
 from __future__ import annotations
@@ -11,17 +19,31 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
+from local_assistant import prompts
 from local_assistant.config import Config
+from local_assistant.part_status import PartStatus, mail_part, reason_text, state
 from local_assistant.store import MailHeader, Store
+from local_assistant.timefmt import local_recent
 
 NUMBERS_KEY = "mail:numbers"
 LAST_DIGEST_KEY = "mail:last_digest_at"  # set by the morning digest: actions since then are new
 BLOCK_LIMIT = 10
 EMPTY = "Mail: nothing needs you today."
 GLANCE_EMPTY = "Mail digest: nothing needs a reply or an action."
+STALE_ROUNDS = 2  # a failing mailbox whose last good read is older than this many sync rounds has not been read
+
+
+@dataclass(frozen=True)
+class Stale:
+    """A mailbox that has not been read: its name, its last good read (None: never) and why, in words."""
+
+    name: str
+    since: float | None
+    reason: str
 
 
 def _iso(epoch: float) -> str:
@@ -65,12 +87,16 @@ class MailDigest:
         numbers: MailNumbers,
         *,
         clock: Callable[[], float] = time.time,
+        status: PartStatus | None = None,
     ) -> None:
         self._store = store
         self._tz = config.timezone
         self._reply_days = config.mail_reply_days
+        self._mailboxes = tuple(account.name for account in config.mail_accounts)
         self._numbers = numbers
         self._clock = clock
+        self._status = status  # each mailbox's last real sync (mail_sync records it; it survives a restart)
+        self._stale_after = STALE_ROUNDS * config.mail_sync_minutes * 60
 
     def compose(self, header: str | None = None) -> str:
         """The mail digest now (also what the mail_digest tool returns); `header` replaces the dated first line."""
@@ -79,6 +105,7 @@ class MailDigest:
         if not (needs or known or actions):
             return EMPTY
         local = datetime.fromtimestamp(now, self._tz)
+        self._number([*needs, *known], actions)
         lines = [header or f"Mail, {local:%a} {local.day} {local:%b}:"]
         if needs or known:
             lines.append("Needs a reply:")
@@ -88,9 +115,94 @@ class MailDigest:
             lines += self._block(actions, local)
         return "\n".join(lines)
 
+    def digest_part(self) -> str:
+        """The morning digest's mail: each mailbox its own block under a bold heading ("**Mail (work)**", as /status
+        names it; with one
+        mailbox "**Mail**"), its mail that needs a reply, then its actions, one per line with the day's number, in
+        the order shown; the tool's mail (at most `BLOCK_LIMIT` replies and actions over all mailboxes), the rest
+        counted under its mailbox; a blank line between mailboxes (markup: sent as Signal's text styles)."""
+        needs, known, actions = self._pending(self._clock())
+        replies = [*needs, *known]
+        stale = self.stale_lines()
+        tail = "\n\n" + "\n".join(stale) if stale else ""  # after the mail, a block of its own
+        if not (replies or actions):
+            return EMPTY + tail
+        local = datetime.fromtimestamp(self._clock(), self._tz)
+        self._number(replies, actions)
+        several = len({*self._mailboxes, *(mail.account for mail in [*replies, *actions])}) > 1
+        blocks = []
+        for name in self._order(replies, actions):
+            lines = [f"**Mail ({name})**" if several else "**Mail**"]
+            for title, mails in (("Needs a reply:", replies), ("Actions:", actions)):
+                mine = [self._line(mail, local, tagged=False) for mail in mails[:BLOCK_LIMIT] if mail.account == name]
+                more = sum(1 for mail in mails[BLOCK_LIMIT:] if mail.account == name)
+                if mine or more:
+                    lines += [title, *mine, *([f"…and {more} more"] if more else [])]
+            blocks.append("\n".join(lines))
+        return "\n\n".join(blocks) + tail
+
+    def stale(self) -> list[Stale]:
+        """The mailboxes not read: failing for a sync round at least, with the last good read (or, never read, the first
+        failure) older than `STALE_ROUNDS` sync rounds; in the configured order. Nothing on record or no status: none."""
+        if self._status is None:
+            return []
+        now, records, found = self._clock(), self._status.snapshot(), []
+        for name in self._mailboxes:
+            record = records.get(mail_part(name))
+            if record is None or record.failed is None or state(record) != "failing":
+                continue
+            if now - (record.ok if record.ok is not None else record.failed) <= self._stale_after:
+                continue  # one bad round is not flagged
+            if now - record.failed < self._stale_after / STALE_ROUNDS:
+                continue  # nor the first bad round after a long downtime: failing for a round at least
+            reason = prompts.MAIL_STALE_REASONS.get(record.reason) or reason_text(record.reason, record.code)
+            found.append(Stale(name, record.ok, reason))
+        return found
+
+    def stale_lines(self) -> list[str]:
+        """ "[work] not read since Mon 09:10: needs sign-in.", one line per mailbox not read."""
+        now = self._clock()
+        return [
+            prompts.MAIL_STALE.format(name=item.name, when=local_recent(item.since, now, self._tz), reason=item.reason)
+            if item.since is not None
+            else prompts.MAIL_STALE_NEVER.format(name=item.name, reason=item.reason)
+            for item in self.stale()
+        ]
+
+    def _stale_count(self) -> str:
+        """The glance's line: how many mailboxes were not read and since when (the latest of their last good reads:
+        none was read since), never a name or a reason."""
+        stale = self.stale()
+        if not stale:
+            return ""
+        es = "" if len(stale) == 1 else "es"
+        reads = [item.since for item in stale if item.since is not None]
+        if not reads:
+            return prompts.GLANCE_STALE_NEVER.format(count=len(stale), es=es)
+        when = local_recent(max(reads), self._clock(), self._tz)
+        return prompts.GLANCE_STALE.format(count=len(stale), es=es, when=when)
+
+    def _order(self, replies: list[MailHeader], actions: list[MailHeader]) -> list[str]:
+        """The mailboxes with mail, in the digest's order: as configured, then any other by name."""
+        shown = {mail.account for mail in [*replies, *actions]}
+        return [name for name in (*self._mailboxes, *sorted(shown - set(self._mailboxes))) if name in shown]
+
+    def _number(self, replies: list[MailHeader], actions: list[MailHeader]) -> None:
+        """The day's numbers for the mail both show, given in the digest's order (each mailbox's replies, then its
+        actions): the digest reads 1..n also when the tool ran first ("any mail?" at 08:00)."""
+        for name in self._order(replies, actions):
+            for mails in (replies[:BLOCK_LIMIT], actions[:BLOCK_LIMIT]):
+                for mail in mails:
+                    if mail.account == name:
+                        self._numbers.number(mail.id)
+
     def glance(self) -> str:
         """The digest as numbers only, for the start of a call: no sender, subject or summary (outside text), and no
-        mail gets its number of the day."""
+        mail gets its number of the day; a line with the count of mailboxes not read and a time, never their names."""
+        stale = self._stale_count()
+        return self._glance_counts() + (f"\n{stale}" if stale else "")
+
+    def _glance_counts(self) -> str:
         needs, known, found = self._pending(self._clock())
         answer, actions = len(needs) + len(known), len(found)
         if not (answer or actions):
@@ -109,16 +221,18 @@ class MailDigest:
         known = [m for m in self._store.unlabelled_from_known(since) if m.id not in {n.id for n in needs}]
         return needs, known, self._store.mail_actions(_iso(last), since)
 
-    def _block(self, mails: list[MailHeader], local: datetime) -> list[str]:
-        lines = [self._line(mail, local) for mail in mails[:BLOCK_LIMIT]]
+    def _block(self, mails: list[MailHeader], local: datetime, *, tagged: bool = True) -> list[str]:
+        lines = [self._line(mail, local, tagged=tagged) for mail in mails[:BLOCK_LIMIT]]
         if len(mails) > BLOCK_LIMIT:
             lines.append(f"…and {len(mails) - BLOCK_LIMIT} more")
         return lines
 
-    def _line(self, mail: MailHeader, local: datetime) -> str:
+    def _line(self, mail: MailHeader, local: datetime, *, tagged: bool = True) -> str:
+        """ "2. [work] Bob Lee: Asks about November shipping. (3 d)"; without the [mailbox] under its own heading."""
         received = datetime.fromisoformat(mail.received_at).astimezone(self._tz)
         days = (local.date() - received.date()).days
         age = "today" if days <= 0 else f"{days} d"
         who = mail.sender_name or mail.sender_address
         what = mail.summary or mail.subject or "(no subject)"
-        return f"{self._numbers.number(mail.id)}. [{mail.account}] {who}: {what} ({age})"
+        tag = f"[{mail.account}] " if tagged else ""
+        return f"{self._numbers.number(mail.id)}. {tag}{who}: {what} ({age})"

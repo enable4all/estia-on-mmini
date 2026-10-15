@@ -138,7 +138,7 @@ def test_a_time_today_or_tomorrow_and_the_code_note(store: Store) -> None:
     created = reminders.set(ME, at="17:00", text="call the dentist", source_message_id=None)
     assert created.reminder.local_time == "2026-10-12 17:00" and created.reminder.due_at == at("2026-10-12 17:00")
     assert created.note == (
-        'Reminder set (#1): Mon 12 Oct 17:00 · "call the dentist". /reminders to see or cancel.\n'
+        '**Reminder set** (#1): Mon 12 Oct 17:00 · "call the dentist". /reminders to see or cancel.\n'
         "Only this note means a reminder is set."  # the contract, with the first one only
     )
     assert created.result.startswith("Set as #1 for Mon 12 Oct 17:00;")
@@ -274,9 +274,10 @@ def test_at_most_three_call_reminders_on_one_day(store: Store) -> None:
 def test_a_call_reminder_says_wake_up_call_and_the_honest_line_once(store: Store) -> None:
     reminders = service(store, Clock(), name="Tiffany")
     first = reminders.set(ME, at="2026-10-13 07:00", text="wake up", call=True)
-    assert first.note.startswith('Reminder set (#1): Tue 13 Oct 07:00 · wake-up call · "wake up".')
+    assert first.note.startswith('**Reminder set** (#1): Tue 13 Oct 07:00 · wake-up call · "wake up".')
     assert "Tiffany runs on one Mac" in first.note and "keep your phone's own alarm" in first.note
     assert first.note.splitlines()[1] == prompts.REMINDER_CONTRACT  # the contract first, then the honest line
+    assert first.note.endswith("\n\n" + prompts.REMINDER_HONEST.format(name="Tiffany"))  # its own paragraph
     second = reminders.set(ME, at="2026-10-13 17:00", text="call the dentist", call=True)
     assert " · call · " in second.note and "own alarm" not in second.note
 
@@ -324,7 +325,7 @@ def test_listing_cancelling_and_the_status_line(store: Store) -> None:
         " updated_at) VALUES (?, 'call the dentist', ?, ?, ?, 'open', 'x', 'x')",
         (ME, said, at("2026-10-15 17:00"), at("2026-10-17 17:00")),
     )
-    listing = reminders.listing(ME)
+    listing = reminders.listing(ME)  # what the list_reminders tool gives Gemma: as before
     assert listing.splitlines() == [
         "Reminders:",
         "#1 Tue 13 Oct 07:00 · call · wake up",
@@ -333,6 +334,16 @@ def test_listing_cancelling_and_the_status_line(store: Store) -> None:
         "#c1 Thu 15 Oct, evening · call the dentist",
         "/reminders cancel N (or cN), or /reminders cancel all",
     ]
+    assert reminders.listing(ME, marked=True) == (  # /reminders: bold headings, a blank line between sections
+        "**Reminders**\n"
+        "#1 Tue 13 Oct 07:00 · call · wake up\n"
+        "#2 weekdays 08:00 · take the pills\n"
+        "\n"
+        "**Check-ins I may send**\n"
+        "#c1 Thu 15 Oct, evening · call the dentist\n"
+        "\n"
+        "/reminders cancel N (or cN), or /reminders cancel all"
+    )
     assert reminders.status_line() == "Reminders: 3 open · next Tue 13 Oct 07:00 (call) · 0 failed"
     assert reminders.next_call() == "Tue 13 Oct 07:00"
     assert reminders.cancel(ME, 1) == "Cancelled #1: Tue 13 Oct 07:00 · wake up"
@@ -501,6 +512,9 @@ async def test_a_note_that_cannot_be_sent_is_tried_every_5_minutes_for_an_hour(s
     assert store.message(failed.message_id or 0).status == "ignored"  # recovery never sends it again
     assert "1 failed" in reminders.status_line()
     assert "could not be sent" in reminders.listing(ME)
+    marked = reminders.listing(ME, marked=True)  # nothing open: the none line, then what went wrong under its heading
+    assert marked.startswith(f"{prompts.REMINDERS_NONE}\n\n**Missed or failed (last 7 days)**\n#1 ")
+    assert marked.endswith("call mum: could not be sent")
 
 
 async def test_a_retry_that_gets_through_finishes_it(store: Store) -> None:
@@ -733,10 +747,10 @@ async def test_missed_reminders_get_one_late_note_after_a_restart(store: Store) 
     assert sent.texts == [
         (
             ME,
-            "Late, I was offline 06:40-09:05:\n"
-            "07:00 wake-up call: wake up (not placed late)\n"
-            "08:00 take the pills\n"
-            "08:30 call mum (may be a repeat)",
+            "**Late, I was offline 06:40-09:05:**\n"
+            "• 07:00 wake-up call: wake up (not placed late)\n"
+            "• 08:00 take the pills\n"
+            "• 08:30 call mum (may be a repeat)",
         )
     ]
     assert store.message(note).status == "ignored"  # recovery never resends the old note
@@ -789,9 +803,9 @@ async def test_a_long_late_list_is_cut_at_10_lines_and_another_day_is_named(stor
     await run.start_up(offline_since=at("2026-10-11 20:30"), started_at=clock.now)
     [(_, text)] = sent.texts
     lines = text.splitlines()
-    assert lines[0] == "Late, I was offline Sun 11 Oct 20:30-09:00:"
-    assert lines[1] == "Sun 11 Oct 21:00 thing 0" and len(lines) == 12
-    assert lines[-1] == "and 2 more: /reminders"
+    assert lines[0] == "**Late, I was offline Sun 11 Oct 20:30-09:00:**"
+    assert lines[1] == "• Sun 11 Oct 21:00 thing 0" and len(lines) == 12
+    assert lines[-1] == "…and 2 more: /reminders"
 
 
 async def test_each_user_gets_their_own_late_note(store: Store) -> None:
@@ -804,8 +818,8 @@ async def test_each_user_gets_their_own_late_note(store: Store) -> None:
     await run.start_up(offline_since=None, started_at=clock.now)
     assert sorted(sent.texts) == sorted(
         [
-            (ME, "Late, I was offline until 18:00:\n17:00 mine"),
-            (STRANGER, "Late, I was offline until 18:00:\n17:00 theirs"),
+            (ME, "**Late, I was offline until 18:00:**\n• 17:00 mine"),
+            (STRANGER, "**Late, I was offline until 18:00:**\n• 17:00 theirs"),
         ]
     )
 
@@ -872,7 +886,7 @@ async def test_a_missed_wake_up_text_without_calls_is_a_plain_late_line(store: S
     clock.now = at("2026-10-13 09:00")
     _, run, sent = scheduler(store, clock, calls=None, calls_on=False)
     await run.start_up(offline_since=at("2026-10-13 06:00"), started_at=clock.now)
-    assert sent.texts == [(ME, "Late, I was offline 06:00-09:00:\n07:00 wake up")]
+    assert sent.texts == [(ME, "**Late, I was offline 06:00-09:00:**\n• 07:00 wake up")]
 
 
 # the lock (/lock): reminders wait, a call reminder becomes a text without a call

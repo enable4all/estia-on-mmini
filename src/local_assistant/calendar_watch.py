@@ -144,7 +144,7 @@ class CalendarWatch:
         lines = [self._line(change, events, moment.date()) for change in changes]
         if len(lines) == 1:
             return prompts.CALENDAR_CHANGE.format(line=lines[0]), changes
-        shown = [f"- {line}" for line in lines[:NOTE_LINES]]
+        shown = [f"• {line}" for line in lines[:NOTE_LINES]]
         if len(lines) > NOTE_LINES:
             shown.append(prompts.CALENDAR_CHANGES_MORE.format(count=len(lines) - NOTE_LINES))
         return "\n".join([prompts.CALENDAR_CHANGES, *shown]), changes

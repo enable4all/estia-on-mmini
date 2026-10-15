@@ -427,7 +427,7 @@ class Reminders:
             note += "\n" + prompts.REMINDER_CONTRACT
         if reminder.call and self.calls and not self._store.get_state(CALL_WARNED_KEY):
             self._store.set_state(CALL_WARNED_KEY, iso(self._clock()))
-            note += "\n" + prompts.REMINDER_HONEST.format(name=self._name)
+            note += "\n\n" + prompts.REMINDER_HONEST.format(name=self._name)  # its own paragraph
         spoken = prompts.REMINDER_SPOKEN.format(when=f"{real:%A} {real.day} {real:%B}, {_hhmm(real)}")
         return Created(reminder, note, spoken, prompts.REMINDER_RESULT.format(id=reminder.id, when=when))
 
@@ -467,31 +467,38 @@ class Reminders:
             return f"{_repeat_words(reminder.repeat, meant)} {_hhmm(meant)}"
         return when_text(self.local(reminder.due_at), self.local(self._clock()))
 
-    def listing(self, aci: str) -> str:
-        """/reminders (and the list_reminders tool): open reminders, check-ins she may send, what went wrong lately."""
+    def listing(self, aci: str, *, marked: bool = False) -> str:
+        """The list_reminders tool's text (as it always was): open reminders, check-ins she may send, what went wrong
+        lately. `marked` (/reminders): each section under a bold heading, a blank line between (markup, sent as
+        Signal's text styles); Gemma's tool result never changes with it."""
         now = self._clock()
         today = self.local(now)
-        lines: list[str] = []
+        sections: list[tuple[str, list[str]]] = []
         mine = self._store.open_reminders(aci)
         if mine:
-            lines.append(prompts.REMINDERS_HEADER)
-            lines += [f"#{r.id} {self._when(r)}{self._kind(r)} · {r.text}" for r in mine]
+            sections.append(
+                (prompts.REMINDERS_HEADER, [f"#{r.id} {self._when(r)}{self._kind(r)} · {r.text}" for r in mine])
+            )
         checkins = self._store.open_followups(aci)
         if checkins:
-            lines.append(prompts.REMINDERS_CHECKINS)
+            lines = []
             for checkin in checkins:
                 due = self.local(checkin.due_at)
                 lines.append(f"#c{checkin.id} {day_text(due, today)}, {_part_of_day(due)} · {checkin.what}")
+            sections.append((prompts.REMINDERS_CHECKINS, lines))
         problems = self._store.reminders_with_outcome(aci, PROBLEMS, since=iso(now - PROBLEM_DAYS * 86_400))
         if problems:
-            lines.append(prompts.REMINDERS_PROBLEMS)
+            lines = []
             for r in problems:
                 updated = datetime.fromisoformat(r.updated_at).astimezone(self._tz)
                 why = prompts.REMINDER_OUTCOMES.get(r.outcome or "", r.outcome or "")
                 lines.append(f"#{r.id} {when_text(updated, today)} · {r.text}: {why}")
-        if not mine and not checkins:
-            return "\n".join([prompts.REMINDERS_NONE, *lines])
-        return "\n".join([*lines, prompts.REMINDERS_FOOTER])
+            sections.append((prompts.REMINDERS_PROBLEMS, lines))
+        first, last = ([prompts.REMINDERS_NONE], []) if not mine and not checkins else ([], [prompts.REMINDERS_FOOTER])
+        if not marked:
+            return "\n".join([*first, *(line for header, lines in sections for line in (header, *lines)), *last])
+        blocks = ["\n".join([f"**{header.rstrip(':')}**", *lines]) for header, lines in sections]
+        return "\n\n".join([*first, *blocks, *last])
 
     def open_times(self, aci: str) -> list[tuple[int, str]]:
         """The open reminders' numbers and local times ("HH:MM", as meant), as the listing shows them under its

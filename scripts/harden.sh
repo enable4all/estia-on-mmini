@@ -7,6 +7,7 @@
 #   scripts/harden.sh --dry-run  show every check and the commands it would run; change nothing
 #   scripts/harden.sh --nuclear  also the firewall, stealth mode, python3 and ruby off the firewall's list and the
 #                                keychain lock: it may stop other services on this Mac (it says how, then asks each)
+#   scripts/harden.sh --new-pin  also a new Registration Lock PIN while the lock is on (after a compromise)
 set -euo pipefail
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 python="$repo/.venv/bin/python"

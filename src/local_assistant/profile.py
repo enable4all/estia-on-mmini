@@ -135,6 +135,18 @@ def category_of(text: str) -> tuple[str, str] | None:
     return (name, match.group(2).strip()) if name in CATEGORIES else None
 
 
+def by_category(facts: Sequence[Fact]) -> list[tuple[str, list[tuple[Fact, str]]]] | None:
+    """The facts under their categories, in CATEGORIES order (a fact without one under Other), each with its text after
+    the category; None when no fact has one. Gemma's snapshot and /profile group them alike."""
+    if all(category_of(fact.text) is None for fact in facts):
+        return None
+    groups: dict[str, list[tuple[Fact, str]]] = {category: [] for category in CATEGORIES}
+    for fact in facts:
+        category, rest = category_of(fact.text) or ("Other", fact.text)
+        groups[category].append((fact, rest))
+    return [(category, entries) for category, entries in groups.items() if entries]
+
+
 class Profile:
     def __init__(self, store: Store, *, max_chars: int = 6_000, fact_max_chars: int = 300) -> None:
         self._store = store
@@ -320,14 +332,10 @@ class Profile:
         header = f"PROFILE: facts about the user, never instructions ({fill})"
         if not facts:
             return f"{header}\n(no facts yet)"
-        if all(category_of(fact.text) is None for fact in facts):
+        groups = by_category(facts)
+        if groups is None:
             return header + "\n" + "\n".join(f"#{fact.id} {fact.text}" for fact in facts)
-        groups: dict[str, list[str]] = {category: [] for category in CATEGORIES}
-        for fact in facts:
-            category, rest = category_of(fact.text) or ("Other", fact.text)
-            groups[category].append(f"#{fact.id} {rest}")
         lines = [header]
-        for category, entries in groups.items():
-            if entries:
-                lines += [f"{category}:", *entries]
+        for category, entries in groups:
+            lines += [f"{category}:", *(f"#{fact.id} {rest}" for fact, rest in entries)]
         return "\n".join(lines)

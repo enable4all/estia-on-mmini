@@ -1,6 +1,6 @@
 """Decide what to do with an incoming Signal envelope (signal-cli's JSON shape).
 
-Only direct text, photo and voice messages from allowed accounts reach Gemma. Everything else is
+Only direct text, photo and voice messages and PDFs from allowed accounts are used. Everything else is
 ignored, answered with a short note (files, stickers) or logged (strangers). Attachments that will
 not be used (strangers', unsupported types) are listed for deletion at once.
 """
@@ -21,6 +21,7 @@ class Kind(StrEnum):
     TEXT = "text"
     PHOTO = "photo"
     VOICE = "voice"
+    DOCUMENT = "document"  # a PDF (by its type here; its first bytes decide when it is saved)
     COMMAND = "command"
     UNSUPPORTED = "unsupported"
     IGNORE = "ignore"
@@ -34,6 +35,7 @@ class AttachmentRef:
     size: int
     # Signal's voice-note flag: True recorded in Signal, False an audio file shared from elsewhere, None not given
     voice_note: bool | None = None
+    filename: str = ""  # the name it was sent with (a PDF is saved under a clean form of it); "" when none
 
 
 @dataclass(frozen=True)
@@ -43,11 +45,13 @@ class Decision:
     reason: str = ""
     photos: tuple[AttachmentRef, ...] = ()
     audio: tuple[AttachmentRef, ...] = ()  # one voice note; its bytes decide (voice.sniff)
+    documents: tuple[AttachmentRef, ...] = ()  # PDFs; their first bytes decide (documents.PDF_START)
     discard: tuple[AttachmentRef, ...] = ()  # files to delete at once
     device: int | None = None  # the sender's device that sent it (1: their phone, 2 and up: linked); None: not named
 
 
 IMAGE_TYPES = frozenset({"image/jpeg", "image/png", "image/heic", "image/heif", "image/webp", "image/gif"})
+PDF_TYPES = frozenset({"application/pdf", "application/x-pdf"})
 LONG_TEXT = "text/x-signal-plain"
 # a file without a real type may be a voice note too (OpenClaw #48614): the bytes decide later
 UNTYPED = frozenset({"", "application/octet-stream"})
@@ -95,12 +99,16 @@ def attachments(data: Mapping[str, Any]) -> tuple[AttachmentRef, ...]:
         content_type = item.get("contentType")
         size = item.get("size")
         flag = item.get("isVoiceNote", item.get("voiceNote"))
+        filename = item.get("filename")
+        content_type = content_type.lower() if isinstance(content_type, str) else ""
         refs.append(
             AttachmentRef(
                 ident,
-                content_type.lower() if isinstance(content_type, str) else "",
+                content_type,
                 size if isinstance(size, int) and not isinstance(size, bool) and size >= 0 else 0,
                 flag if isinstance(flag, bool) else None,
+                # a PDF's own name (it is saved under a clean form of it); no other file's name is kept
+                filename[:255] if isinstance(filename, str) and content_type in PDF_TYPES else "",
             )
         )
     return tuple(refs)
@@ -145,6 +153,14 @@ def _classify(envelope: Mapping[str, Any], allowed: frozenset[str]) -> Decision:
         caption = caption.strip() if isinstance(caption, str) else ""  # the user's own words with the file
         if not photos:
             voice = next((ref for ref in refs if ref.content_type.startswith("audio/")), None)
+            documents = tuple(ref for ref in refs if ref.content_type in PDF_TYPES)
+            if voice is None and documents:  # a recorded voice note wins, as before; PDFs win over an untyped file
+                return Decision(
+                    Kind.DOCUMENT,
+                    text=caption,
+                    documents=documents,
+                    discard=tuple(ref for ref in refs if ref not in documents),
+                )
             voice = voice or next((ref for ref in refs if ref.content_type in UNTYPED), None)
             if voice is None:
                 return Decision(Kind.UNSUPPORTED, reason="attachments", discard=refs)

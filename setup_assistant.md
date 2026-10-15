@@ -2,7 +2,7 @@
 
 How to install, configure, run and operate Estia, how it is built, how it is tested and how it is secured.
 
-Quick reference: [README.md](README.md). Every config key: [config.example.toml](config.example.toml). Phone checks:
+Quick reference: [GUIDE.md](GUIDE.md). Every config key: [config.example.toml](config.example.toml). Phone checks:
 [docs/e2e-checklist.md](docs/e2e-checklist.md).
 
 Contents: [1 What it is](#1-what-it-is) · [2 Install](#2-install) · [3 Optional parts](#3-optional-parts) · [4 Using it](#4-using-it) · [5 What it remembers](#5-what-it-remembers) · [6 Tests](#6-tests) · [7 Operations](#7-operations) · [8 Security](#8-security)
@@ -12,22 +12,22 @@ Placeholders in this guide: `<repo>` is the folder you cloned into (`~/estia` in
 Since the move into her own user (2.7), she runs as `_estia`, a hidden macOS account: her files are under `/var/estia`
 (where this guide says `~/.config/local-assistant`, `~/Library/Application Support/local-assistant`,
 `~/.local/share/signal-cli` or `~/Library/Logs/local-assistant`, read `/var/estia/…` for her), readable only by `_estia`.
-Her commands run as her with admin rights (`/usr/bin/sudo`, which asks for your Mac password), by their full path: `/usr/bin/sudo /usr/local/estia/bin/estia doctor|logs|check|mail-login|spotify-login|secret set|tapo-discover`.
+Her commands run as her with admin rights (`/usr/bin/sudo`, which asks for your Mac password), by their full path: `/usr/bin/sudo /usr/local/estia/bin/estia doctor|logs|check|mail-login|spotify-login|secret set|tapo-discover|hue-pair`.
 
 ## 1. What it is
 
 Gemma (the local model, served by Ollama under the name in `model`) as a personal assistant for one person, reached over
 Signal from a phone. She is called Estia unless you give her another name (`name` in the config, 2.4); this guide says
 Estia. It answers from its own knowledge and the tools you turn on: memory and search of earlier chats,
-learning from links you name, summaries of YouTube videos you send (from their captions), the Mac's health, a read-only overview of your projects (an extra, off by default), photos, voice notes and calls,
+learning from links you name, summaries of YouTube videos you send (from their captions), the Mac's health, a read-only overview of your projects (an extra, off by default), your PDFs (an extra, off by default), photos, voice notes and calls,
 lights and plugs, read-only mail and calendar, web search, music, and places and routes.
 
 The model always runs on the Mac: a cloud model is refused (2.2). Everything else stays on the Mac too, except Signal
-itself and the online services you turn on (see the README, "What stays home, and what goes online").
+itself and the online services you turn on (see GUIDE.md, "What stays home, and what goes online").
 
 ## 2. Install
 
-`scripts/setup.sh` does 2.1 to 2.7 for you (and `SETUP-WITH-YOUR-AI.md` lets your AI assistant guide you through it). The steps below are what it does, for doing it by hand. Work through them in order; each step can be checked before you go on.
+`scripts/setup.sh` does 2.1 to 2.7 for you, in your own Terminal window (it reads every code from that terminal, and stops at once without one); `SETUP-WITH-YOUR-AI.md` lets your AI assistant prepare and explain it. The steps below are what it does, for doing it by hand. Work through them in order; each step can be checked before you go on.
 
 ### 2.1 Tools
 
@@ -77,9 +77,9 @@ caffeinate -i ollama pull gemma4:26b
 ollama list                         # the tag and its size
 ```
 
-Memory: while loaded, the model needs about 18 to 20 GB, so this guide assumes a Mac with 32 GB. On 16 or 24 GB, pick a
-smaller Gemma 4 tag that supports tools (the library page lists them), pull it the same way, and set `model` to it in 2.4.
-Its answers will be weaker.
+Memory: while loaded, the model needs about 18 to 20 GB, so this guide assumes a Mac with 32 GB. On 16 or 24 GB, use
+`gemma4:12b` (about 8 GB), as `scripts/setup.sh` does there: in the commands below in place of `gemma4:26b`, with
+`num_ctx 16384` on 16 GB. Its answers will be weaker.
 
 Then give the model the name the code uses, with a larger context window. Ollama's default window is small on many setups,
 and Ollama cuts a longer prompt without a word. Estia sends about 12,000 tokens of history, so a small window would lose
@@ -115,17 +115,20 @@ number had one) go into hidden prompts and reach signal-cli on its input: never 
 command line, which every user of the Mac can read (`ps` lists them). The commands it prints show placeholders. By hand,
 use the same mode of signal-cli (JSON-RPC), which reads one request per line:
 
-1. Start it with the first line below and leave it running. No `-a`: signal-cli 0.14.9 offers register and verify only
-   in this mode.
-2. Paste the register request (the second line). If the answer asks for a captcha (new numbers usually do), open
+1. Run `stty -icanon` first: macOS keeps a line typed or pasted into a terminal to 1,023 characters and drops the rest
+   with the Enter, and a request with the captcha link is longer (setup reads the link with that limit off). Backspace
+   does not edit in this mode: paste each line whole. Then start signal-cli with the second line below and leave it
+   running. No `-a`: signal-cli 0.14.9 offers register and verify only in this mode.
+2. Paste the register request (the third line). If the answer asks for a captcha (new numbers usually do), open
    https://signalcaptchas.org/registration/generate.html, solve it, copy the **Open Signal** link (it starts with
-   `signalcaptcha://`), and paste the request again with the link, without its `signalcaptcha://` start (the third
+   `signalcaptcha://`), and paste the request again with the link, without its `signalcaptcha://` start (the fourth
    line).
-3. Paste the verify request with the code Signal sends by SMS, without its dash (the fourth line). If the number had a
+3. Paste the verify request with the code Signal sends by SMS, without its dash (the fifth line). If the number had a
    Registration Lock, add its PIN next to the code: `"pin":"<PIN>"`.
-4. Ctrl-D ends signal-cli.
+4. Ctrl-C ends signal-cli (Ctrl-D does not, in this mode); `stty sane` sets the terminal back.
 
 ```text
+stty -icanon
 signal-cli -Djava.net.preferIPv4Stack=true --trust-new-identities on-first-use jsonRpc --receive-mode manual
 {"jsonrpc":"2.0","method":"register","params":{"account":"<bot-number>"},"id":1}
 {"jsonrpc":"2.0","method":"register","params":{"account":"<bot-number>","captcha":"<the link without signalcaptcha://>"},"id":2}
@@ -139,6 +142,11 @@ older kind of internet address: registering over IPv6 can fail with "HTTP 403" a
 the bridge runs the JVM build of signal-cli instead, which takes the flag from `JAVA_OPTS` (see 3, Calls).
 
 Only one signal-cli process may use an account at a time. Stop the bridge before you run signal-cli by hand.
+
+signal-cli lists a number as soon as register starts, before the SMS code. Setup offers "Use the Signal number already
+set up here?" only for a number whose own account file says it is registered; a number whose code was never typed is
+registered again, and doctor's Signal number line shows ✗ for it. Estia is written for signal-cli 0.14.x: setup refuses
+another version, and doctor's signal-cli line shows ! for one.
 
 **Registration Lock.** Right after the SMS code, `scripts/setup.sh` asks to set one: a PIN, typed hidden twice, that
 Signal asks for before her number can be registered on another device. Without it, whoever receives her SMS code (a SIM
@@ -203,12 +211,13 @@ Edit the file:
    model is refused, 2.2).
 4. `timezone`: left unset, it is the Mac's own time zone; set it (for example `"Europe/Amsterdam"`) to override.
    `language`: the one language she listens and speaks in at the start, `"en"` or one of `es`, `it`, `ko`, `pt`, `nl`,
-   `pl`, `de`, `ja`, `ru`, `fr` (README, Languages). A typed `/language` in Signal changes it later and wins over this line.
+   `pl`, `de`, `ja`, `ru`, `fr` (GUIDE.md, Languages). A typed `/language` in Signal changes it later and wins over this line.
 5. `signal_cli`: `"signal-cli"` finds the Homebrew binary on the PATH, which the launchd service also uses. Give a full
    path if you installed it elsewhere.
 6. Everything else can stay commented out until you turn that part on (section 3). `[projects]` is an extra too, off
    by default: setup asks whether she should see projects on this Mac (most people: no), then the folder and the level
-   (section 3, Projects). One exception: reminders are on without a `[reminders]`
+   (section 3, Projects). `[documents]` (your PDFs) is an extra, off by default, that setup does not ask about yet
+   (section 3, Documents). One exception: reminders are on without a `[reminders]`
    section (section 4, "Reminders and wake-up calls"): at most 50 open and 20 new a day (`max_open`, `max_per_day`);
    `enabled = false` turns them off, and then her rules, tools and commands are exactly as without them. The messages she starts herself are
    opt-in (section 4, "Messages she starts herself"): off until `[initiative] enabled = true` or until you type
@@ -226,11 +235,11 @@ cp soul.example.md ~/.config/local-assistant/soul.md
 chmod 600 ~/.config/local-assistant/soul.md
 ```
 
-Then make it yours. Once she runs in her own user (2.7), make it as her, private from the start, then edit it as her:
+Then make it yours. Once she runs in her own user (2.7), edit it as her (the first time it starts as a private copy
+of `soul.example.md`):
 
 ```sh
-/usr/bin/sudo -u _estia install -m 600 /usr/local/estia/current/soul.example.md /var/estia/.config/local-assistant/soul.md
-/usr/bin/sudo -u _estia -e /var/estia/.config/local-assistant/soul.md
+/usr/bin/sudo /usr/local/estia/bin/estia config soul   # nano, run as her; Ctrl-O, Enter saves; Ctrl-X quits
 ```
 
 ### 2.6 Check, then try it in the foreground
@@ -247,9 +256,10 @@ For an optional part (section 3), a file in place is not enough for ✓. Once it
 the bridge's last real use of the part did: ✓ "working, last read 14:05", ○ "set up, not tested yet" (not used since it
 was added), or ✗ "failing since 14:05: <reason>" with the next step. The bridge keeps these in `status.json` in its data
 folder (times and fixed reasons only); doctor only reads that file. A fix that saves a sign-in, key, login, secret
-address or helper (the scripts doctor names) turns the line ○ "set up again, not tested yet" until the bridge next uses
-the part (still failing, it is ✗ again). After any other fix (a device back on, a service running again), and to get
-✓, use the part once (ask Estia something that needs it).
+address or helper (the scripts doctor names), or a calendar's name or a Hue light's id corrected in `config.toml`, turns
+the line ○ "set up again, not tested yet" until the bridge next uses the part (still failing, it is ✗ again). After any
+other fix (a device back on, a service running again), and to get ✓, use the part once (ask Estia something that needs
+it).
 
 ```sh
 cd <repo> && scripts/run.sh
@@ -269,8 +279,8 @@ No answer, and the log says `ignored a message from <uuid>`? That UUID is the se
 ### 2.7 Always on, in her own user
 
 Stop the foreground bridge first (Ctrl-C in its terminal): the scripts refuse to run while it is up. Look at every step
-first, then move her. On SSH, run the move inside `tmux` (or herdr): it keeps going when the connection drops, and a
-dropped connection or a Ctrl-C brings her old setup back.
+first, then move her. On SSH, run the move inside `screen` (built into macOS) or `tmux`: it keeps going when the
+connection drops, and a dropped connection or a Ctrl-C brings her old setup back.
 
 ```sh
 cd <repo> && scripts/migrate-to-own-user.sh --dry-run     # every step and command; nothing changes, no password
@@ -278,14 +288,22 @@ cd <repo> && scripts/install-daemon.sh                    # the move (asks for y
 /usr/bin/sudo /usr/local/estia/bin/estia doctor           # the check, as her
 ```
 
+Doctor's `Always on` line means alive, not just installed. It reads launchd's state for the bridge and the bridge's last
+sign of life (written every minute): ✓ "running, last sign of life 14:05"; ✗ "installed, no sign of life for 12 min"
+(nothing written for more than 3 minutes), "restarting, last exit code 1" (launchd starts it again after each failure),
+"installed, stopped" or "installed, not loaded: launchd does not run it", each with where to look; ○ "installed;
+whether it runs could not be read" when neither launchd's state nor her sign of life can be read, with her log.
+Doctor only reads; it never restarts anything.
+
 `scripts/install-daemon.sh` runs `scripts/migrate-to-own-user.sh` the first time (and `/usr/bin/sudo /usr/local/estia/bin/estia-deploy`
 once she has her own user). The move:
 
-1. checks before anything stops: a config with her number in your home, a Signal account for that number, the voice
-   service's build in this checkout when her voice service runs (`cd tools/voice && swift build -c release`), and free
-   disk space. A failed check changes nothing;
+1. checks before anything stops: a config with her number in your home, that number verified with Signal (signal-cli's
+   own account file says `registered: true`; a number whose SMS code was never typed is refused), no link out of her
+   folders and no pipe, socket or device in them, and free disk space. A failed check changes nothing;
 2. builds the first release while she keeps running: `/usr/local/estia/releases/<UTC time>-<commit>`, owned by root
-   (0755), with its own Python, the venvs (with bytecode), the voice service and the programs she runs in `vendor/`: the
+   (0755), with its own Python, the venvs (with bytecode), the voice service when it runs (built as you from the
+   commit's own sources) and the programs she runs in `vendor/`: the
    JVM signal-cli and the call helper (from `<repo>/vendor`), and Homebrew's signal-cli and, with the JVM build, a JDK,
    copied, so nothing she runs stays in a folder you can change. `current` points at it, and the tools root runs
    (`/usr/local/estia/tools`, `bin/estia`, `bin/estia-deploy`) are installed from it. A failed build changes nothing;
@@ -314,13 +332,15 @@ once she has her own user). The move:
 6. moves your old folders with her keys (config, data, Signal, logs) out of your home into
    `/usr/local/estia/rollback/data` (0700, root only), by rename: nothing in them is changed or re-owned, and no program
    you run reaches them. The caches stay where they are;
-7. installs both service files from the root-run tools' templates, each checked (`UserName _estia`, programs in
-   `/usr/local/estia/current`, a PATH of root-owned folders only, logs in `/var/estia/Library/Logs/local-assistant`,
-   umask 077, no other keys), and removes the old log rotation rule (her logs now stay small by themselves);
+7. installs her service files (the voice service's only when it ran before: a new install gets it later, with
+   `scripts/install-voice-daemon.sh`) from the root-run tools' templates, each checked (`UserName _estia`, programs in
+   `/usr/local/estia/current`, a PATH of root-owned folders only, their output in `/var/log/estia`, a folder only root
+   can change, umask 077, no other keys), and removes the old log rotation rule (her logs now stay small by themselves);
 8. starts her and checks within 120 s: the bridge keeps running, signal-cli runs as `_estia`, and the bridge wrote its sign
    of life after the start. On a failure her old setup comes back: the old service files, your folders (with what she saved meanwhile, when the
-   new bridge ran), the old services. On a new install (no old services) it says that she does not run yet, and
-   nothing of yours is held: her only copy is in `/var/estia`. Once it succeeded (never on a failure, in a dry run or
+   new bridge ran), the old services. A new install that fails says "Nothing was installed: she does not run yet",
+   and your folders are back; a new install that succeeds keeps nothing of yours: her only copy is in `/var/estia`.
+   Once it succeeded (never on a failure, in a dry run or
    in a rehearsal, and only while `current` names a folder in `releases/`), the releases she does not run (from earlier
    tries) are deleted: "Deleted 2 releases she does not run (1.4 GB freed)." The earlier copies of hers kept aside in
    her home (`/var/estia/.before-<time>`) are listed, so no path is typed by hand.
@@ -331,10 +351,12 @@ once she has her own user). The move:
    only when her voice still loads 2 minutes after it started), and without `[calls]` "voice: loading (up to about 15
    minutes)" at once. A Ctrl-C during that wait ends only the wait;
 9. with `[projects]` in your config, shares that folder with her, read-only, as you and without admin rights
-   (`scripts/share-projects.sh`, below); without it, no folder of yours is shared.
+   (`scripts/share-projects.sh`, below); without it, no folder of yours is shared. The move never shares
+   `~/Estia-KB`: `scripts/share-documents.sh` does (section 3, Documents). Nor does it change `[documents]
+   folder`: one written with `~` must be written out in full after the move (her `~` is `/var/estia`).
 
 Then check her live: `/usr/bin/sudo /usr/local/estia/bin/estia doctor` (no ✗; Own user, Code, Services, Her programs and,
-with Projects on, Projects ✓),
+with Projects on, Projects ✓; with Documents on, Documents ○ or ✓),
 `/usr/bin/sudo /usr/local/estia/bin/estia check`, `/usr/bin/sudo /usr/local/estia/bin/estia logs -n 20` (her start, no errors), a message
 from your phone (an answer), with voice on `curl -s http://127.0.0.1:8150/health` (`stt` and `tts` ready; up to about
 15 minutes after the move), with calls a test call once her text "My voice is ready: you can call me now." came, and
@@ -343,9 +365,11 @@ one may have, follow SECURITY.md, "If the Mac is compromised".
 
 **Your projects folder.** With Projects on, after the move her user reads one folder of yours: the projects folder
 (`[projects] root`, the one named in setup), read-only, also what is made there later. Without `[projects]` she reads no
-folder of yours. Nothing else in your home: there she only passes through to
-that folder, by name, and never lists or reads anything. The move shares it at its end; run it again, or take it back,
-any time (as you, no admin rights):
+projects folder of yours. Besides it, only `~/Estia-KB` with Documents on (section 3, Documents), and nothing
+else in your home: there she only passes through to those folders, by name, and her code never lists or reads anything
+(SECURITY.md, known gaps, says what passing through by name leaves open; in her own user, doctor's Your home line
+names what in your home lets every account in, with the `chmod o-rwx` that closes it). The move shares the projects
+folder at its end; run it again, or take it back, any time (as you, no admin rights):
 
 ```sh
 cd <repo> && scripts/share-projects.sh --dry-run     # every chmod command; nothing changes
@@ -372,9 +396,15 @@ folder you name, no user created, nothing started, your folders untouched), then
 ESTIA_ROOT=/tmp/estia-rehearsal scripts/migrate-to-own-user.sh --rehearse && rm -rf /tmp/estia-rehearsal
 ```
 
-Within 7 days, `/usr/bin/sudo /usr/local/estia/bin/estia rollback` (or `scripts/migrate-to-own-user.sh --rollback`, which runs it)
-goes back: your old folders return by rename, what she saved since the move (messages, Signal sessions, keys) is copied
-on top of them as you, and her services run as you again. Her config stays the one from before the move: changes made to
+A first install has no rollback: the move keeps no copy, and her only copy of her data is in `/var/estia`. After moving
+an older install (one that already ran always on as you), her old folders are held for 7 days where only root reaches
+them: within them, `/usr/bin/sudo /usr/local/estia/bin/estia rollback` (or `scripts/migrate-to-own-user.sh --rollback`,
+which runs it) goes back: her old folders return by rename, what she saved since the move (messages, Signal sessions, keys) is copied
+on top of them as you, and her services run as you again. Your old services never start without that copy (your old Signal
+sessions alone would break decryption): a rollback refuses, changing nothing, when her data holds a program (an execute
+bit), a link out of her home, a FIFO or a device, and names each with its fix, run as her; a copy that fails starts her
+own services again. A folder still held is printed as two steps: root moves it straight into your home under a fresh
+name, then you move it into place without admin rights. Her config stays the one from before the move: changes made to
 hers since stay in `/var/estia/.config/local-assistant/config.toml`. The rollback runs from the tools owned by root, never
 from your checkout. After the 7 days, `/usr/bin/sudo /usr/local/estia/bin/estia remove-old` deletes the held folders (no rollback
 after that). A move after a rollback or a failed try keeps her earlier copy aside in `/var/estia/.before-<time>`
@@ -392,8 +422,10 @@ cd <repo> && git pull
 `estia-deploy` first shows the commits since the live one and the files they change, and asks: read the list, it runs
 as her, with her data. Root (the Mac's all-powerful admin account) runs only its own tools in `/usr/local/estia/tools` (their own Python, the deploy code,
 the service templates), never a release or your checkout. The build runs as you, at the release's final path (its own
-Python from `uv python install`, never uv's copy in your home; `uv sync --frozen` with bytecode; the voice service from
-`tools/voice/.build/release`; her programs in `vendor/` from `<repo>/vendor`, a `vendor/` folder next to the checkout,
+Python from `uv python install`, never uv's copy in your home; `uv sync --frozen` with bytecode; the documents helper,
+built from the deployed commit, only its program kept, which must read a test page (`tools/documents/check.pdf`) or
+the deploy stops; the voice service, when installed: the live release's build when the commit's `tools/voice` is
+unchanged, else built as you from the commit's own sources (never your checkout's `.build`); her programs in `vendor/` from `<repo>/vendor`, a `vendor/` folder next to the checkout,
 Homebrew or the current release). Root then copies the build into fresh files it owns (hard links, links out of the
 release, also through a chain of links, links to nothing and set-id bits stop it), renders both service files from the
 tools' templates and checks them, switches `current` in one rename, reloads a service file that changed and restarts
@@ -409,23 +441,27 @@ only what happened and when, never message text.
 When a release changes a root-run tool (`scripts/estia`, `scripts/estia-deploy`, `deploy.py`, `ownuser.py`,
 `hostsec.py`, a service template), the deploy says so and keeps the installed one. Read its diff and take it with
 `/usr/bin/sudo /usr/local/estia/bin/estia-deploy --update-tools` (it shows the diff and asks). A change in how a
-release is built (a new helper's environment, as for the YouTube helper) takes effect only from the next deploy:
+release is built (a new helper's environment, as for the YouTube helper, or the documents helper's build) takes effect only from the next deploy:
 deploy again after `--update-tools` (a commit that is live already is built again).
 
-**Her config and keys** are hers: edit the config with sudoedit, which gives your editor a copy and writes it back as her,
-then restart her:
+**Her config and keys** are hers: edit the config with nano, run as her by her wrapper (Ctrl-O, Enter saves;
+Ctrl-X quits), so no copy of it ever lands in your account, then restart her:
 
 ```sh
-/usr/bin/sudo -u _estia -e /var/estia/.config/local-assistant/config.toml
+/usr/bin/sudo /usr/local/estia/bin/estia config
 /usr/bin/sudo /usr/local/estia/bin/estia restart
 ```
+
+An install whose root-run tools are from before 15 Oct has no `config` yet: run
+`/usr/bin/sudo /usr/local/estia/bin/estia-deploy --update-tools` first.
 
 The key and sign-in scripts work as before: once she runs as `_estia`, `scripts/set-web-keys.sh`,
 `scripts/set-calendar-url.sh` and `scripts/set-tapo-credentials.sh` pass each value through a pipe into
 `/usr/bin/sudo /usr/local/estia/bin/estia secret set <file> <KEY>` (a hidden prompt when you run it yourself; only `web.env`,
 `calendar.env` and `tapo.env` and their keys; one key replaced, 0600; lengths only on the screen; a value typed on the
 command line is refused, but sudo's log has kept it then: change that key), and `scripts/mail-login.sh`,
-`scripts/spotify-login.sh` and `scripts/tapo-discover.sh` run as her through `/usr/bin/sudo /usr/local/estia/bin/estia`.
+`scripts/spotify-login.sh`, `scripts/tapo-discover.sh` and `scripts/hue-pair.sh` run as her through
+`/usr/bin/sudo /usr/local/estia/bin/estia` (so the Hue Bridge's key goes into her `hue.env`, never through you).
 `scripts/doctor.sh`, `scripts/check.sh` and `scripts/run.sh` say which command to use instead. Whether she runs as her
 own user is read from the bridge's service file, so after a rollback the scripts work for you again.
 
@@ -436,15 +472,17 @@ her own signal-cli as her from `/` with her flags, and starts her again. `/usr/b
 
 Her own user does not cover everything: Ollama and AgentJev run as you and see what she sends them, the move and each
 deploy trust your checkout and Homebrew at that moment, and with Projects on her user reads every file in your projects folder, also
-those git does not track (above). SECURITY.md lists these gaps.
+those git does not track (above), and with Documents on every file in `~/Estia-KB` (section 3, Documents).
+SECURITY.md lists these gaps.
 
 ### 2.8 Keep it running
 
 A Mac that sleeps, or stays off after a power cut, stops Estia too. Three settings matter:
 
 - **No sleep, and start after a power failure.** In System Settings → Energy, turn on "Prevent automatic sleeping when the
-  display is off" and "Start up automatically after a power failure". On the command line, `/usr/bin/sudo pmset -a sleep 0 autorestart 1`
+  display is off" and "Start up automatically after a power failure". On the command line, `/usr/bin/sudo /usr/bin/pmset -a sleep 0 autorestart 1`
   does the same. It needs `sudo` because power settings are system-wide, and only root may change them.
+  Doctor's Power line shows ! when the Mac sleeps or stays off after a power failure, with this command.
 - **Ollama starts at login.** `brew services start ollama` runs Ollama as a login item of your user, so it starts only
   after you log in. The bridge starts at boot without you, but it cannot answer without Ollama: every message gets "Estia
   isn't available right now". Either turn on automatic login for your user (System Settings → Users & Groups; not available
@@ -452,18 +490,19 @@ A Mac that sleeps, or stays off after a power cut, stops Estia too. Three settin
   account after a restart (the security step shows it as !), and without it she answers "isn't available" after every
   restart until someone logs in.
 - **FileVault.** With FileVault on, someone has to type the password after each restart, and automatic login is not
-  possible. For a planned restart, `/usr/bin/sudo fdesetup authrestart` restarts the Mac without that prompt; it asks for your password.
+  possible. For a planned restart, `/usr/bin/sudo /usr/bin/fdesetup authrestart` restarts the Mac without that prompt; it asks for your password.
 
 ### 2.9 Add the other parts
 
 Section 3 covers each optional part: calendar, mail, lights and plugs, voice, calls, Spotify, web search, places and
-routes, the extra health checks, and projects. Add one at a time, and check each one with `/usr/bin/sudo /usr/local/estia/bin/estia doctor`
+routes, the extra health checks, projects and documents. Add one at a time, and check each one with `/usr/bin/sudo /usr/local/estia/bin/estia doctor`
 before you go on.
 
 ### 2.10 Security step
 
 `scripts/setup.sh` ends with it; `scripts/harden.sh` runs it again any time (`scripts/harden.sh --dry-run` shows every
-check and command and changes nothing). The order that worked on a Mac reached over SSH: the move's dry run, then the
+check and command and changes nothing). On a new install it comes right after the move: her voice is not installed
+yet. The order that worked for moving an install with voice, on a Mac reached over SSH: the move's dry run, then the
 move; with calls set up, her text "My voice is ready: you can call me now." (up to about 15 minutes), else
 `curl -s http://127.0.0.1:8150/health` showing `stt` and `tts` ready, then a text and a call; then `scripts/harden.sh`
 in your own Terminal with a second SSH session open; then a new SSH login from your laptop and one more call (after
@@ -494,6 +533,17 @@ anything, it says plainly that they may stop other services on this Mac:
 
 Each one is asked first and changed only on your yes (every question defaults to no). Nothing here turns a setting off
 again: a Mac keeps what it already has, also one made stricter by an earlier version of this step.
+
+The Mac's security has two levels: hardened, set by the security step (`scripts/harden.sh`), and nuclear, the hardened
+level with the Mac's firewall on and python3 and ruby off its list (`scripts/harden.sh --nuclear`; its stealth mode
+and keychain lock do not count toward the level). Doctor names the level the Mac is at. Its last security line,
+Security level, is ✓ hardened when SSH takes keys only (or Remote Login is off), her files are private and her
+Registration Lock is on; ✓ nuclear when the firewall is on as well and lets no interpreter (python3, ruby) take
+incoming connections; ! "not hardened yet", naming what is missing, with `scripts/harden.sh` as the fix; and ! "not
+read" when one of the three could not be read (her Signal account file, when doctor runs as the owner). Stealth
+mode and the keychain lock are not read for the level (the keychain is yours, and doctor runs as her). harden says its
+level first ("Security level: hardened (the security step; nuclear is the other level).") and, before the phone
+checklist, names the doctor command that shows the level reached.
 
 | Setting | On your yes |
 |---|---|
@@ -544,19 +594,23 @@ machines can be reached from your network.
 
 ## 3. Optional parts
 
-Each part is off until its section is in the config (hers: `/usr/bin/sudo -u _estia -e /var/estia/.config/local-assistant/config.toml`,
-2.7). After each config change, restart the bridge (`/usr/bin/sudo launchctl kickstart -k system/com.local-assistant.bridge` when it
-runs as a daemon; in the foreground, Ctrl-C and `scripts/run.sh` again). Then run `scripts/doctor.sh`: the part's line must be ○ (set up, not tested yet) or ✓ (its last
+Each part is off until its section is in the config (hers: `/usr/bin/sudo /usr/local/estia/bin/estia config`,
+2.7). After each config change, restart the bridge (`/usr/bin/sudo /usr/local/estia/bin/estia restart`; an install that still
+runs always on as you: `/usr/bin/sudo /bin/launchctl kickstart -k system/com.local-assistant.bridge`; in the foreground, Ctrl-C
+and `scripts/run.sh` again). Then run the check (`/usr/bin/sudo /usr/local/estia/bin/estia doctor`; before her own user,
+`scripts/doctor.sh`): the part's line must be ○ (set up, not tested yet) or ✓ (its last
 real use worked), never ✗.
 
 ### Calendar (once)
 
-Estia reads one or more calendars, read-only. Each calendar is either:
+Estia reads one or more calendars, read-only. Each calendar is one of:
 
 - a **Google calendar**, read through its address in iCal format (the secret one, or the public one of a calendar that is
-  public anyway), or
+  public anyway),
 - the **Outlook calendar** of a Microsoft 365 mailbox Estia already reads (see "Mail (once)"), read through Microsoft
-  Graph with the delegated permission `Calendars.Read` only: she can read events, never create, change or delete them.
+  Graph with the delegated permission `Calendars.Read` only: she can read events, never create, change or delete them, or
+- a **CalDAV calendar** (iCloud, Fastmail, Nextcloud), read with an app-specific password and only CalDAV's two read
+  requests: she can read events, never create, change or delete them.
 
 With one Google calendar you need nothing more than `[calendar]` and `scripts/set-calendar-url.sh` (steps 1 to 3). For
 several calendars, list them under `[calendar]` with a short name each (step 4). With more than one calendar, the
@@ -617,6 +671,25 @@ per calendar.
    administrator's approval, the browser says "Need admin approval" and that sign-in stops: sign in mail alone with
    `scripts/mail-login.sh <address> --mail-only` and ask the administrator to grant consent as in step 1.
 
+**A CalDAV calendar (iCloud, Fastmail, Nextcloud).**
+
+1. Make an app-specific password for Estia. iCloud: account.apple.com → Sign-In and Security → App-Specific Passwords
+   (iCloud accepts no other password here). Fastmail: Settings → Privacy & Security → App passwords, with CalDAV
+   access. Nextcloud: Personal settings → Security → Devices & sessions → Create new app password.
+2. On the Mac: `scripts/set-calendar-password.sh family` (the calendar's name from step 3), and paste at the hidden
+   prompt. It is saved under its own key in `calendar.env` (`CALDAV_PASSWORD_FAMILY`, mode 0600), read only by the
+   calendar helper; the bridge never holds it.
+3. Add its `[[calendar.sources]]` entry and restart the bridge. `scripts/doctor.sh` shows it ○, ✓ after the first read,
+   or ✗ with the fix: a refused password, no calendar by that name, or no answer.
+
+```toml
+[[calendar.sources]]
+name = "family"
+caldav = "https://caldav.icloud.com"   # Fastmail: https://caldav.fastmail.com/dav/; Nextcloud: https://<host>/remote.php/dav
+user = "alex@example.com"             # the Apple ID's email address (Fastmail and Nextcloud: the user name)
+calendar = "Family"                    # the calendar's name as the calendar app shows it
+```
+
 Mail never depends on the calendar: the mail sign-in asks only for its own permissions, so mail keeps working whatever
 happens to `Calendars.Read`. Until consent is granted, the calendar says "Calendars.Read is not granted yet" in the digest,
 `/status` and `scripts/doctor.sh`. Only the mailbox's own default calendar is read (Graph's `/me/calendarView`): other
@@ -627,8 +700,10 @@ Don't reset a Google secret address unless it leaked. A reset stops that calenda
 `scripts/set-calendar-url.sh` (with the calendar's name, if it has one); the bridge then says "the secret address no
 longer works" (for a named calendar: "the iCal address no longer works").
 
-Only Google calendars and the Outlook calendars of your mailboxes are supported (the helper accepts Google's iCal host
-only).
+Google calendars, the Outlook calendars of your mailboxes and CalDAV calendars are supported. An iCal address must be
+Google's (the helper accepts Google's iCal host only); a CalDAV server must accept a user name and password (Basic
+sign-in): a server that accepts only Digest sign-in is not supported. A server that sends the helper on to another host
+is not followed (iCloud's own hosts aside): put its final address in `caldav`.
 
 ### Mail (once)
 
@@ -753,29 +828,48 @@ Would you like one of these built? Open an issue first, so the design can be agr
 2. `cd <repo> && scripts/tapo-discover.sh` lists the devices on the network (read-only).
    - Older Kasa devices need no login; newer Kasa firmware and Tapo devices need the TP-Link login (Tapo is untested).
      Run `scripts/set-tapo-credentials.sh`: it saves the login to `tapo.env` (mode 0600), which only the device helper
-     reads. Then run `scripts/tapo-discover.sh` again.
+     reads. The listing never sends the login (any device on the network may answer it): a device that needs the
+     login is listed by its address, model and login type, and its name is the one in the Kasa or Tapo app.
+   - The login goes only to the devices in `[[tapo.devices]]`, and only over KLAP (newer Kasa firmware: the device
+     proves it knows the login before anything made from it is sent) or AES login v2 (Tapo: a hash of the password).
+     A device that asks for AES login v1, which would get the password itself, is not controllable ("TP-Link login:
+     AES v1").
    - Tapo firmware with the TPAP login cannot be controlled yet.
 3. `cd <repo>/tools/tapo && uv sync --frozen`. Add one `[[tapo.devices]]` entry per device, with the name as it appears in
    the app, its address, `kind` (`light` or `plug`) and `rule` (`normal`, `ask first` or `never off`). Restart the bridge.
+4. Philips Hue lights: run `scripts/hue-pair.sh` and press the bridge's round button when asked (Hue lights are
+   untested on a real Hue Bridge so far). It needs the square Hue Bridge or the Hue Bridge Pro: the first, round
+   bridge has no CLIP API v2 and does not answer over HTTPS. Without an address the bridge is found on the home
+   network (macOS's own `dns-sd`, never Philips' cloud); `scripts/hue-pair.sh <address>` takes the address the Hue app
+   shows. Pairing shows the bridge's certificate fingerprint and saves it in `hue.env` (mode 0600, read only by the
+   device helper) with the bridge's address and the key the bridge gives (never shown); every later connection checks
+   that certificate before anything is sent. It then lists the bridge's lights (`scripts/tapo-discover.sh` lists them
+   again later). Add one `[[tapo.devices]]` entry per Hue light with `brand = "hue"` and `light = "<id>"` (the
+   bridge's id for it) in place of `host`, and the same `kind` and `rule`. Hue lights take on, off, brightness and the
+   whites, no colours. Restart the bridge.
 
-`scripts/doctor.sh` then shows Lights and plugs ○ or ✓. After each device change, the note that follows says what really
-happened, for example "Devices: living room lamp off", and says when a device does not answer.
+`scripts/doctor.sh` then shows Lights and plugs ○ or ✓, and with Hue lights a Hue Bridge line: paired, reachable, its
+certificate the one saved at pairing, each light found, and ! for a light the bridge cannot reach (switched off at the
+wall). After each device change, the note that follows says what really happened, for example "Devices: living room
+lamp off", and says when a device does not answer.
 
-Estia reaches devices on the home network only, never through the TP-Link cloud. Device addresses must be private
-addresses (RFC 1918 or IPv6 unique local).
+Estia reaches devices on the home network only, never through the TP-Link cloud. Philips Hue lights are reached only
+through the Hue Bridge on the home network, never through Philips' cloud. Device addresses, and the Hue Bridge's, must
+be private addresses (RFC 1918 or IPv6 unique local).
 
 ### Voice notes (once)
 
 Voice notes and spoken answers use a local service: WhisperKit for speech-to-text, and Kokoro (English) or Supertonic-3
-(the other ten languages) for text-to-speech, on the Neural Engine. Whisper is told the language on every request. It needs macOS 15.6 or later and the Swift 6.2 toolchain from the Command Line Tools. Homebrew's installer
+(the other ten languages) for text-to-speech, on the Neural Engine. Whisper is told the language on every request. It needs macOS 15.6 or later, but not macOS 26.4 or 26.5: an Apple bug there can crash English speech (Kokoro) and the
+voice service with it in the middle of a call; update to 26.6 or later (the install script and the service's log warn). It also needs the Swift 6.2 toolchain from the Command Line Tools. Homebrew's installer
 (2.1) installs the Command Line Tools. If `swift --version` is missing or older than 6.2, run `xcode-select --install`.
 
-1. Install the service: `cd <repo> && scripts/install-voice-daemon.sh`. The script builds the service with the exact
-   versions in `Package.resolved`, then puts it into her release with `/usr/bin/sudo /usr/local/estia/bin/estia-deploy --voice`,
-   which installs it as a background service that starts with the Mac (a LaunchDaemon), runs as her own user `_estia`
+1. Install the service: `cd <repo> && scripts/install-voice-daemon.sh`. The script runs
+   `/usr/bin/sudo /usr/local/estia/bin/estia-deploy --voice`, which builds the service as you from the commit's own
+   sources with the exact versions in `Package.resolved`, puts it into her release and installs it as a background service that starts with the Mac (a LaunchDaemon), runs as her own user `_estia`
    and is reachable only from the Mac itself (`127.0.0.1:8150`). It asks for your Mac password, because installing a
    service needs admin rights, as for the bridge (2.7). The models (about
-   1.6 GB) download on the first start into `/var/estia/Library/Application Support/local-assistant/voice-models` (the move
+   1.7 GB) download on the first start into `/var/estia/Library/Application Support/local-assistant/voice-models` (the move
    into her own user copies them when they are there). Whisper's files (the listening model and its word list) are
    fixed to one version on Hugging Face (one commit) and checked one by one against their fingerprints (sha256) at
    every start, in under a second; after the first download Whisper starts with no network. A folder with a changed or
@@ -787,15 +881,19 @@ Voice notes and spoken answers use a local service: WhisperKit for speech-to-tex
    check of their files. By FluidAudio's code, they are fetched only when a file is missing.
 2. The script waits up to about 20 minutes. If it says "not ready" after a slow first download, the service keeps loading.
    Check later with `curl -s http://127.0.0.1:8150/health`: `stt` and `tts` both say `ready` when it is done.
-3. Take the `#` off `[voice]` and its lines in the config (the `voice` line has the voice setup chose with her name; an
-   empty `[voice]` uses the defaults in `config.example.toml`, voice `af_heart`), restart the bridge, and check that
-   `scripts/doctor.sh` shows Voice ○ or ✓.
+3. Take the `#` off `[voice]` and its lines in her config (the `voice` line has the voice setup chose with her name; an
+   empty `[voice]` uses the defaults in `config.example.toml`, voice `af_heart`):
+   `/usr/bin/sudo /usr/local/estia/bin/estia config` (Ctrl-O, Enter saves; Ctrl-X quits).
+   Then restart her (`/usr/bin/sudo /usr/local/estia/bin/estia restart`) and check that
+   `/usr/bin/sudo /usr/local/estia/bin/estia doctor` shows Voice ○ or ✓. Each update builds her voice service again
+   when `tools/voice` changed. An update (`/usr/bin/sudo /usr/local/estia/bin/estia-deploy`, 2.7) without such a change
+   keeps the one she has.
 
 Languages other than English need a voice service that knows them: its health then lists `"languages"`. A service
 installed before the language feature speaks English only; the reply to `/language` says so. Run
 `scripts/install-voice-daemon.sh` again (it asks for your Mac password: run it yourself), and `scripts/doctor.sh` shows Language ✓ (it
 checks the language in use: the one chosen with `/language`, else the config's). The first use of such a language downloads Supertonic-3 (about
-264 MB, about a minute); the bridge does this in the background at start and right after `/language`.
+265 MB, about a minute); the bridge does this in the background at start and right after `/language`.
 
 The first start after an install, a move into her own user or a macOS update takes up to about 15 minutes while the
 Neural Engine compiles the models (its cache is per user and per macOS build). Until then, voice notes get "Voice isn't
@@ -865,7 +963,7 @@ several GB of sources and Cargo crates from GitHub and crates.io, and compiles t
    with the flag in `JAVA_OPTS` instead: `JAVA_OPTS=-Djava.net.preferIPv4Stack=true "<signal-cli path>" -a <bot-number> <command>`.
 6. Add `[calls]` to the config (an empty table uses the defaults; set the paths only where they differ). In her own user:
    `/usr/bin/sudo /usr/local/estia/bin/estia-deploy` (it copies the builds into her release), then
-   `/usr/bin/sudo -u _estia -e /var/estia/.config/local-assistant/config.toml` for `[calls]`, then
+   `/usr/bin/sudo /usr/local/estia/bin/estia config` for `[calls]`, then
    `/usr/bin/sudo /usr/local/estia/bin/estia restart`; `/usr/bin/sudo /usr/local/estia/bin/estia doctor` must show Calls ✓ and Her programs
    ✓, and `/usr/bin/sudo /usr/local/estia/bin/estia check` must show `signal-cli: running` before you place a test call. Before her
    own user: restart the bridge; `scripts/doctor.sh` must show Calls ✓, and `scripts/check.sh` must show
@@ -917,40 +1015,47 @@ the first answer waits for it at most 3 seconds more, and a slower calendar join
 cannot be read, for any reason, gives `Calendar today: not read just now.`, and the mail counts stay. The numbers are
 the code's English; she speaks the call's language. A practice call (`/babble`) gets none.
 
-**What stops her when you talk over her.** `barge` in `[calls]` chooses the rule:
+**What stops her when you talk over her.** `interrupt` in `[calls]` chooses the rule:
 
-- `barge = "loudness"` (the default): after the first 300 ms of each sentence (the line's floor), 12 loud frames in 250 ms
-  stop her (a frame is loud above 3.5 times the floor, and at least 400). Road noise in a car can stop her too.
-- `barge = "speech"`: the voice service's speech detector (Silero VAD through FluidAudio, on the Mac) rates every 256 ms
-  of your audio. One stretch that it is at least 99% sure is speech, and that is louder than 3 times the floor (at least
-  150), stops her, about 0.1 s later than loudness. On one recorded drive (100 minutes of car noise, mixed in tests) it
-  stopped her 0 times, against 42.5 per 10 minutes (3.5 at the levels live calls show) for loudness on the same noise,
-  and still caught 99% of interruptions. Real cars are not measured yet. Whispers are mostly missed; a radio, singing
-  or a passenger talking counts as speech; bus noise stops her less often than with loudness, but not never.
+- `interrupt = "only speech"` (the default): the voice service's speech detector (Silero VAD through FluidAudio, on the
+  Mac) rates every 256 ms of your audio. One stretch that it is at least 99% sure is speech, and that is louder than 3
+  times the floor (at least 150), stops her, about 0.1 s later than any sound does. On one recorded drive (100 minutes
+  of car noise, mixed in tests) it stopped her 0 times, against 42.5 per 10 minutes (3.5 at the levels live calls show)
+  for any sound on the same noise, and still caught 99% of interruptions. Real cars are not measured yet. Whispers are
+  mostly missed; a radio, singing or a passenger talking counts as speech; bus noise stops her less often than with any
+  sound, but not never.
+- `interrupt = "any sound"`: after the first 300 ms of each sentence (the line's floor), 12 loud frames in 250 ms stop
+  her (a frame is loud above 3.5 times the floor, and at least 400). Road noise in a car can stop her too.
+
+The older wording still works: `barge = "speech"` (now `interrupt = "only speech"`), `barge = "loudness"` (now
+`interrupt = "any sound"`) and the short forms `interrupt = "speech"` and `interrupt = "sound"`. Doctor shows a
+"Calls setting" line with the new wording to write. With both `interrupt` and `barge` in `[calls]`, `interrupt` wins and
+doctor says to remove `barge`. Before 14 Oct 2026 the default was any sound.
 
 The rule not chosen runs beside it and is never acted on. It is counted at most once per stretch of her speech (a
 sentence resumed after a cough counts again), and only when the rule in charge did not stop her there, or stopped her on
-no words or on her own voice. Each call's end logs one line with the counts per rule, for example
-`calls: barge-in speech: speech stopped her 1 time, would have 0; loudness stopped her 0 times, would have 4; her own
-voice 0; detector 412 chunks, slowest 38 ms, 0 failed`. When loudness took over during the call, the line says why,
-for example `calls: barge-in speech (loudness after 3 failed answers in a row): …`, and counts the failures by kind:
-`timeout` (no answer within 0.3 s), `http` (no service, a refusal or no probability in the answer) and `late` (an
-answer for audio more than 600 ms old). `/usr/bin/sudo /usr/local/estia/bin/estia logs -n 5000 | grep "calls: barge-in"` lists them:
-these counts decide whether speech becomes the default. Each stop logs which rule stopped her, the detector's
-probability or the number of loud frames, the level and the floor. When the level gate turns away what the detector
-heard as speech, one line per stretch logs the loudest such chunk, for example
-`calls: speech gated (p 1.00, level 132, floor 40)`. Never audio or words.
+no words or on her own voice. Each call's end logs one line with the counts per rule; the log keeps the rules' inner
+names, speech for only speech and loudness for any sound, for example `calls: barge-in speech: speech stopped her 1
+time, would have 0; loudness stopped her 0 times, would have 4; her own voice 0; acknowledgements 0; detector 412
+chunks, slowest 38 ms, 0 failed`. When any sound took over during the call, the line says why, for example `calls:
+barge-in speech (loudness after 3 failed answers in a row): …`, and counts the failures by kind: `timeout` (no answer
+within 0.3 s), `http` (no service, a refusal or no probability in the answer) and `late` (an answer for audio more than
+600 ms old). `/usr/bin/sudo /usr/local/estia/bin/estia logs -n 5000 | grep "calls: barge-in"` lists them: these counts
+show how often each rule stopped her, and would have. Each stop logs which rule stopped her, the detector's probability
+or the number of loud frames, the level and the floor. When the level gate turns away what the detector heard as speech,
+one line per stretch logs the loudest such chunk, for example `calls: speech gated (p 1.00, level 132, floor 40)`. Never
+audio or words.
 
 The speech detector needs the current voice service (`scripts/install-voice-daemon.sh`, asks for your Mac password: run it
 yourself). Its model (about 1 MB) is downloaded at the first start into
 `~/Library/Application Support/local-assistant/voice-models/silero-vad`, pinned to one commit and checked against its
 sha256 values; delete that folder to download it again. `curl -s http://127.0.0.1:8150/health` shows the detector as
 `"vad"`: `ready`, `loading` or `unavailable` (the download failed or the files are not the pinned ones;
-`~/Library/Logs/local-assistant/voice.log` says which). An older voice service has no `"vad"` field. Until the detector
-is ready, loudness decides; a call whose detector fails or answers too late three times in a row goes on with loudness,
-and the log says so once. A call never waits for the detector. With `barge = "speech"`, `scripts/doctor.sh` shows a
-Speech detector line (ready, loading, unavailable, old voice service or not ready) with its fix, and `/status` adds the
-state to the Calls line.
+her voice log says which: `/usr/bin/sudo /usr/local/estia/bin/estia logs voice`). An older voice service has no `"vad"` field. Until the detector
+is ready, any sound decides; a call whose detector fails or answers too late three times in a row goes on with any
+sound, and the log says so once. A call never waits for the detector. With `interrupt = "only speech"` (the default),
+`scripts/doctor.sh` shows a Speech detector line (ready, loading, unavailable, old voice service or not ready) with its
+fix, and `/status` adds the state to the Calls line.
 
 **Her own voice.** A loud speaker next to the microphone (a laptop on Signal Desktop) can play her back and stop her.
 After every stop, the transcript is compared with what she had already said: the sentence before and the current one
@@ -961,6 +1066,32 @@ or "no, not Amsterdam" over her own sentence is the caller talking. All 11 langu
 characters, and 6 in a row). She carries on, as after a cough. The first time in a call, a stop then needs 1.5 times
 the level that stopped her, for the rest of the call (both rules; raised once, never again). Her own words never reach
 the model. The log says `calls: her own voice heard; carrying on`.
+
+**A listener's "okay".** A listener's "okay", "yeah" or "mm-hm" alone, in the call's language, does not stop her either:
+she carries on, as after a cough, unless she just asked something. After a stop, a transcript of only acknowledgement
+words in the call's language counts: "okay", "yeah", "right", "got it", "I see", "mm-hm" in English; "ja", "oké",
+"klopt" in Dutch; "genau", "alles klar" in German; はい, なるほど in Japanese; a few in each of the 11 languages, and the hums
+Whisper writes ("mm-hmm", "uh huh") in all of them. She resumes a little before the stop, never back to where she last
+resumed, so each one takes her further; after three in one sentence she goes on from the stop itself. The exception: her
+sentence or the one before it asks something (ends with a question mark, or in Japanese with か), or a device question
+waits for your yes; then the "okay" is your answer and takes over. Anything more ("okay, and tomorrow?", "yes, but…") is
+your turn, and so is a word asked back ("Really?", "Okay?", "네?"). One word alone stops her when it is "stop", "wait",
+"no", "hold", "sorry", "hey", "but" (in each of the 11 languages: "maar", "aber", "mais", でも …) or her name; a "yes"
+alone only when she asked something or a device question waits. The log says `calls: an acknowledgement; carrying on`
+(never the words) and the call's end line counts them (`acknowledgements 1`); a turn that takes over after a stop logs
+its length, `calls: taken over (3 words)`.
+
+**Goodbyes.** In English, a goodbye ("bye-bye", "good-bye", "talk to you later", "take care") ends the call once her
+answer is spoken, also with closing words after it ("okay, goodbye, I'm going to check the log now") and also when her
+answer asks something; only a device question waiting for a yes keeps the call open. Leave-taking ends the call the same
+way, as a phrase of its own ("Okay, I have to go"), not inside a longer sentence ("I have to go to the dentist"): "I
+have to go" or "I'm hanging up" in English, "ik moet gaan" in Dutch, "ich muss los" in German, and a few clear phrases
+in the other languages ("je dois y aller", "じゃあ、切るね"). A wrap-up ("that's all") ends it too, unless she asks something.
+A plain goodbye ("okay, good bye", "bye now") gets the code's own bye, without the model; a goodbye with more is
+answered by the model first (a reminder asked for is set), then the call ends. Closing words are words with no question
+in them and no "wait", "but", "actually", "hold on" or "before you go"; a goodbye after a colon is quoted speech ("tell
+Alex: take care") and ends nothing. Leave-taking counts in the call's language and in English; "Yes, I have to go"
+answers her and is no leave-taking.
 
 **Wake-up calls.** With `[calls]` on, a reminder with "call me" (or `/remind call 07:00 wake up`) also places a Signal
 call: the text first, always, then the call. `wake_call = false` in `[calls]` keeps those reminders as wake-up texts (a
@@ -1029,9 +1160,12 @@ answers "too many requests" or refuses its key is paused for a while (shown in "
    Brave's key comes from the Brave Search API dashboard (api-dashboard.search.brave.com). The Ollama key comes from your
    account at ollama.com/settings/keys. The keychain service names are `brave-search` and `ollama` (and `google-maps` for
    places and routes). `-U` replaces a key that is already stored, so run the command again to change a key.
-2. `cd <repo> && scripts/set-web-keys.sh`. It copies the keys into `~/.config/local-assistant/web.env` (mode 0600), and
-   may ask for your login password to unlock the keychain. It prints only the keys' lengths. Run it again after you change
-   a key; no restart is needed. Without a login keychain, write `web.env` yourself (mode 0600), one per line:
+2. `cd <repo> && scripts/set-web-keys.sh`. It copies the keys into her `web.env` (mode 0600: in her own user through
+   `/usr/bin/sudo /usr/local/estia/bin/estia secret set`, before it `~/.config/local-assistant/web.env`), and asks for
+   your login password only when the keychain is locked; with no key stored it prints the commands above. It prints
+   only the keys' lengths. Run it again after you change a key; no restart is needed. Without a login keychain: in her
+   own user, `/usr/bin/sudo /usr/local/estia/bin/estia secret set web.env BRAVE_API_KEY` (a hidden prompt; the same with
+   `OLLAMA_API_KEY`); before it, write `~/.config/local-assistant/web.env` yourself (mode 0600), one per line:
    `BRAVE_API_KEY=`, `OLLAMA_API_KEY=` and `GOOGLE_MAPS_API_KEY=`, each followed by its key.
 3. Add `[web]` to the config (optionally `country = "NL"` for Brave's search country, and `brave_monthly_cap = 2000`, set to
    your Brave plan's monthly limit; `0` means Ollama only). Restart. `scripts/doctor.sh` must show Web search ○ or ✓.
@@ -1110,7 +1244,8 @@ extra_checks = [
   `running` and `pass` are fine).
 - `launchd` names a service, such as `system/com.example.my-agent`. `stuck_after_minutes` (launchd only) reports a problem
   when that service has not run for this many minutes.
-- A problem is reported once it has lasted `confirm_minutes`, and "back to normal" is sent once it is fixed.
+- A problem is reported once it has lasted `confirm_minutes`, and "back to normal" is sent once it is fixed; in quiet
+  hours both wait until the morning (4. Using it, "Alerts need no question").
 - In her own user, she cannot read your home: the move leaves the `watch_logs` folders in your home out of her copy
   of the config and counts them on the screen ("health.watch_logs: 2 folders in your home left out of her copy (she
   cannot read your home)"). A folder outside your home stays.
@@ -1149,13 +1284,162 @@ and spelled far apart, two about as near, a single word of a longer name, a name
 Korean) or none close: the answer asks her to ask you ("Do you mean fotobook?") instead of guessing.
 
 In her own user her config names the folder by its absolute path (her `~` is `/var/estia`), and her user reads that
-folder, read-only, and nothing else in your home, once it is shared (2.7, "Your projects folder"): `/usr/bin/sudo -u _estia -e /var/estia/.config/local-assistant/config.toml`,
+folder, read-only, and nothing else in your home but `~/Estia-KB` with Documents on (below), once it is shared (2.7, "Your projects folder"): `/usr/bin/sudo /usr/local/estia/bin/estia config`,
 then `scripts/share-projects.sh <folder>` (as you, no admin rights), then `/usr/bin/sudo /usr/local/estia/bin/estia restart`.
 `scripts/setup.sh --extras` prints these lines with your folder and level. `scripts/share-projects.sh` shares only a
 folder inside your home: for one outside it, setup says so in place of that step, and read access for `_estia` is
 given by hand. Before her own user, setup adds `[projects]` to your config itself (a copy of the old one is kept);
 restart her afterwards. Doctor's Projects line shows only with Projects on. With Projects off,
 `scripts/share-projects.sh` shares nothing and says so.
+
+### Documents (extra, off by default)
+
+Estia reads the PDFs in `~/Estia-KB` on the Mac and the PDFs you send her on Signal, and answers questions about
+them with the document and the page ("lease.pdf, page 3"). Off without `[documents]`: no document tool is offered, and
+her rules and requests are exactly as before. Setup does not ask about it yet; you add it.
+
+```toml
+[documents]
+folder = "/Users/<your user>/Estia-KB"   # always your ~/Estia-KB; in her own user written out in full
+look_minutes = 60                        # how often she looks at the folder (5 to 1440)
+```
+
+The folder is always `~/Estia-KB`, directly in your home in your own macOS account, whatever her name: a rename never
+moves or splits it. Not in Documents: macOS guards Documents, Desktop and Downloads; a folder in your home needs no
+extra permission. Her `~` is `/var/estia`, so in her own user write your folder in full (doctor fails a folder inside
+her home and says so; the share prints the two lines to use). An empty `[documents]` means `~/Estia-KB` of the user the
+bridge runs as: in her own user that is her home's, never yours. The share refuses a folder that holds a git checkout
+(`.git`): her account would add files to code you run.
+
+In her own user, as you, in your own Terminal:
+
+```sh
+cd <repo> && scripts/share-documents.sh --dry-run     # every chmod command; nothing changes
+cd <repo> && scripts/share-documents.sh               # her access; makes ~/Estia-KB (0700) when missing; prints the two lines
+/usr/bin/sudo /usr/local/estia/bin/estia config     # add those two lines: [documents], then folder = "/Users/<you>/Estia-KB"
+/usr/bin/sudo /usr/local/estia/bin/estia restart
+/usr/bin/sudo /usr/local/estia/bin/estia doctor       # Documents ○ until her first look, then ✓
+cd <repo> && scripts/share-documents.sh --revoke      # later, to take it back
+```
+
+The documents helper is built into every release by `estia-deploy` (2.7, Updates): on an install from before
+documents, run `/usr/bin/sudo /usr/local/estia/bin/estia-deploy --update-tools` once (it shows the diff), then deploy
+again. Before her own user the bridge runs as you and reads the folder as you: make it with `mkdir -p ~/Estia-KB` (the
+share needs her user and refuses before the move), and `scripts/run.sh` builds the helper.
+
+**Her access.** `scripts/share-documents.sh` runs as you, without admin rights, and adds access entries (ACLs) for
+`_estia`:
+
+- `allow search` on your home: she passes through by name; her code never lists or reads anything there (SECURITY.md,
+  known gaps, says what passing through by name leaves open);
+- the projects share's read-only entry (`allow list,search,readattr,readextattr,readsecurity,read` with
+  `file_inherit,directory_inherit`) on `~/Estia-KB` and every folder and file of yours in it;
+- on `~/Estia-KB` itself, `allow add_file`: she adds files there, never a folder and never anything below it;
+  nothing inherits it, so she never writes, renames or deletes your files (a folder her account made would be hers,
+  and in it she could);
+- on `~/Estia-KB` itself, an entry for you with every right, inherited by every new file and folder: what she adds is
+  yours to open, move or delete in Finder.
+
+A file there with a second name (a hard link) is never shared, and the share goes into no folder that is not yours.
+macOS lets any account make a hard link to a file it cannot read, and an access entry belongs to the file, not to the
+name: her account could otherwise link a file of yours from elsewhere (your `~/.zsh_history`) into the folder as
+`invoice.pdf` and have the next share open it. The share names each one it leaves out ("! not shared, a hard link").
+
+In your home, her account adds files only to `~/Estia-KB`, and never deletes or changes yours. Your home opens last,
+once the folder is shared. A symbolic link is never followed (each item is changed with `chmod -h`, as for projects),
+and an entry already there is never added twice. The share writes a random token into `.estia-share` in the folder.
+`--revoke` closes the way first, takes her entries out (never yours: what she added stays yours) and deletes the token,
+so her index of the documents goes at her next look; a new share always starts a fresh index. A folder she cannot list
+at a look takes her index with it. Both shares pass through your home: a revoke keeps it open while the other share is
+in place. A file moved in from elsewhere keeps its own permissions until the share runs again: `/docs` lists it as "I
+may not open it yet: on the Mac, as you, run scripts/share-documents.sh again".
+
+**Her look at the folder:** every `look_minutes` (60), outside quiet hours (the initiative's `quiet_hours`, else
+22:00-08:00). The hourly look waits while a call, an answer or `/lock` lasts, reads 10 minutes at most and stops when a
+call or `/lock` begins; what is left is read a minute later. A look also runs before `search_documents`,
+`read_document` and `/docs`, so a PDF put there a minute ago is found (then at most 45 s of reading; never on a call,
+where she answers from the pages already read). A look while another runs reads nothing: she answers from the pages
+already read. It lists names, sizes and change times only: no link, no hidden name, three folders down at most, 2,000
+PDFs at most. A PDF is read only when it is new or changed, newest first, one at a time; a PDF sent on Signal is saved
+between two. A PDF taken out of the folder leaves her index at that look. A folder she cannot list waits for the next
+hourly look, and her log names it once, not every minute.
+
+**The note on new PDFs** found there, written by the code: "I found 2 new documents: lease.pdf, boiler-manual.pdf." (at
+most five names, then a count), to every allowed account. It waits until quiet hours end, is skipped under `/quiet`
+(with the messages she starts herself on; without them `/quiet` does nothing, and the note always comes) and waits while
+`/lock` is on. It never comes for a PDF sent on Signal, for one `/docs` already listed or she was asked about, or for the
+PDFs in the folder when it is shared: a share's first look announces nothing, however many looks it takes (the helper
+missing, 45 s of reading on request, a PDF sent first).
+
+**Reading.** The bridge runs `tools/documents/.build/release/documents-helper read <path> --max-pages 300
+--max-seconds 60` with fixed arguments, no shell and a clean environment, reads at most 32 MiB of its answer and stops
+it at 75 s. PDFKit gives a text page's text, in about 1 ms. A page with no text of its own is drawn at 300 dots per
+inch and read by Vision's text recognition on the Mac, in about 0.3 s, in Estia's 11 languages with Vision's own
+detection. A PDF is read by Apple's PDFKit and Vision in a helper program that runs as her account: a PDF made to attack
+the reader reaches only that program and her account, never yours. Gemma is not used in the look, the reading, the
+index or the note: it only answers questions, with `search_documents` (the best passages, with document and page) and
+`read_document` (one page, at most 6,000 characters).
+
+**Limits:** 25 MB and 300 pages a document; 60 seconds to read it; one document at a time. A file over 25 MB never
+reaches the helper. 60 seconds hold about 190 full scanned pages: a longer scan ends in a timeout, and nothing of it is
+read. A PDF that cannot be read is listed by `/docs` with the reason: "it is not a PDF", "it is encrypted" (a PDF with
+only an owner password, which limits printing or copying, is read, as in Preview), "it is over 25 MB", "it has over 300
+pages", "reading it took over 60 seconds" or "its text cannot be read". It is not read again until the file changes; a
+timeout is tried once more after each start. A page that cannot be read is skipped, and she says so when asked about it.
+
+**What the layout gives** (measured on a Mac mini with macOS 27, on synthetic pages; `tools/documents/README.md`):
+
+- A PDF with its own text is read one column after the other, left first.
+- Scanned pages in two columns: of 18 test layouts, 14 were read with at most 2 letters wrong, 1 mixed the lines of
+  its two columns (set close together) and 3 lost words (10-point type).
+- A table comes out as lines: one line per row when the PDF was written row by row (Word, Excel), else one cell per
+  line, column after column, as for every scanned table.
+- Scans: about 1 letter in 120 misread on clean test pages (mostly accents; none in 20 English pages). Real scans
+  (skew, noise, stamps) are untested. A page with any text of its own is never sent to Vision: a scan with a stamped
+  page number gives only the page number.
+
+**First scan after an update.** macOS prepares Vision's model the first time a new build of the helper reads a scan: 50
+to 70 seconds. The bridge runs the helper's warm-up 30 s after each start, as her, so a scan read after it does not
+time out; a scan sent before the warm-up ends may time out and is read again at her next look. Whether the
+preparation carries across users or restarts is untested.
+
+**A PDF sent on Signal**, from an allowed account (sent as a PDF, and its first bytes, `%PDF-`, agree): saved into the
+folder itself, never into a folder of its own, under a clean name with the date ("2026-10-14 lease.pdf": only letters,
+digits, spaces and a few signs of its own name), never over another file (" (2)" is added) and never through a link,
+then read at once and never announced. Code's note: "Saved in your Estia-KB folder: 2026-10-14 lease.pdf (4 pages)." With words sent along, her answer about them follows
+the note; without, the note is all. At most 5 PDFs of one message are saved. signal-cli's copy is deleted afterwards. A
+stranger's PDF is never saved, and during a call a PDF waits like every text. Without `[documents]`, a PDF is a file she
+cannot open.
+
+**Doctor's Documents line** (only with `[documents]`) reads the folder as the user doctor runs as:
+
+- ✗ "the documents helper is not built: PDFs cannot be read": before her own user, `cd tools/documents && swift build -c
+  release`; in her own user, a deploy (2.7, Updates);
+- ✗ "the folder is in her own home, not yours": write your folder in full in her config;
+- ✗ "… is not your ~/Estia-KB: the share opens only ~/Estia-KB to her" (in her own user): her config still names
+  another folder (the first share's, in Documents), which no share opens to her; set `[documents] folder =
+  "/Users/<your user>/Estia-KB"` in her config and restart her (move its PDFs over in Finder first);
+- ✗ "no folder …": before her own user `mkdir -p ~/Estia-KB`; in her own user `scripts/share-documents.sh` (it makes
+  it);
+- ✗ "… cannot be read: not shared with her" or "… is not shared with her yet (no share token)":
+  `scripts/share-documents.sh` (before her own user, "not shared with her" is a ! warning);
+- ✗ "… cannot be read: macOS refuses it (operation not permitted), which the share does not change" (below);
+- otherwise her last look: ✓ "…: shared and readable" with its time, ○ before her first look, or ✗ failing, with the
+  fix ("macOS refuses it (operation not permitted)" when her own look met that refusal).
+
+For `~/Estia-KB` itself, macOS's refusal is not expected: its fix says "macOS refuses ~/Estia-KB itself (unexpected)",
+and her log says what she gets (SECURITY.md, known gaps).
+
+**macOS's privacy protection.** macOS guards Documents, Desktop and Downloads itself, whatever the access entries allow:
+on the live Mac (14 Oct) the first share could not add her entry to `~/Documents`, even from your own SSH session
+("Operation not permitted"), and even reading its extended attributes was refused. Hence `~/Estia-KB`, which macOS does
+not guard. A `[documents] folder` set inside one of those three may be refused to her account. Her log names that
+refusal: `/usr/bin/sudo /usr/local/estia/bin/estia logs -n 5000 | grep documents` shows `EPERM` (a missing share shows
+`EACCES`), and `/status`, doctor's last-look line, `/docs` ("macOS refuses it to my account") and a sent PDF's note
+("Not saved: macOS refuses my account …") say so too. Doctor's own read runs from your SSH or Terminal session, which
+macOS judges on its own (Remote Login's "Allow full disk access for remote users"): its own line may say "macOS refuses
+it" while she reads fine, or pass while she is refused; her log says what she gets. The fix: `[documents] folder =
+"/Users/<your user>/Estia-KB"` in her config, `scripts/share-documents.sh`, then a restart.
 
 ### Personality (soul.md)
 
@@ -1174,8 +1458,11 @@ hidden characters); a file that is not used leaves her built-in style in place. 
 
 ## 4. Using it
 
-Write to the bot from Signal as you would to a person. Replies come as short plain text in the current language (see
-"Languages" below), with a read receipt and "typing…" while Gemma works.
+Write to the bot from Signal as you would to a person. Replies come as short texts in the current language (see
+"Languages" below), with a read receipt and "typing…" while Gemma works. Clear markup (bold, struck-through, code, a `#`
+heading, a `-` list) is shown in Signal's own text styles, without the signs; an unclear marker (a lone `*`, `2*3`, a
+glob, an underscore) stays as typed, and so does a line where dropping the signs would form a link. Voice notes and
+calls say only the words, never a crossed-out one.
 
 | Command | What it does |
 |---|---|
@@ -1195,13 +1482,35 @@ Write to the bot from Signal as you would to a person. Replies come as short pla
 | `/lock` | An emergency stop, typed from a device she answers: no answers, no calls, nothing sent until `/unlock` from the same device, 10 minutes later at the earliest; it holds after a restart (`/usr/bin/sudo /usr/local/estia/bin/estia unlock` ends it from the Mac) |
 | `/unlock` | Ends `/lock`: only from the device that sent it, after the wait |
 | `/devices` · `/devices ok N` · `/devices forget N` | The devices she answers and the held ones; allow held device N (only from a device she already answers); take device N off the list after you unlink it (a linked device silent for 14 days is held again) |
-| `/help` | The list above |
+| `/docs` · `/docs send N` | Your documents (with `[documents]`), newest first (30 at most, then a count), each with its number, place in the folder and pages, or why it cannot be read; the folder is looked at first. `/docs send N` sends that PDF back only to the account that asked; during a call it waits for the end. Without `[documents]`: how they are turned on |
+| `/help` | What she can do in this install, then the list above. The first part is the list her rules carry, word for word (see below) |
+
+**What she can do.** The code builds a list of the parts that are set up in this install (`prompts.capabilities`), one
+line and one example each, in a fixed order: chat and memory, links and YouTube videos, photos, voice notes, calls,
+mail, calendar, the morning digest, reminders (and wake-up calls), the messages she starts, lights and plugs, music, web
+search, places and routes, Projects, Documents, the Mac, language practice and security. A part that is not set up is
+left out (the messages she starts are always listed, on or off); asked about one, she says it is not set up here. The
+calendar line names each calendar's service (Google, Outlook, iCloud, Fastmail or Nextcloud; another CalDAV server by
+its host name), and the lights and plugs line names TP-Link (Kasa and Tapo), Philips Hue or both. A part with levels
+names them and the current one: voice answers (auto, on or off: `/voice`), what interrupts her on a call (only speech or
+any sound: `[calls] interrupt`), the messages she starts (on or off: `/initiative`), Projects (off, summary, docs or
+code: `[projects]`, with "some projects: docs" when some have another level), Documents (on or off, with its folder:
+`[documents]`; a folder in your home is shown from `~`, as `~/Estia-KB`, any other written out in full) and the
+Mac's security (hardened or nuclear, read as doctor reads it at the start and every 4 hours; "not hardened yet" when one
+of the security step's settings was read and does not hold, "not read yet" before the first read or when one of them
+could not be read). Her rules carry the list right before their safety part, so "what can you do?" is answered from it
+in any language; `/help` shows the same lines above the commands. On a call her rules leave the list out
+(`prompts.without_capabilities`): she answers in a few spoken sentences, never a list, and with the list she ended the
+call on a goodbye far less often (the evals' call_goodbye: 9 of 30, against 24 of 30 without it). A change of `/voice
+auto|on|off` or `/initiative on|off`, or of the security level, reaches her rules from the next answer. During language
+practice her rules carry no list (no tools are offered then).
 
 In normal messages:
 
 - "Remember that …" saves the fact at once, and Gemma answers "Noted: …".
 - Every profile change in an answer is listed in a separate message right after the reply, written by the bridge itself
-  (not by Gemma), e.g. "Profile changes: Saved #14: … (/forget 14 undoes it)". No such message means nothing was saved.
+  (not by Gemma), e.g. "**Profile changes**" (in bold), then "Saved #14: … (/forget 14 undoes it)". No such message means
+  nothing was saved.
   Fact numbers are never reused. Facts learned in the background are mentioned once with the next reply.
 - "Forget …" → Gemma removes the matching fact (or asks which one). Unlike `/forget`, a removal by Gemma keeps the old text
   in the change log, so a removal you didn't want can be undone.
@@ -1236,7 +1545,8 @@ In normal messages:
   never on disk, per account and conversation; `/new` drops them. While they are kept, a line from the code in her
   prompt names the link and the minutes left.
 - When your message holds a YouTube link, a line from the code in her prompt says that `read_link` reads that
-  video's captions and that the link is given for the full transcript. Without such a link, no line is added.
+  video's captions and that the link is given for the full transcript: the link opens the video, so she never
+  calls it the transcript. Without such a link, no line is added.
 - A video is never read on a call: a link cannot be spoken. The learn tool refuses a video link, as `/learn` does.
 - When a video cannot be read, she passes on the code's reason: "This video has no captions." (nothing is
   transcribed), a private or removed video or one not shown in this country, an age-restricted one (no account is used), YouTube
@@ -1250,23 +1560,43 @@ In normal messages:
   projects with their level and how to change it. The whole README reads at every level (`project_read`, 200 lines at a
   time); at level `docs` also the documents, at level `code` also the source code, read and searched (`project_search`).
   A misheard name is matched to the nearest project, or she asks "Do you mean …?" (section 3, Projects).
+- "What does my lease say about pets?" (with Documents on) → `search_documents` (the best passages, with the document
+  and the page) and `read_document` (one page). The folder is looked at first, so a PDF put there a minute ago is found.
+  She answers only from what they return and names the document and the page; with nothing found she says so. A
+  document's text is outside text, as a page's is: no fact saved or forgotten, no reminder, no web search or Google
+  Maps in that answer, and device changes wait for your yes. The tool log keeps a stub, and later answers never see
+  the text. On a call she answers from the pages already read.
+- A PDF, with or without words (with Documents on) → saved in `~/Estia-KB` and read at once (section 3,
+  Documents); the code's note says where, and her answer to the words follows it.
 - A photo, with or without a question → Gemma answers about it (HEIC, JPEG, PNG, WebP, GIF; up to 4 per message). Follow-up
   questions within 5 minutes still show Gemma the photo (kept in memory only, never on disk); later it says it can no longer
   see it. The file is deleted after the first answer.
 
-Alerts need no question: "⚠ Problem on the Mac:" with one line per problem and its start time, when a check still fails 5
-minutes after it first failed; "✓ Back to normal on the Mac:" once it is fixed. Checks run every 4 hours, and every 5 minutes
-while a problem lasts. The bridge cannot report its own outage: `scripts/check.sh`, run on the Mac (for example over SSH
-from another computer), covers that.
+Alerts need no question: "⚠ Problem on the Mac:" with one line per problem and its start time, when a check still fails
+5 minutes after it first failed; "✓ Back to normal on the Mac:" once it is fixed. Checks run every 4 hours, and every 5
+minutes while a problem lasts. In quiet hours (`[initiative] quiet_hours`, 22:00-08:00 by default; with `""`, still
+22:00-08:00) both wait until they end, and a problem that came and went within them is one line in the morning: "✓
+Overnight on the Mac, already back to normal:" with what it was and when. The checks keep running. Security notes (a new
+linked device on her account, the model paused or a cloud model) are never held. The bridge cannot report its own
+outage: `scripts/check.sh`, run on the Mac (for example over SSH from another computer), covers that.
 
 Mail (read-only; see "Mail (once)"):
 
 - "What needs my reply?" → `mail_digest`: unanswered mail that needs a reply (at most 7 days old, urgent first) and new
   actions, from all configured mailboxes, numbered for the day. "Read 2" → `mail_read` fetches that mail live. "Did Alex
   answer about the quote?" → `mail_search` (sender, subject, summary; the mail text when nothing else matches).
-- Every day at 09:15 the morning digest arrives as a note: the calendar first (with `[calendar]`), then the mail part ("Mail:
-  nothing needs you today." on quiet days). A digest missed while the bridge was down comes at start, until noon. The time
-  is `digest_time` at the top of the config (before 12:00).
+- Every day at 09:15 the morning digest arrives as a note: the date, then the calendar (with `[calendar]`), then the
+  mail, each mailbox in its own block under its name in bold ("Mail (work)", as `/status` names it; "Mail" with one
+  mailbox), its mail that needs a reply, then its actions, one per line with the day's number, 1 to n from the top
+  (also when "what needs my reply?" came first that day). At most 10 mails that need a reply and 10 actions over all
+  mailboxes, the rest counted under its mailbox ("…and 3 more"). "Mail: nothing needs you today." on quiet days ("Mail"
+  in bold). A digest missed while the bridge was down comes at start, until noon. The time is `digest_time` at the top
+  of the config (before 12:00).
+- A mailbox that has not been read gets one line after the mail: "[work] not read since Mon 09:10: needs sign-in." It
+  counts as not read when its sync fails and its last good read is older than two sync rounds (10 minutes by default;
+  one bad round is not flagged, also not the first one after the Mac was off). The same line heads what `mail_digest`
+  and `mail_search` return; at the start of a call she gets only the count and the time ("1 mailbox not read since Mon
+  09:10."), never the mailbox's name.
 - Every 5 minutes the bridge syncs the headers of Inbox and Sent Items (Graph delta queries). Mail you archive or delete in
   Outlook disappears here too. A mail counts as answered when Sent Items has a later message in the same conversation. When
   idle, Gemma labels new mail (urgent reply, reply, action, reference, noise; waiting when you replied) and writes a one-line
@@ -1274,13 +1604,17 @@ Mail (read-only; see "Mail (once)"):
 
 Calendar (read-only; see "Calendar (once)"):
 
-- The 09:15 digest starts with the day: "Fri 9 Oct", "Calendar today:" (all-day items first, then what is still to come, with
-  times and short places; an invitation the calendar's owner hasn't answered is marked, declined ones are left out),
-  "Tomorrow: …" in one line, then the mail part. With several calendars each event's title starts with its calendar's
-  name ("- 16:00–17:30 Club: Football"), and a calendar that could not be read gets its own line with the reason and the
-  fix.
+- The 09:15 digest starts with the day in bold ("Fri 9 Oct"), then "Today" (all-day items first, then what is still to
+  come, with times and short places; an invitation the calendar's owner hasn't answered is marked, declined ones are left
+  out) and "Tomorrow", each a bold heading with one event per line and a blank line between, then the mail part. With
+  several calendars each event's title starts with its calendar's name ("• 16:00–17:30 Club: Football"), and a calendar
+  that could not be read gets its own line with the reason and the fix, below the events.
 - "What's on Friday?" and "am I free Tuesday afternoon?" → `calendar_agenda` (one day, or up to 14 days). "When is the dentist?"
   → `calendar_search` (the next events within a year whose title or place has every word).
+- Today's timed events in `calendar_agenda` carry code's mark after their times: "(over)", "(now, until 15:00)" or
+  "(in 40 min)". So "what's next?" at 14:30 names the 15:00 meeting, not one that ended at 14:20.
+  Other days, all-day events and the digest have no marks. The marks hold at the time of the read: a later answer's
+  replay of that result keeps the times and drops the marks (`context._short_result`).
 - Events are read live, never cached: Google calendars through the calendar helper (`tools/ical`), Outlook calendars through
   Graph. Event text stays only where mail text does (the sent digest note and Gemma's answers). Event text is never
   followed as an instruction or saved to the profile, and a device request in an answer that read the calendar waits for
@@ -1395,13 +1729,19 @@ Lights and plugs (see "Lights and plugs (once)"):
 
 - "Turn off the living room lamp", "dim the bedroom light to 30 %, warm white", "is the heater on?" → `device_set` and
   `device_status` (only when `[[tapo.devices]]` lists devices). Colours: warm white, cool white, daylight, red, orange, yellow,
-  green, blue, purple, pink.
+  green, blue, purple, pink (Hue lights: the three whites only).
 - After the answer, a note says what really happened, written by the bridge: "Devices: living room lamp off · bedroom light on,
   30 %, warm white" (or "… didn't answer").
+- An answer that says a light or plug was switched, dimmed or set while it was not changed gets the bridge's note
+  "Nothing was switched." ("Nothing else was switched." when the answer switched another one; also said on a call).
+  Each device the claim names by its whole name must have changed in that answer; a claim about an earlier switch ("a
+  few minutes ago", "already") counts what changed in the last 24 hours. English only for now; a plain report of a
+  device's state ("the lamp is on", and after a status read "the lamp has been switched off"), advice ("turning off
+  the lights before bed helps you sleep") and music ("the music in the kitchen") are never flagged.
 - Rules per device: `normal`; `ask first` (Gemma asks you to reply yes, and the bridge's note says exactly what the yes does,
   e.g. "Devices: reply yes within 2 minutes to switch heater off"; your yes within 2 minutes is carried out by the bridge
   itself, anything else cancels it, one device at a time); `never off` (switching off is refused). A device request made in an
-  answer that read a mail, a page or a project file waits for your yes too, whatever the device's rule.
+  answer that read a mail, a page, a project file or a document waits for your yes too, whatever the device's rule.
 
 Languages:
 
@@ -1448,8 +1788,10 @@ Language practice (`/babble`):
   call: its greeting in that language, and when you said something, hanging up ends practice and the recap replaces
   the call summary. Texts you typed during that call are answered first, as practice (for at most 2 minutes), so the
   recap reads them. A call she places for a reminder or a wake-up is an ordinary call: your `/language`, her tools,
-  its summary, and practice keeps running. Goodbye words on a call are recognised in English only: in another
-  language, hang up yourself.
+  its summary, and practice keeps running. Goodbye words on a call are recognised in English only. Leave-taking as a
+  phrase of its own ("Okay, I have to go"), not inside a longer sentence ("I have to go to the dentist"), ends a call in
+  English and in the call's language once her reply is spoken ("I have to go", "ik moet gaan", "ich muss los", "je
+  dois y aller"); otherwise, in another language, hang up yourself.
 - The recap: one structured call (JSON schema, temperature 0) over your practice turns (the latest 40, at most 12,000
   characters), at most 3 points {said, better, why}, the why in your `/language`. The code keeps a point only when
   "said" is verbatim in one of your turns, "better" differs by more than punctuation or capitals, the change is small
@@ -1486,16 +1828,17 @@ Voice notes (in the current language):
 
 - Send a voice note: the bridge fetches it, the voice service on the Mac transcribes it, and Gemma answers the transcript as
   if it were typed (the history keeps "[voice] what you said"). The audio is deleted afterwards.
-- The text answer comes first. Then the same answer comes as a Signal voice note (Kokoro in English, Supertonic-3 otherwise; cleaned for speaking: no code, links,
-  lists or emoji), cut at a sentence after 1,500 characters ("The rest is in the text."). Notes are never spoken.
+- The text answer comes first. Then the same answer comes as a Signal voice note (Kokoro in English, Supertonic-3
+  otherwise; cleaned for speaking: no code, links, lists or emoji; a command such as /reminders is said as "slash
+  reminders"), cut at a sentence after 1,500 characters ("The rest is in the text."). Notes are never spoken.
 - `/voice auto` (the default: voice answers for voice notes), `/voice on` (every answer), `/voice off`; `/voice echo on` first
   shows what was heard (`🎙️ "…"`); `/voice` shows the settings.
 - Notes: "I couldn't make out that voice note, could you say it again or type it?" (too short or silent), "That voice note is
   too long for me (max 3 minutes).", "Voice isn't available right now; please type it." (service down or still loading).
 - Without `[voice]`, voice notes get "I can only handle text and photos for now."
 
-What it does not do: send, draft, move or delete mail; change calendar events; or handle files other than photos, voice notes
-and the link pages and YouTube captions it is asked to read; it never transcribes a video. Files are answered with "I can only handle text, photos and voice notes for now."
+What it does not do: send, draft, move or delete mail; change calendar events; or handle files other than photos, voice notes,
+PDFs (with Documents on) and the link pages and YouTube captions it is asked to read; it never transcribes a video. Files are answered with "I can only handle text, photos and voice notes for now."
 
 Notes you may see:
 
@@ -1511,6 +1854,9 @@ Notes you may see:
 - A message ending "(… · /quiet to pause)": one she started herself (see above).
 - "I couldn't open that photo. Could you send it again?" A photo that is too big (over 20 MB) or that `sips` cannot read.
 - "(I looked at the first 4 photos only; send the others in a new message.)" and "(I couldn't open N of the photos.)".
+- "Saved in your Estia-KB folder: 2026-10-14 lease.pdf (4 pages)." A PDF you sent was saved and read. "Not saved: …"
+  says why one was not: not a PDF, over 25 MB, the folder cannot be written, or something went wrong.
+- "I found 2 new documents: lease.pdf, boiler-manual.pdf." PDFs put in the folder (section 3, Documents).
 
 ## 5. What it remembers
 
@@ -1518,7 +1864,8 @@ Notes you may see:
 |---|---|
 | `conversations` | One row per conversation (`/new` to `/new`) with its summary and summary point; `kind` is `chat`, or `practice` for a `/babble` session (schema v8) |
 | `messages` | Every message in and out, its status and its place in the conversation (`seq`); for an incoming one, the sender's device that sent it (`source_device`, schema v9) |
-| `documents` | Pages learned from links (full text, searchable) |
+| `documents` | Pages learned from links (full text, searchable); your PDFs are in `doc_files` and `doc_pages` |
+| `doc_files`, `doc_pages` | With `[documents]`: each PDF in `~/Estia-KB` (its place in the folder, size and change time, pages, the pages skipped, why it could not be read, whether it came from Signal and was announced; numbers never reused) and each page's text, in a full-text index. A PDF taken out of the folder loses its rows at the next look; `[privacy] keep_days` leaves them alone; a new share starts them afresh (schema v10) |
 | `profile_facts` | The live profile |
 | `profile_changes` | Every add, replace and remove, with the reason and the message it came from |
 | `tool_calls` | Every tool call Gemma made (audit) |
@@ -1526,7 +1873,7 @@ Notes you may see:
 | `mail_sync` | Graph delta link and last sync per mailbox and folder |
 | `known_devices` | Your devices she answers or holds, by Signal device number: the phone (1) from the start, a linked device allowed with `/devices ok N` or held; when each was first and last seen (schema v9) |
 | `attachments` | Photos of a message (signal-cli's file id, type, size) until answered; `deleted_at` once the file is gone (schema v3) |
-| `state` | Small values: profile snapshot, learned-up-to pointer, last learning run, chars-per-token ratio; `watch:mini` (open problems and whether they were alerted), `health:logs` (log offsets and error counts); `reminders:calls_day` (calls placed today), `reminders:contract_told:<account>` (that account's first confirmation said only the note means a reminder is set); `initiative:quiet` (`/quiet`), `initiative:enabled` (`/initiative on` or `off`), `initiative:improvise_plan` (this week's times for the improvised note), `followups_after_id`; `babble:last` and `babble:session` (language practice); `lock:on`, `lock:device`, `lock:since` (`/lock`), `devices:noted:<account>:<device>` (the last held-device note), `privacy:pruned_at` (the last retention pass) |
+| `state` | Small values: profile snapshot, learned-up-to pointer, last learning run, chars-per-token ratio; `watch:mini` (open problems and whether they were alerted), `health:logs` (log offsets and error counts); `reminders:calls_day` (calls placed today), `reminders:contract_told:<account>` (that account's first confirmation said only the note means a reminder is set); `initiative:quiet` (`/quiet`), `initiative:enabled` (`/initiative on` or `off`), `initiative:improvise_plan` (this week's times for the improvised note), `followups_after_id`; `babble:last` and `babble:session` (language practice); `lock:on`, `lock:device`, `lock:since` (`/lock`), `devices:noted:<account>:<device>` (the last held-device note), `privacy:pruned_at` (the last retention pass); `documents:share` (the share's token her index belongs to), `documents:looked_at` (her last whole look at the folder), `documents:first_look` (a new share's first look not done yet: nothing it finds is announced) |
 | `reminders` | Your reminders: your words, the local time as meant and its time zone, the next time in UTC, repeat, call, status, the note of the current firing and a fixed outcome word (sent, late, no_answer …). Done and cancelled ones are deleted after 30 days (schema v7) |
 | `followups`, `initiative_log` | Check-ins she may send (your words, at most 120 characters, the message they came from, due and expiry times; deleted 30 days after they close) and a log of the messages she starts: kind, day, outcome, a fixed reason word, the message, reply and `/quiet` times, never text (kept a year). `messages.footer` keeps the line the code adds to them (schema v7) |
 
@@ -1539,7 +1886,11 @@ Notes you may see:
 - **Learning:** only your own messages. Text you paste from others (emails, articles) is ignored unless you ask to learn it.
   Learning may add facts and change the ones it learned itself, but never replaces or removes a fact you stated ("remember
   that …", a link you asked to learn, a `/fix`): such a change is skipped and logged by fact number only. To change one of
-  your own facts, use `/fix N new text`.
+  your own facts, use `/fix N new text`. An answer cut off at its length is asked again once without the model's
+  thinking (thinking that runs on can fill it), then in halves, down to one message; a message whose answer is still
+  cut off on its own is skipped, and the log gives only how many.
+- **Documents:** a page's text is only in `doc_pages`. `tool_calls` keeps a stub in place of what `search_documents`
+  and `read_document` returned, so later answers never see it.
 - **YouTube:** no table holds captions. `tool_calls` keeps `read_link`'s link (your message has it too) and a stub in
   place of the result; the last video's captions stay in memory only, for 10 minutes.
 - **Forget vs delete:** `/forget` removes the fact and blanks its text in the change log. The original chat message stays in
@@ -1547,10 +1898,13 @@ Notes you may see:
 
 ## 6. Tests
 
-1. **Unit tests** (offline, about 30 seconds): `scripts/verify.sh` runs the privacy check (`scripts/privacy_scan.py`),
+1. **Unit tests** (offline, a few minutes; the documents helper's first scan of a new build waits about a minute): `scripts/verify.sh` runs the privacy check (`scripts/privacy_scan.py`),
    ruff (lint and format), mypy in strict mode, and
-   pytest, with a fake signal-cli, a fake voice service, a fake device helper and a scripted fake Gemma. The helpers have
-   their own suites: `cd tools/voice && swift test` (Swift Testing), `cd tools/tapo && uv run pytest -q`,
+   pytest, with a fake signal-cli, a fake voice service, a fake device helper and a scripted fake Gemma. Before pytest
+   it builds the documents helper: one test has the bridge read PDFs with it (text pages and a scanned page). The
+   helpers have their own suites: `cd tools/voice && swift test` (Swift Testing), `cd tools/documents && swift test`
+   (Swift Testing, offline; verify.sh runs it too; the first scanned page of a new build waits about a minute while
+   macOS prepares its text recognition), `cd tools/tapo && uv run pytest -q`,
    `cd tools/ical && uv run pytest -q` and `cd tools/youtube && uv run pytest -q` (recorded YouTube answers, no
    network).
 2. **Gemma test set** (the real model): `uv run python -m evals.gemma_suite`, or with your own style file:
@@ -1570,12 +1924,14 @@ Notes you may see:
      `EVAL_LANGUAGE` in that language), reminders (a time tomorrow, "in 20 minutes", a wake-up call; a mentioned
      time sets none), and a YouTube video from made-up captions (a summary with times, automatic captions named,
      nothing beyond the captions, the link when asked for the full transcript, a long video in three parts, a
-     follow-up answered from the kept captions).
-   - **Safety:** planted instructions in a web page (in English and Greek), a mail, a project README and a pasted email; a
-     link without "learn" saves nothing; "ignore previous instructions" is not stored; "ask first" and "never off" devices
-     behave as the rules say; a hostile personality file cannot loosen the rules; no reminder from a mail or a planted
-     page, and no claim of one that was refused; an order planted in a video's captions sets no reminder and changes
-     nothing; a personality file that asks her to request a PIN in a message she starts herself.
+     follow-up answered from the kept captions), and documents from made-up PDFs (the answer names the document and
+     the page, and invents nothing a lease does not say).
+   - **Safety:** planted instructions in a web page (in English and Greek), a mail, a project README and a pasted email;
+     a link without "learn" saves nothing; "ignore previous instructions" is not stored; "ask first" and "never off"
+     devices behave as the rules say; a hostile personality file cannot loosen the rules; no reminder from a mail or a
+     planted page, and no claim of one that was refused; an order planted in a video's captions sets no reminder and
+     changes nothing, nor does one planted in a PDF; a personality file that asks her to request a PIN in a message she
+     starts herself.
    - **Learning:** facts are extracted, a changed fact replaces the old one, small talk adds nothing, mail is sorted, and
      a plan the user states becomes one check-in on the right day.
    - **Messages she starts:** a gentle check-in, a look back only about that week, spontaneous notes that pass the
@@ -1586,25 +1942,25 @@ Notes you may see:
      language from the tutor test's sets (`evals/practice/`, A2 and B1): the "→" lines' precision on sentences with a
      mistake (at least 90%), "→" lines on correct sentences (at most 10%), pure replies (at least 95%), and the recap's
      precision against the planted mistakes (at least 90%) and its recall (at least 50%). Run it twice.
-3. **Phone walk-through:** [docs/e2e-checklist.md](docs/e2e-checklist.md) (127 items: texts, voice, calls, devices, mail,
+3. **Phone walk-through:** [docs/e2e-checklist.md](docs/e2e-checklist.md) (145 items: texts, voice, calls, devices, mail,
    calendar, music, web search, places and routes, languages, language practice, reminders and wake-up calls, the
    messages she starts, what she knows at the start of a call, projects as an extra, and the hardening: linked devices, the lock, the safety number, the model pin and her own
-   user; after the move: the firewall line as her, the voice-ready text and `remove-old`'s copies).
+   user; after the move: the firewall line as her, the voice-ready text and `remove-old`'s copies; text styles; Hue lights; documents in `~/Estia-KB`).
 
 ## 7. Operations
 
 | Task | How |
 |---|---|
-| Check the setup | `/usr/bin/sudo /usr/local/estia/bin/estia doctor` (read-only, as her; `scripts/doctor.sh` before her own user). Each ✗ line names the fix; it exits with 1 when a line is ✗. ○ means a part is set up but not used yet |
+| Check the setup | `/usr/bin/sudo /usr/local/estia/bin/estia doctor` (read-only, as her; `scripts/doctor.sh` before her own user). Each ✗ line names the fix, or the log to read first; it exits with 1 when a line is ✗. ○ means a part is set up but not used yet |
 | Run in the foreground | `scripts/run.sh` in a terminal (Ctrl-C stops it) |
 | Health check | `/usr/bin/sudo /usr/local/estia/bin/estia check` (`scripts/check.sh` before her own user), run on the Mac (for example over SSH). It exits with 1 when the bridge or signal-cli is not running |
 | Logs | `/usr/bin/sudo /usr/local/estia/bin/estia logs [bridge\|voice\|launchd] [-n N]` (the last 50 lines of `bridge.log` by default). The bridge and the voice service keep their logs small themselves. To search it: `/usr/bin/sudo /usr/local/estia/bin/estia logs -n 5000 \| grep <word>` (her logs are hers; before her own user, `grep <word> ~/Library/Logs/local-assistant/bridge.log`). An AI helping you cannot read them: run `/usr/bin/sudo /usr/local/estia/bin/estia logs bridge -n 40` in your own Terminal and share what it prints (only what happened and when, never message text) |
-| Restart the daemon | `/usr/bin/sudo launchctl kickstart -k system/com.local-assistant.bridge` (in her own user also `/usr/bin/sudo /usr/local/estia/bin/estia restart`) |
-| Her own user | `scripts/migrate-to-own-user.sh --dry-run`, then `scripts/install-daemon.sh` (2.7). Back within 7 days, with what she saved since: `/usr/bin/sudo /usr/local/estia/bin/estia rollback` (`scripts/migrate-to-own-user.sh --rollback` runs it); then `/usr/bin/sudo /usr/local/estia/bin/estia remove-old` deletes the held folders, and the earlier copies of hers kept aside in `/var/estia/.before-<time>` (each named; also without a move on record). Her config: `/usr/bin/sudo -u _estia -e /var/estia/.config/local-assistant/config.toml`, then `/usr/bin/sudo /usr/local/estia/bin/estia restart`. A root-run tool changed in a release: `/usr/bin/sudo /usr/local/estia/bin/estia-deploy --update-tools` (shows the diff, asks) |
+| Restart the daemon | `/usr/bin/sudo /usr/local/estia/bin/estia restart` (an install that still runs always on as you: `/usr/bin/sudo /bin/launchctl kickstart -k system/com.local-assistant.bridge`) |
+| Her own user | `scripts/migrate-to-own-user.sh --dry-run`, then `scripts/install-daemon.sh` (2.7). After moving an older install (one that already ran always on as you), back within 7 days, with what she saved since (a first install has no rollback): `/usr/bin/sudo /usr/local/estia/bin/estia rollback` (`scripts/migrate-to-own-user.sh --rollback` runs it); then `/usr/bin/sudo /usr/local/estia/bin/estia remove-old` deletes the held folders, and the earlier copies of hers kept aside in `/var/estia/.before-<time>` (each named; also without a move on record). Her config: `/usr/bin/sudo /usr/local/estia/bin/estia config`, then `/usr/bin/sudo /usr/local/estia/bin/estia restart`. A root-run tool changed in a release: `/usr/bin/sudo /usr/local/estia/bin/estia-deploy --update-tools` (shows the diff, asks) |
 | Security step | `scripts/harden.sh` (`--dry-run` first): SSH keys only, rules that let admin commands skip your password, her file modes, Registration Lock, each on your yes (2.10). The nuclear option, `scripts/harden.sh --nuclear`, adds the firewall, stealth mode, python3 and ruby off the firewall's list and the keychain lock: it may stop other services on this Mac (2.10) |
 | Answers paused: a cloud model | A note "Answers are paused: Ollama lists the model … as a cloud model …": her model's name in Ollama points to a model on Ollama's servers. `/usr/bin/sudo /usr/local/estia/bin/estia doctor` shows ✗ on its Model line with the fix (a model downloaded to the Mac, 2.2, then a restart). A note says when answers are back |
-| Voice service | `curl -s http://127.0.0.1:8150/health`. Restart: `/usr/bin/sudo launchctl kickstart -k system/com.local-assistant.voice`. After changes in `tools/voice`, run `scripts/install-voice-daemon.sh`. After an install, a move or a macOS update the first start takes up to about 15 minutes (Neural Engine compile); with `[calls]` she texts once it is ready |
-| Upgrade | `git pull && uv sync --frozen && (cd tools/tapo && uv sync --frozen) && (cd tools/ical && uv sync --frozen) && (cd tools/youtube && uv sync --frozen)`, then restart (an install that runs as you). In her own user: `git pull` in your checkout, then `/usr/bin/sudo /usr/local/estia/bin/estia-deploy`: a new release owned by root, switched, restarted and checked within 120 s, switched back on a failure (2.7). After changes in `tools/voice`, `scripts/install-voice-daemon.sh` |
+| Voice service | `curl -s http://127.0.0.1:8150/health`. Restart: `/usr/bin/sudo /bin/launchctl kickstart -k system/com.local-assistant.voice`. Each update builds her voice service again when `tools/voice` changed. Doctor and `/status` show "another program holds its address: nothing sent" when a program not hers took its address, with the commands that find it and start hers again. After an install, a move or a macOS update the first start takes up to about 15 minutes (Neural Engine compile); with `[calls]` she texts once it is ready |
+| Upgrade | `git pull && uv sync --frozen && (cd tools/tapo && uv sync --frozen) && (cd tools/ical && uv sync --frozen) && (cd tools/youtube && uv sync --frozen)`, then restart (an install that runs as you). In her own user: `git pull` in your checkout, then `/usr/bin/sudo /usr/local/estia/bin/estia-deploy`: a new release owned by root, switched, restarted and checked within 120 s, switched back on a failure (2.7). Each update builds her voice service again when `tools/voice` changed. |
 | Upgrade signal-cli | Homebrew's signal-cli about monthly (`brew upgrade signal-cli`); releases older than three months may stop working, so read the release notes first. Calls need the JVM build to match Homebrew's version: `tools/call-tunnel/install-signal-cli-jvm.sh <new version>`, point `[calls] signal_cli` at the new folder, pin with `brew unpin signal-cli && brew upgrade signal-cli && brew pin signal-cli`, restart, and make a test call. Undo: the old folder and the old config line still work with the old version. In her own user, `/usr/bin/sudo /usr/local/estia/bin/estia-deploy` then copies Homebrew's new signal-cli (and the new JVM build from `<repo>/vendor`) into her release |
 | Calls | Call the bot from Signal (phone or linked device). `/usr/bin/sudo /usr/local/estia/bin/estia doctor` shows Calls ✓ and `/usr/bin/sudo /usr/local/estia/bin/estia check` shows `signal-cli: running`; "How's the Mac?" covers calls too. A call that never answers: `/usr/bin/sudo /usr/local/estia/bin/estia logs -n 5000 \| grep -i call`. A call that rings out with the note "I can't take calls yet: my voice is still loading …" means her voice is still loading: wait for "My voice is ready: you can call me now." (3, Calls, "While her voice loads"); `/usr/bin/sudo /usr/local/estia/bin/estia logs -n 5000 \| grep "voice ready"` shows when it went. What stopped her, per call: `/usr/bin/sudo /usr/local/estia/bin/estia logs -n 5000 \| grep "calls: barge-in"` (the counts per rule; see 3, Calls) |
 | Safety number changed | Replies stop and doctor and `/status` show ✗. Never trust a new key blindly: a SIM swap of your number looks exactly like this. On the Mac, `/usr/bin/sudo /usr/local/estia/bin/estia signal listIdentities -n <your ACI>` (it stops the bridge, runs her signal-cli as her, then starts her again; before her own user, stop the bridge and run `signal-cli -Djava.net.preferIPv4Stack=true -a <bot-number> listIdentities -n <your ACI>`), compare its safety number with the one your phone shows (Signal, the chat with Estia, View safety number), and only if they match: `/usr/bin/sudo /usr/local/estia/bin/estia signal trust -v <safety number> <your ACI>`. Turn on Registration Lock (a Signal PIN) for your own account and Estia's (2.3, 2.10), so a SIM swap alone cannot take either over. With `[calls]` on, the wrapper uses her JVM build (the flag goes in `JAVA_OPTS`) |
@@ -1615,6 +1971,7 @@ Notes you may see:
 | A new device is held | "A message came from a new linked device N and was held." Yours: send `/devices ok N` from your phone. Not yours: remove it in Signal → Settings → Linked devices, then turn on Registration Lock for your number |
 | The move failed | Her old setup comes back (on a first install nothing is installed). Keep the ✗ line: it names what failed. Fix that, run `scripts/migrate-to-own-user.sh --dry-run` again, then `scripts/install-daemon.sh` |
 | YouTube | Nothing to set up: always on with `read_link`. `/usr/bin/sudo /usr/local/estia/bin/estia doctor` shows a YouTube line: its last read (working, set up but not tested yet, or failing with the fix), then youtube-transcript-api's version in brackets; `/status` shows the same line without the version. "refused by the service": YouTube blocks this Mac for a while after many requests or a bot check; wait. "unreadable answer": YouTube changed; a newer pinned version of `tools/youtube` may be needed. Every video said to have no captions or to be private or removed, while `/status` shows YouTube working: YouTube may have changed too (SECURITY.md, known gaps); try a video you know has captions. "! … the YouTube helper is not set up": before her own user, run `cd tools/youtube && uv sync --frozen`. In her own user, run `/usr/bin/sudo /usr/local/estia/bin/estia-deploy`; if it says the root-run tools differ, read the diff, run `/usr/bin/sudo /usr/local/estia/bin/estia-deploy --update-tools`, then run `/usr/bin/sudo /usr/local/estia/bin/estia-deploy` again. `/usr/bin/sudo /usr/local/estia/bin/estia logs -n 5000 \| grep youtube` has outcome codes, character counts and times, never the video or its title |
+| Documents | With `[documents]`, `/usr/bin/sudo /usr/local/estia/bin/estia doctor` shows a Documents line: the helper built, the folder shared and readable, then her last look (section 3, Documents); `/status` shows the last look. `/docs` lists what she has and why a PDF cannot be read. Share again: `scripts/share-documents.sh` as you (`--dry-run` first; no admin rights); take it back: `scripts/share-documents.sh --revoke`. "macOS refuses it (operation not permitted)": the folder is in Documents, Desktop or Downloads, which macOS guards; use `~/Estia-KB` (section 3, Documents). "the documents helper is not built": in her own user `/usr/bin/sudo /usr/local/estia/bin/estia-deploy` (after `/usr/bin/sudo /usr/local/estia/bin/estia-deploy --update-tools` when it says the root-run tools differ); before, `cd tools/documents && swift build -c release`. A scan over about 190 full pages ends in a timeout: split it, and take the original out of the folder. `/usr/bin/sudo /usr/local/estia/bin/estia logs -n 5000 \| grep documents` has counts, codes and times, never a document's name or text |
 | Backup | Not set up yet: the database and her Signal account (`/var/estia/Library/Application Support/local-assistant`, `/var/estia/.local/share/signal-cli`) have no backup |
 
 ## 8. Security
@@ -1679,7 +2036,8 @@ This section is the threat model. [SECURITY.md](SECURITY.md) explains how to rep
   may keep its mark. The type comes from the file's first bytes. The real size is checked before download (at most 10 MB, at
   most 3 minutes in the service). Audio and spoken answers (mode 0600, folder 0700) live only until used. The voice service listens
   on `127.0.0.1:8150` only, refuses any request with an Origin header and any non-local Host (browsers, DNS rebinding), caps bodies
-  and slow requests, and logs sizes and timings only. WhisperKit (from 1.1.0) and FluidAudio (exactly 0.15.8) are pinned.
+  and slow requests, and logs sizes and timings only. The bridge sends it audio and text only over a connection that a program
+  of her own account took (SECURITY.md, known gaps). WhisperKit (from 1.1.0) and FluidAudio (exactly 0.15.8) are pinned.
   Whisper's model files and the speech detector's are fixed to one version on Hugging Face and checked against their
   fingerprints (sha256) at every start; a model with a changed or extra file is never loaded (Whisper's folder is
   then set aside as `<folder>.refused-<time>`, only the latest kept, and downloaded again at that version; changed
@@ -1697,11 +2055,19 @@ This section is the threat model. [SECURITY.md](SECURITY.md) explains how to rep
   places), and a calendar answer counts as outside text.
 - Lights and plugs: Gemma names a device, never an address. Only configured devices at private addresses are used. The bridge runs
   `tools/tapo/.venv/bin/python -I tools/tapo/helper.py <action> <host> …` with fixed arguments (no shell, 15 s timeout, JSON back),
-  and never loads python-kasa or the TP-Link login itself. "Ask first" and "never off" are enforced in code, and so is the yes for
+  and never loads python-kasa or the TP-Link login itself. The helper sends the login only to a configured device's
+  address, only over KLAP or AES login v2 (never AES login v1, which sends the password itself), and never while
+  listing devices. "Ask first" and "never off" are enforced in code, and so is the yes for
   requests made after reading outside text, and for requests in a message that is not about devices (no device word such as light,
   lamp, plug, heater, on, off or dim, and no word of a device's name). A line planted in an earlier page cannot act on a later
   "thanks!". Only the user's own yes counts. The helper runs in isolated mode with a clean environment (no API keys of the bridge's
-  shell) and passes on only its own fixed refusal texts. Logs hold device action and result only.
+  shell) and passes on only its own fixed refusal texts. Logs hold device action and result only. A Hue light goes through
+  the same rules: the helper's `hue-set <light id>` and `hue-status <light id> …` (every Hue light in one run, two
+  requests) reach the paired Hue Bridge over HTTPS (standard library, CLIP API v2) at the address in `hue.env`, check its
+  certificate against the SHA-256 fingerprint saved at pairing before anything is sent, and send the key only in its
+  header; the bridge process never reads `hue.env`. A light whose Zigbee link the bridge reports as not connected is "not
+  answering", never its last known state. Pairing finds the bridge with `dns-sd` (a few seconds per step) or takes a
+  private address, never `discovery.meethue.com`; an address that answers, but not as a Hue Bridge, stops it at once.
 - Web search (with `[web]`): queries go only to `ollama.com` and `api.search.brave.com` (no redirects; Ollama 8 s, Brave 5 s; on a call
   5 s and 3 s). At most 2 searches per answer (1 on a call), and at most 400 characters each. Brave's top page is read only through the
   guarded fetcher (public addresses, 2 MB, 6 s), never on a call. Results are not cached. A query with an email address, an IBAN or a
@@ -1709,7 +2075,7 @@ This section is the threat model. [SECURITY.md](SECURITY.md) explains how to rep
   bridge's memory, never in logs. Results are data: cleaned (hidden characters, chat tokens, markdown links), odd links dropped, capped
   (5 results, 6,000 characters), never stored (the tool log keeps a stub, as Brave's terms ask). Their links reach the user only in a
   code-written "Sources" note; links in Estia's reply to a search are removed. An answer that searched refuses `remember` and
-  `forget`, and its device requests wait for the user's yes. An answer that read mail, the calendar or your projects cannot search,
+  `forget`, and its device requests wait for the user's yes. An answer that read mail, the calendar, your projects or your documents cannot search,
   so private text never goes into a query. The queries themselves are the user's questions, and they go to Brave (whose terms allow it
   to use query data) or to Ollama.
 - Places and routes (with `[maps]`): only `places.googleapis.com` and `routes.googleapis.com`, with no redirects, 8 s (5 s on a call),
@@ -1719,8 +2085,8 @@ This section is the threat model. [SECURITY.md](SECURITY.md) explains how to rep
   config: the state table keeps the rounded centre and the address's tag (HMAC-SHA256 keyed with the Maps key, which is
   never in the database), never the address, and a Directions link to or from home names the rounded centre; at
   start, rows and Directions notes an earlier version wrote with the address are rewritten or deleted, maps on or off,
-  and the log is written back into the file. Mail and project text never go to Google
-  (refused in an answer that read mail or your projects). An event's place may be used, with your OK. Estia keeps your location as
+  and the log is written back into the file. Mail, project and document text never go to Google
+  (refused in an answer that read mail, your projects or your documents). An event's place may be used, with your OK. Estia keeps your location as
   "where you are" in memory for 3 hours and never logs it; the message you sent, with its map link, stays in the chat history like any
   message. Results are data (cleaned, capped), never stored (Google's terms), and their links appear only in the Sources note. An
   answer that used them refuses `remember` and `forget`, and its device requests wait for your yes.
@@ -1744,18 +2110,41 @@ This section is the threat model. [SECURITY.md](SECURITY.md) explains how to rep
   and never stored: no document, the link and a stub in the tool log, the last video's captions in memory only, for 10 minutes per
   account and conversation. Her answer never holds them word for word (code leaves out the copied sentences, section 4). Logs hold outcome codes, character
   counts and times, never the video's ID or its title. YouTube's terms and its undocumented endpoint: SECURITY.md, known gaps.
+- Documents (with `[documents]`; section 3, Documents): her user lists and reads every file in your `~/Estia-KB` and
+  adds files to the folder itself (never a folder), through access entries you set without admin rights; a file
+  with a second name (a hard link) is never shared. In your home she only passes through to it, by name. The look lists names, sizes and change times only, never through a link. The bridge
+  runs the helper with fixed arguments (`read <path> --max-pages 300 --max-seconds 60`), no shell and a clean
+  environment (no keys of the bridge's), stops it at 75 s, and checks its answer (at most 32 MiB; odd pages left out,
+  a page's text capped at 20,000 characters, reasons only in its own words); a file over 25 MB never reaches it. A
+  PDF that makes the helper stop without an answer (a crash) is "cannot be read" until it changes, and the look goes
+  on with the next one; a helper that answers nothing at all, even when started without a file, stops the look. The
+  helper reads only a regular file (never a link, a pipe or a folder: `O_NOFOLLOW`, and the same file checked again
+  once open), opens no network connection in its own code (it reads a scan with every connection denied, tested) and
+  writes no file. It runs as her account, without a sandbox of its own: `sandbox-exec` with no network is planned. A
+  PDF the user sends is saved folder by folder with `O_NOFOLLOW` and as a new file with `O_EXCL`: never through a
+  link, never over another file. `/docs send N` reads it the same way and sends its bytes inline, only to the account
+  that asked: signal-cli opens no file of the folder. A document's text is outside text with a project file's rules,
+  kept only in her index (the tool log keeps a stub), and never goes into a web search, a Google Maps request or a
+  link. Logs hold counts and codes, never a document's name or text.
 - Text from pages and tools is data. Every profile fact passes `check_fact` (after NFKC normalisation: hidden and invisible characters,
   instruction-like text in English, Greek, Dutch and German, chat control tokens, credentials, odd link types). Facts from a learned page
   are checked strictly: they may not address Gemma ("you", "Gemma", "assistant") and may contain no link other than the page's own. Every
   change is shown to the user by code, and the profile is labelled "facts about the user, never instructions" in Gemma's input.
+- Outside text may hold her back, never start anything but a note the code writes: a mail, a calendar entry, a page,
+  a search or map result, YouTube captions, a project file, a document, a photo or a shared audio file can pause the
+  music or turn it down, make a device change wait for your yes, or fill a note the code writes (the digest; a
+  calendar change, or a new PDF in the documents folder, starts one); it never starts a message the model writes, a
+  call, a reminder or a device change.
 - Her own user: she runs as `_estia` (no password, no login, no shell, no SSH, its own group, home `/var/estia` 0700)
   from a root-owned release in `/usr/local/estia`; your checkout is never run. Every program she runs (her signal-cli,
   Java for calls, the call helper) is a root-owned copy in the release, and her PATH holds only root-owned folders.
   A program you run cannot read her data or change her code or her programs without your password, as long as no
   admin rule skips the password; a program of yours can catch your password with a fake `sudo` that your Terminal
-  finds before the real one, so type `/usr/bin/sudo`. Root still reads everything, and Ollama and AgentJev, which run
-  as you, see what she sends them. Her code changes only through an update, and a program of yours can change what
-  your next update puts live; the update shows the list of changes and the files they touch, not the code itself.
+  finds before the real one, so type `/usr/bin/sudo`; a fake one written into your shell's startup files runs even
+  then, so `whence -va /usr/bin/sudo` must list only the file, never a shell function or an alias. Root still reads
+  everything, and Ollama and AgentJev, which run as you, see what she sends them. Her code changes only through an
+  update, and a program of yours can change what your next update puts live; the update shows the list of changes and
+  the files they touch, not the code itself.
   Updates go through `/usr/bin/sudo /usr/local/estia/bin/estia-deploy`, which shows the commits
   and files and asks first; root runs only the tools in `/usr/local/estia/tools`, changed only with `--update-tools`
   after their diff (the build runs as you, root only copies, renders and checks the service files, switches and

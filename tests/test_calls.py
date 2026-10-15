@@ -12,23 +12,25 @@ import time
 import wave
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from local_assistant import prompts
-from local_assistant.call_audio import FRAME_BYTES, RATE, rms
+from local_assistant.call_audio import FRAME_BYTES, RATE, Barge, CallAudio, Said, rms
 from local_assistant.calls import (
+    MAX_FALSE_BARGE,
     CallManager,
     CallSettings,
     Turn,
-    ends_with_goodbye,
+    asks,
     is_own_voice,
     is_wrap_up,
     played_part,
+    says_goodbye,
     wants_hang_up,
 )
-from local_assistant.config import DEFAULT_NAME
+from local_assistant.config import DEFAULT_NAME, Config
 from local_assistant.voice import Transcript, VoiceUnavailableError
 from tests.conftest import ME, STRANGER
 from tests.fakes.fake_voice import speech_probability
@@ -319,6 +321,7 @@ class Harness:
             "fillers": True,  # the tests about thinking lines; off in the real default
             "greetings": (GREETING,),  # one known greeting (the real default varies)
             "acknowledge": False,  # the tests about the short "okay" turn it on; on in the real default
+            "barge": "loudness",  # any sound: the tests about speech say so ("only speech" is the real default)
         }
         options.update(settings)
         self.manager = CallManager(
@@ -396,6 +399,19 @@ async def test_after_a_longer_call_the_user_gets_a_summary() -> None:
         lines, minutes = h.host.summaries[0]
         assert lines == ["User: first idea", "Estia: Nice.", "User: second idea", "Estia: Good one."]
         assert minutes >= 1
+
+
+async def test_a_call_never_speaks_markup() -> None:
+    """Her answer's markup (kept as written in the history) is read the way the text shows it: no asterisk, no
+    struck word, no style range: a call has no text."""
+    answer = "**Two** meetings: the *dentist*, then ~~Bob~~ Anna."
+    async with Harness(["what's on tomorrow"], [Turn(answer, reply_id=7)]) as h:
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(1.0))
+        await h.quiet_after("Two meetings: the dentist, then Anna.")
+        assert not any(mark in said for said in h.voice.spoken for mark in "*~")
+        h.signal.remote_hangup()
 
 
 async def test_a_strangers_call_is_never_answered() -> None:
@@ -935,10 +951,60 @@ def test_what_counts_as_wrapping_up(said: str, wraps_up: bool) -> None:
         ("I said bye, then we left.", False),
         ("Take care of the plants, please.", False),
         ("okay bye bye", False),  # a plain goodbye alone: code says bye without Gemma (is_goodbye)
+        # live 14 Oct 12:04: "ok goodbye" and maybe more, to close the call, kept it open; a goodbye followed only by
+        # closing talk counts (she answers the rest, then hangs up)
+        ("ok goodbye, I'm going to check the log now", True),
+        ("Okay, good bye.", True),
+        ("Bye, talk later.", True),
+        ("Good-bye! I'm off to make dinner.", True),
+        ("Bye. Remind me at five to call the dentist.", True),  # a request, no question: answered, then the end
+        ("Okay, goodbye. Actually, what's on tomorrow?", False),
+        ("Bye, but first the weather", False),
+        ("Goodbye. Hold on, one more thing.", False),
+        ("Bye. Can you check the heater", False),  # a question without its question mark
+        ("Bye. Is it raining", False),
+        # review 14 Oct: a question after soft words, "before you go", a goodbye in quoted speech or one that a comma
+        # part goes on from ("at eight") is more than a goodbye
+        ("Bye, and what about tomorrow", False),
+        ("Okay bye. Oh, and what's the weather tomorrow", False),
+        ("Bye. So what time is it", False),
+        ("Bye. Before you go, the weather tomorrow", False),
+        ("Bye. Quick question, the heater", False),
+        ("Remind me to tell Alex: take care, the roads are icy.", False),
+        ("Tell Alex: okay, bye.", False),
+        ("See you, at eight.", False),
+        ("Take care, of the plants, please.", False),
+        ("Okay, thanks. Bye, for now.", True),  # "for now" goes on from the goodbye and still is one
     ],
 )
-def test_a_turn_that_ends_with_a_goodbye(said: str, ends: bool) -> None:
-    assert ends_with_goodbye(said, name="Tiffany") is ends
+def test_a_turn_that_says_goodbye(said: str, ends: bool) -> None:
+    assert says_goodbye(said, name="Tiffany") is ends
+
+
+@pytest.mark.parametrize(
+    ("said", "code", "ends"),
+    [
+        ("Okay, goodbye. I'm going to hang up.", "en", True),  # live 14 Oct 12:04 heard 7 words: maybe these
+        ("Oké, bye. Ik ga koken.", "nl", True),
+        ("Oké, bye, maar wacht even.", "nl", False),  # the call's "but" and stop word: more is coming
+        ("Bye, wacht, nog één ding.", "nl", False),
+        ("Okay, bye, aber das Wetter morgen.", "de", False),
+        ("Bye. Ich muss los.", "de", True),
+    ],
+)
+def test_after_a_goodbye_the_calls_but_and_stop_words_are_more(said: str, code: str, ends: bool) -> None:
+    assert says_goodbye(said, name="Tiffany", language=code) is ends
+
+
+async def test_on_a_dutch_call_bye_then_maar_keeps_the_call_open() -> None:
+    said = "Oké, bye, maar wacht even."
+    async with Harness([said], [Turn("Ja?")], language="nl") as h:
+        await h.connected()
+        await h.quiet_after(h.greeting)
+        h.helper.caller_says(speech(0.8))
+        await h.quiet_after("Ja?")
+        await asyncio.sleep(0.3)
+        assert h.host.turns == [said] and h.signal.hung_up == []
 
 
 @pytest.mark.parametrize(
@@ -956,6 +1022,11 @@ def test_a_turn_that_ends_with_a_goodbye(said: str, ends: bool) -> None:
         "Okay, goodnight.",
         "See you tomorrow.",
         "Catch you later.",
+        "Okay, good bye.",  # live 14 Oct: two words
+        "Good-bye!",
+        "Good bye, Tiffany.",
+        "Bye-bye.",
+        "Bye now.",
     ],
 )
 def test_a_plain_goodbye_also_after_no_thanks_or_her_name(said: str) -> None:
@@ -984,17 +1055,52 @@ async def test_a_goodbye_after_other_words_ends_the_call_after_her_answer() -> N
         assert prompts.CALL_IDLE not in h.manager.said  # hung up for the goodbye, not after silence
 
 
-async def test_a_goodbye_after_other_words_answered_with_a_question_keeps_the_call() -> None:
+async def test_after_the_users_goodbye_she_hangs_up_even_when_her_answer_asks_something() -> None:
+    # owner, 14 Oct: the caller said goodbye; a question of hers keeps nobody on the line
     said = "Thanks, that helps. Talk to you later."
-    async with Harness([said, "no, bye"], [Turn("Before you go, shall I text you the list?"), Turn("Okay.")]) as h:
+    async with Harness([said], [Turn("Before you go, shall I text you the list?")]) as h:
         await h.connected()
         await h.quiet_after(GREETING)
         h.helper.caller_says(speech(0.8))
-        await h.quiet_after("Before you go, shall I text you the list?")
-        assert h.signal.hung_up == []
-        h.helper.caller_says(speech(0.6))  # "no, bye": a plain goodbye, so code says bye and hangs up
         await h.until(lambda: h.signal.hung_up == [(ME, CALL)])
+        assert "Before you go, shall I text you the list?" in h.manager.said  # said whole first
         assert prompts.CALL_IDLE not in h.manager.said
+
+
+async def test_okay_good_bye_ends_the_call_without_gemma() -> None:
+    # live 14 Oct: "Okay, good bye." (two words) was no goodbye
+    async with Harness(["Okay, good bye."]) as h:
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(0.6))
+        await h.until(lambda: h.signal.hung_up == [(ME, CALL)])
+        assert h.host.turns == []
+        assert any(line in h.manager.said for line in prompts.CALL_BYE_LINES)
+
+
+async def test_a_goodbye_then_closing_talk_is_answered_then_she_hangs_up() -> None:
+    # live 14 Oct 12:04: "ok goodbye" and more, to close the call; the call stayed open until the owner hung up
+    said = "ok goodbye, I'm going to check the log now"
+    async with Harness([said], [Turn("Good luck with the log! Bye for now.")]) as h:
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(1.0))
+        await h.until(lambda: h.signal.hung_up == [(ME, CALL)])
+        assert h.host.turns == [said]  # Gemma answered the rest
+        assert "Bye for now." in h.manager.said and prompts.CALL_IDLE not in h.manager.said
+
+
+async def test_a_goodbye_with_a_device_question_waiting_keeps_the_call_for_the_yes() -> None:
+    asked = Turn("Okay.", reply_id=4, asks_yes=True, code_text="Shall I switch heater off?")
+    turns = [asked, Turn("", code_text="Done: heater off.")]
+    async with Harness(["Turn the heater off, thanks. Bye.", "yes"], turns) as h:
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(0.8))
+        await h.quiet_after("Shall I switch heater off?")
+        h.helper.caller_says(speech(0.6))  # the yes still counts
+        await h.quiet_after("Done: heater off.")
+        assert h.host.turns == ["Turn the heater off, thanks. Bye.", "yes"]
 
 
 async def test_it_rings_twice_before_he_answers() -> None:
@@ -1299,8 +1405,106 @@ def test_words_in_other_languages_are_words(text: str, voiced_s: float, noise: b
     assert real_words(text) or noise
 
 
-@pytest.mark.parametrize("said", ["Wacht!", "Ja.", "はい", "Подожди", "네", "Stopp", "attends", "これは何ですか"])
+@pytest.mark.parametrize("said", ["Wacht!", "Подожди", "Stopp", "attends", "これは何ですか", "Maar.", "でも"])
 def test_talking_over_her_in_another_language_counts(said: str) -> None:
+    from local_assistant.calls import is_interruption
+
+    assert is_interruption(said, name=NAME)
+
+
+@pytest.mark.parametrize(
+    ("said", "code", "acknowledges"),
+    [
+        ("Okay.", "en", True),  # live 14 Oct: a listener's "okay" ended her answer
+        ("Yeah.", "en", True),
+        ("Mm-hmm.", "en", True),
+        ("Mm-hm.", "en", True),
+        ("Uh huh.", "en", True),
+        ("Uh-huh, yeah.", "en", True),
+        ("Yeah, yeah, right.", "en", True),
+        ("Oh, I see.", "en", True),  # a filler may come with it
+        ("All right, got it.", "en", True),
+        ("Okay, and tomorrow?", "en", False),  # anything more is a turn
+        ("Yes, but what about Friday?", "en", False),
+        ("But.", "en", False),
+        ("Um.", "en", False),  # a filler alone is no words (she carries on anyway), not an acknowledgement
+        ("", "en", False),
+        ("Ja.", "en", False),  # each language's own words
+        ("Ja, klopt.", "nl", True),
+        ("Oké, prima.", "nl", True),
+        ("Ja, en morgen?", "nl", False),
+        ("はい", "ja", True),
+        ("うん、うん。", "ja", True),
+        ("はい、なるほど。", "ja", True),
+        ("はい、明日は？", "ja", False),
+        ("Sí, claro.", "es", True),
+        ("D’accord.", "fr", True),
+        ("Alles klar.", "de", True),
+        ("네, 알겠어요.", "ko", True),
+        # review 14 Oct: asked back, the same words mean "pardon?" or "really?"
+        ("네?", "ko", False),
+        ("はい？", "ja", False),
+        ("Right?", "en", False),
+        ("Okay?", "en", False),
+        ("Klopt?", "nl", False),
+    ],
+)
+def test_an_acknowledgement_is_only_the_calls_acknowledgement_words(said: str, code: str, acknowledges: bool) -> None:
+    from local_assistant.calls import is_acknowledgement
+
+    assert is_acknowledgement(said, code) is acknowledges
+
+
+@pytest.mark.parametrize(
+    ("said", "code"),
+    [("네?", "ko"), ("はい？", "ja"), ("Right?", "en"), ("Yes?", "en"), ("Really?", "en"), ("Klopt?", "nl"),
+     ("Stimmt?", "de"), ("Да?", "ru"), ("Sì?", "it")],
+)  # fmt: skip
+def test_one_word_asked_back_over_her_takes_over(said: str, code: str) -> None:
+    from local_assistant.calls import is_interruption
+
+    assert is_interruption(said, name=NAME, language=code)
+
+
+@pytest.mark.parametrize(
+    ("hers", "asking"),
+    [
+        (("明日にしますか。",), True),  # a polite Japanese question ends in か, often without a question mark
+        (("明日にしますか",), True),
+        (("晴れです。", "明日にしますか。"), True),
+        (("晴れです。",), False),
+        (("It is sunny.",), False),
+        (("Shall I?",), True),
+    ],
+)
+def test_her_sentence_asks_with_a_question_mark_or_a_japanese_ka(hers: tuple[str, ...], asking: bool) -> None:
+    assert asks(hers) is asking
+
+
+@pytest.mark.parametrize(
+    ("said", "code"), [("Okay.", "en"), ("Yeah.", "en"), ("Mm-hmm.", "en"), ("Ja.", "nl"), ("はい", "ja")]
+)
+def test_an_acknowledgement_alone_carries_on_unless_she_asked(said: str, code: str) -> None:
+    from local_assistant.calls import is_interruption
+
+    assert not is_interruption(said, name=NAME, language=code)
+    assert is_interruption(said, name=NAME, language=code, asking=True)  # the answer to her question
+
+
+@pytest.mark.parametrize("said", ["Yes.", "Ja.", "Давай.", "Oui"])
+def test_a_yes_word_alone_stops_her_only_when_she_asked(said: str) -> None:
+    from local_assistant.calls import is_interruption
+
+    assert not is_interruption(said, name=NAME)
+    assert is_interruption(said, name=NAME, asking=True)
+
+
+@pytest.mark.parametrize(
+    "said",
+    ["But.", "but", "Aber", "Mais", "Pero", "Mas", "Ma", "Но", "Ale", "하지만", "그런데", "Stop.", "Wait", "No.", "Hold",
+     "Sorry?", "Hey", NAME, "Okay, and tomorrow?", "Yes but"],
+)  # fmt: skip
+def test_but_alone_stops_her_like_wait(said: str) -> None:
     from local_assistant.calls import is_interruption
 
     assert is_interruption(said, name=NAME)
@@ -1694,7 +1898,7 @@ async def test_speech_rule_road_noise_over_her_answer_does_not_stop_her(caplog: 
     lines = [record.getMessage() for record in caplog.records]
     shadow = (
         r"calls: barge-in speech: speech stopped her 0 times, would have 0; loudness stopped her 0 times, would have"
-        r" [1-9]\d*; her own voice 0; detector \d+ chunks, slowest \d+ ms, 0 failed"
+        r" [1-9]\d*; her own voice 0; acknowledgements 0; detector \d+ chunks, slowest \d+ ms, 0 failed"
     )
     assert any(re.fullmatch(shadow, line) for line in lines)  # once in each sentence the road was under
 
@@ -1731,7 +1935,7 @@ async def test_speech_rule_without_a_detector_loudness_decides_the_call(
     assert f"calls: speech detector {state}; loudness decides this call" in lines
     end = (
         "calls: barge-in speech (loudness: no speech detector): loudness stopped her 0 times, would have 0;"
-        " her own voice 0"
+        " her own voice 0; acknowledgements 0"
     )
     assert end in lines
 
@@ -1789,14 +1993,24 @@ async def test_a_call_that_falls_back_to_loudness_midway_counts_each_rule(caplog
     assert "calls: the speech detector failed 3 times in a row; loudness for the rest of the call" in lines
     end = (
         r"calls: barge-in speech \(loudness after 3 failed answers in a row\): speech stopped her 1 time, would have 0;"
-        r" loudness stopped her 1 time, would have 0; her own voice 0; detector \d+ chunks, slowest \d+ ms, 3 failed"
+        r" loudness stopped her 1 time, would have 0; her own voice 0; acknowledgements 0; detector \d+ chunks, slowest"
+        r" \d+ ms, 3 failed"
         r" \(http 3\)"
     )
     assert any(re.fullmatch(end, line) for line in lines), [line for line in lines if "barge-in" in line]
 
 
+def test_only_speech_stops_her_by_default_as_the_config_says() -> None:
+    """[calls] interrupt = "only speech" is the default (owner, 14 Oct): the call settings' own default is the same."""
+    assert (
+        CallSettings(socket_dir=Path("/tmp")).barge
+        == "speech"
+        == Config(bot_number="+306900000000", allowed_acis=frozenset()).calls_barge
+    )
+
+
 async def test_loudness_rule_measures_speech_beside_it_when_the_service_has_a_detector() -> None:
-    async with Harness() as h:  # barge = "loudness", the default
+    async with Harness() as h:  # loudness ("any sound"), as the harness sets it
         h.voice.detector = "ready"
         await h.connected()
         await h.quiet_after(GREETING)
@@ -1811,7 +2025,7 @@ async def test_the_status_line_shows_the_speech_detector_when_speech_stops_her()
         h.voice.detector = None
         assert await h.manager.detector() == "old voice service"
     async with Harness() as h:
-        assert await h.manager.detector() == ""  # loudness: nothing to show
+        assert await h.manager.detector() == ""  # any sound (loudness): nothing to show
 
 
 # /babble: a call during practice is a practice call
@@ -1890,3 +2104,254 @@ async def test_a_call_she_places_during_practice_is_an_ordinary_call() -> None:
         h.signal.remote_hangup()
         await h.until(lambda: bool(h.host.summaries))
         assert h.host.practice_ended == []
+
+
+# live 14 Oct (12:00 and 12:02): a listener's "okay" or "yeah" over her answer stopped her, the next turn was answered
+# as a new request and the rest of her answer was dropped ("she skipped some sections"). An acknowledgement carries
+# on; anything more, a "but", or an answer to her question takes over.
+@pytest.mark.parametrize(
+    ("code", "asked", "first", "second", "heard", "carries_on"),
+    [
+        ("en", "how is the weather", "It is sunny.", "The whole week stays dry and warm, with a light wind from the west.",
+         "Yeah.", True),
+        ("en", "how is the weather", "It is sunny.", "The whole week stays dry and warm, with a light wind from the west.",
+         "Okay.", True),
+        ("en", "is the heater on", "Shall I turn the heater off?",
+         "It has been on since noon, and the living room is quite warm by now.", "Yeah.", False),
+        ("en", "how is the weather", "It is sunny.", "The whole week stays dry and warm, with a light wind from the west.",
+         "But.", False),
+        ("en", "how is the weather", "It is sunny.", "The whole week stays dry and warm, with a light wind from the west.",
+         "Okay, and tomorrow?", False),
+        ("nl", "hoe is het weer", "Het is zonnig.", "De hele week blijft het droog en warm, met een zachte wind uit het westen.",
+         "Ja, klopt.", True),
+        ("nl", "staat de verwarming aan", "Zal ik de verwarming uitzetten?",
+         "Hij staat al sinds de middag aan en de woonkamer is inmiddels behoorlijk warm.", "Ja.", False),
+        ("nl", "hoe is het weer", "Het is zonnig.", "De hele week blijft het droog en warm, met een zachte wind uit het westen.",
+         "Maar.", False),
+        ("nl", "hoe is het weer", "Het is zonnig.", "De hele week blijft het droog en warm, met een zachte wind uit het westen.",
+         "Ja, en morgen?", False),
+        ("ja", "天気はどう", "晴れです。", "今週はずっと乾燥していて暖かく、西からの穏やかな風が吹き、とても過ごしやすい一週間になりそうです。",
+         "はい", True),
+        ("ja", "ヒーターはついてる", "ヒーターを消しましょうか？",
+         "お昼からずっとついていて、リビングはもうかなり暖かくなっていますので、消してもいいかもしれません。", "うん", False),
+        ("ja", "予定はどう", "明日にしますか。",  # a polite question without its question mark
+         "今日は午後から雨が降りそうなので、明日の朝のほうが、ゆっくりと買い物ができるかもしれません。", "はい", False),
+        ("ja", "天気はどう", "晴れです。", "今週はずっと乾燥していて暖かく、西からの穏やかな風が吹き、とても過ごしやすい一週間になりそうです。",
+         "でも", False),
+        ("ja", "天気はどう", "晴れです。", "今週はずっと乾燥していて暖かく、西からの穏やかな風が吹き、とても過ごしやすい一週間になりそうです。",
+         "はい、明日は？", False),
+    ],
+)  # fmt: skip
+async def test_over_her_answer_an_acknowledgement_carries_on_and_anything_more_takes_over(
+    code: str, asked: str, first: str, second: str, heard: str, carries_on: bool
+) -> None:
+    async with Harness([asked, heard], [Turn(f"{first} {second}", reply_id=5), Turn("Okay.")], language=code) as h:
+        await h.connected()
+        await h.quiet_after(h.greeting)
+        h.helper.caller_says(speech(1.0))
+        h.helper.caller_says_after(lambda: h.manager.saying == second, 40, speech(0.6))  # in her second sentence
+        if carries_on:
+            await h.until(lambda: h.voice.heard == 2)  # she stopped and listened
+            await h.quiet_after(second)  # then carried on to its end
+            await asyncio.sleep(0.3)
+            assert h.host.turns == [asked] and h.host.interruptions == []
+        else:
+            await h.until(lambda: len(h.host.turns) == 2)
+            assert h.host.turns[1] == f"{prompts.CUTTING_IN} {heard}"
+            [(reply_id, said)] = h.host.interruptions
+            assert reply_id == 5 and said.startswith(first) and second not in said
+
+
+# review of 14 Oct: under each rule ("only speech", the real default, with its detector, and "any sound"), an
+# acknowledgement carries on, is counted in the end line and is never a false stop: loudness, the shadow beside speech,
+# fired in that clip too, and its "would have" stays 0
+@pytest.mark.parametrize("barge", ["loudness", "speech"])
+async def test_an_acknowledgement_is_logged_and_counted_and_a_takeover_logged_by_its_words(
+    caplog: pytest.LogCaptureFixture, barge: str
+) -> None:
+    caplog.set_level(logging.INFO, logger="local_assistant.calls")
+    answer = "This is a long answer. " * 8
+    transcripts = ["tell me more", "Yeah.", "Okay, and tomorrow?"]
+    async with Harness(transcripts, [Turn(answer, reply_id=5), Turn("Rain.")], barge=barge) as h:
+        if barge == "speech":
+            h.voice.detector = "ready"
+        await h.connected()
+        await h.quiet_after(GREETING)
+        greeting = h.helper.her_frames()
+        h.helper.caller_says(speech(1.0))
+        h.helper.caller_says_when(lambda: h.helper.her_frames() > greeting + 150, speech(0.6))  # "Yeah."
+        h.helper.caller_says_when(lambda: h.voice.heard == 2 and h.helper.her_frames() > greeting + 450, speech(1.0))
+        await h.quiet_after("Rain.")
+        assert h.host.turns == ["tell me more", f"{prompts.CUTTING_IN} Okay, and tomorrow?"]
+        h.signal.remote_hangup()
+        await h.until(lambda: h.host.ended == 1)
+    lines = [record.getMessage() for record in caplog.records]
+    assert lines.count("calls: an acknowledgement; carrying on") == 1  # no words logged
+    assert "calls: taken over (3 words)" in lines
+    [end] = [line for line in lines if line.startswith("calls: barge-in")]
+    head = rf"calls: barge-in {barge}(?: \(no speech detector\))?: {barge} stopped her 2 times, would have 0;"
+    assert re.match(head, end), end
+    assert "acknowledgements 1" in end
+    if barge == "speech":  # loudness fired before speech in both stops: the acknowledgement's is no false stop
+        assert "; loudness stopped her 0 times, would have 0;" in end, end
+
+
+async def test_a_yeah_over_the_lead_in_to_a_device_question_is_the_callers() -> None:
+    # a device question waits (her last sentence, code's question, comes whole): a yes word answers it, so it takes
+    # over; cut off before the question, no yes may act on it
+    lead = "The heater has been on since noon, and the living room is quite warm by now."
+    turn = Turn(lead, reply_id=3, asks_yes=True, code_text="Shall I switch heater off?")
+    async with Harness(["is the heater on", "Yeah."], [turn, Turn("Okay.")]) as h:
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(1.0))
+        h.helper.caller_says_after(lambda: h.manager.saying == lead, 40, speech(0.6))
+        await h.quiet_after("Okay.")
+        assert h.host.turns == ["is the heater on", f"{prompts.CUTTING_IN} Yeah."]
+        assert h.host.dropped_waiting == 1
+
+
+@pytest.mark.parametrize(
+    ("said", "code", "leaving"),
+    [
+        ("I'm hanging up now.", "en", True),
+        ("Okay, I'll hang up.", "en", True),
+        ("Hanging up now.", "en", True),
+        ("I have to go.", "en", True),
+        ("I've got to go, bye.", "en", True),
+        ("Gotta go!", "en", True),
+        ("I need to go now.", "en", True),
+        ("Okay, I'm off.", "en", True),
+        ("Sorry, I have to go. Talk later.", "en", True),  # closing talk after it
+        ("Thanks for the help, I have to go, I'm late.", "en", True),
+        ("Okay, I have to go, for now.", "en", True),  # "for now" goes on from it and is soft
+        ("I'm off now.", "en", True),
+        # review 14 Oct: Whisper writes a hesitation as a comma; a comma part that goes on from the phrase ("to",
+        # "naar", "zum") makes it an errand, not leave-taking
+        ("I have to go, uh, to the dentist tomorrow.", "en", False),
+        ("I need to go, to the pharmacy tomorrow, remind me at nine.", "en", False),
+        ("I have to go, back to work, remind me at five.", "en", False),
+        ("Ik moet weg, naar de tandarts.", "nl", False),
+        ("Ich muss weg, zum Arzt morgen.", "de", False),
+        ("Ich muss los, zur Arbeit.", "de", False),
+        ("電気、切るね。", "ja", False),  # 切る is also "switch off": only soft words before it in its sentence
+        ("あ、エアコン、切るよ。", "ja", False),
+        ("He said: I have to go.", "en", False),  # quoted speech
+        ("He said: okay, I have to go.", "en", False),
+        # soft words are "okay", "so", "well", "now" and the like, never a "yes" that answers her; "I'm off" alone is
+        # also a day off
+        ("Yes, I have to go. Remind me at eight.", "en", False),
+        ("Exactly, I have to go.", "en", False),
+        ("No, I'm off.", "en", False),
+        ("I'm off.", "en", False),
+        ("I'm off, by the way, on Friday.", "en", False),
+        ("I have to go to the dentist tomorrow.", "en", False),  # a whole sentence of its own only
+        ("I'm off to bed soon.", "en", False),
+        ("I'm off work on Friday.", "en", False),
+        ("When I'm off, remind me to call Alex.", "en", False),
+        ("I have to go. Wait, one more thing.", "en", False),
+        ("I have to go, but what about tomorrow?", "en", False),
+        ("Do I have to go?", "en", False),
+        ("So, I have to go?", "en", False),  # asked, not said
+        ("Ik moet gaan.", "nl", True),
+        ("Oké, ik hang op.", "nl", True),
+        ("Ik moet nu ophangen, doei.", "nl", True),
+        ("I have to go.", "nl", True),  # English on any call, as the goodbyes
+        ("Ik moet gaan werken.", "nl", False),
+        ("Ik moet gaan, maar hoe wordt het weer?", "nl", False),
+        ("Ik moet gaan, is goed.", "nl", True),  # the English question starts are English only
+        ("Ik moet gaan, wacht, nog één ding.", "nl", False),  # a stop word of the call's language: more
+        ("Ich muss los, warte mal.", "de", False),
+        ("Ich muss los.", "de", True),
+        ("So, ich lege jetzt auf.", "de", True),
+        ("Ich muss morgen früh los.", "de", False),
+        ("Ich muss los, aber wie wird das Wetter?", "de", False),
+        ("じゃあ、切るね。", "ja", True),
+        ("そろそろ失礼します。", "ja", True),
+        ("切るね、明日の天気は？", "ja", False),
+        ("Je dois y aller.", "fr", True),
+        ("Мне пора.", "ru", True),
+        ("Ik moet gaan.", "en", False),  # the call's language and English only
+    ],
+)
+def test_leave_taking_is_a_sentence_of_its_own(said: str, code: str, leaving: bool) -> None:
+    from local_assistant.calls import takes_leave
+
+    assert takes_leave(said, name="Tiffany", language=code) is leaving
+
+
+@pytest.mark.parametrize(
+    ("code", "said", "reply"),
+    [
+        ("en", "Okay, I have to go.", "Sure, talk soon! Anything else before you go?"),
+        ("nl", "Oké, ik moet gaan.", "Prima, tot later! Nog iets anders?"),
+        ("de", "Ich muss los.", "Alles klar, bis später!"),
+    ],
+)
+async def test_leave_taking_ends_the_call_once_her_reply_is_spoken(code: str, said: str, reply: str) -> None:
+    async with Harness([said], [Turn(reply)], language=code) as h:
+        await h.connected()
+        await h.quiet_after(h.greeting)
+        h.helper.caller_says(speech(0.8))
+        await h.until(lambda: h.signal.hung_up == [(ME, CALL)])
+        assert h.host.turns == [said]  # Gemma answered
+        assert reply.split("! ")[-1] in h.manager.said  # her reply whole, even when it asks something
+
+
+async def test_leave_taking_with_a_device_question_waiting_keeps_the_call() -> None:
+    asked = Turn("Okay.", reply_id=4, asks_yes=True, code_text="Shall I switch heater off?")
+    async with Harness(["Heater off please, I have to go.", "yes"], [asked, Turn("", code_text="Done.")]) as h:
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(0.8))
+        await h.quiet_after("Shall I switch heater off?")
+        h.helper.caller_says(speech(0.6))
+        await h.quiet_after("Done.")
+        assert h.host.turns == ["Heater off please, I have to go.", "yes"]
+
+
+class CutInEvery:
+    """A call's audio where the caller cuts in `after_s` into every clip she says, until no more than that is left: a
+    listener who keeps saying "mm-hm", or a loud speaker that plays her first word ("Sure,") back each time."""
+
+    def __init__(self, total: int, after_s: float) -> None:
+        self.total = total  # her clip, in bytes
+        self.after_s = after_s
+        self.barge = Barge()
+        self.starts: list[int] = []  # where in her clip each say() started, in bytes
+
+    async def say(self, pcm: bytes, *, barge: bool = False, fresh: bool = True) -> Said:
+        self.starts.append(self.total - len(pcm))
+        if len(self.starts) > 40:
+            raise AssertionError("she never got to the end of her sentence")
+        left = len(pcm) / (2 * RATE)
+        if left <= self.after_s:
+            return Said(left, left, False)
+        return Said(left, self.after_s, True, floor=100.0, level=2000.0)
+
+    async def listen(self, **_: object) -> tuple[bytes, dict[str, Any]]:
+        return bytes(9600), {"sustained_s": 0.4}
+
+
+@pytest.mark.parametrize(
+    ("after_s", "starts_s"),
+    [
+        # review 14 Oct: a stop sooner than RESUME_BACK_S after she resumed sent her back to the same place, forever
+        (0.35, [round(0.35 * n, 2) for n in range(12)]),
+        # each one a little back, as after a cough; after MAX_FALSE_BARGE of them on from the stop
+        (1.0, [0.0, 0.5, 1.0, 1.5, 2.5, 3.5]),
+    ],
+)
+async def test_acknowledgements_over_every_part_of_her_sentence_still_take_her_to_its_end(
+    after_s: float, starts_s: list[float]
+) -> None:
+    async with Harness(["Sure."] * 40) as h:
+        pcm = bytes(2 * RATE * 4)  # 4 s of her sentence
+        audio = CutInEvery(len(pcm), after_s)
+        hers = ("Sure, the whole week stays dry and warm, with a light wind from the west.",)
+        result = await h.manager._say_checked(cast(CallAudio, audio), pcm, True, hers=hers)
+        assert result is None  # said to its end, never taken over by an acknowledgement
+        assert [round(start / (2 * RATE), 2) for start in audio.starts] == starts_s
+        assert all(a < b for a, b in itertools.pairwise(audio.starts))  # always further on
+        assert audio.barge.acknowledged == len(starts_s) - 1
+        assert MAX_FALSE_BARGE == 3

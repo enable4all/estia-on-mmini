@@ -11,7 +11,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -31,11 +31,12 @@ from local_assistant.health import HealthCheck
 from local_assistant.language import CODES
 from local_assistant.mail_auth import CALENDAR_SCOPES, MailAuthError, TokenStore
 from local_assistant.morning_digest import MorningDigest
-from local_assistant.part_status import Record
+from local_assistant.part_status import PartStatus, Record, mail_part
 from local_assistant.part_status import lines as part_lines
 from local_assistant.part_status import read as read_part_status
 from local_assistant.profiler import UNANNOUNCED_KEY
 from local_assistant.signal_io import ReceiveProblem, SignalClient
+from local_assistant.signal_text import plain as on_phone
 from local_assistant.spotify import Spotify
 from local_assistant.store import Store
 from local_assistant.tools import TOOL_SCHEMAS
@@ -53,7 +54,7 @@ from tests.test_voice import M4A, closed_port_url
 
 NAME = DEFAULT_NAME  # her name in these tests (a fresh install's)
 # a fresh install's welcome: reminders and the messages she starts are on without their sections
-WELCOME = prompts.welcome(name=NAME, reminders=True)  # her own messages are opt-in: no line for them
+WELCOME = on_phone(prompts.welcome(name=NAME, reminders=True))  # as the phone shows it; her own messages: opt-in
 
 FAKE = Path(__file__).parent / "fakes" / "fake_signal_cli.py"
 # Recent timestamps: messages sent before the bridge started and older than 10 minutes count as
@@ -85,6 +86,7 @@ async def start(
     clock: Callable[[], float] = time.time,
     welcome: bool = False,
     model_pin: ModelPin | None = None,
+    security_level: Callable[[], str | None] | None = None,
     **settings: Any,
 ) -> Harness:
     """The bridge on a fake signal-cli. Its store has had the welcome (a fresh install's first message) unless
@@ -117,6 +119,7 @@ async def start(
         health=health,
         clock=clock,
         model_pin=model_pin,
+        security_level=security_level,
     )
     task = asyncio.create_task(app.run())
     await until(lambda: signal.ready)
@@ -160,6 +163,13 @@ def sent(folder: Path) -> list[str]:
     return [r["params"]["message"] for r in requests(folder) if r["method"] == "send" and "message" in r["params"]]
 
 
+def styles(folder: Path) -> list[list[str]]:
+    """The text styles of each text sent, in order ([] for a text without them)."""
+    return [
+        r["params"].get("textStyle", []) for r in requests(folder) if r["method"] == "send" and "message" in r["params"]
+    ]
+
+
 def voice(attachment_id: str, data: bytes, content_type: str = "audio/aac") -> dict[str, Any]:
     return {"contentType": content_type, "id": attachment_id, "size": len(data)}
 
@@ -179,6 +189,68 @@ async def test_answers_a_text_message(tmp_path: Path, monkeypatch: pytest.Monkey
         assert any(r["method"] == "sendTyping" and r["params"]["stop"] for r in requests(harness.folder))
         await until(lambda: harness.app.store.message(2).status == "sent")
         assert harness.app.store.message(1).status == "answered"
+    finally:
+        await stop(harness)
+
+
+async def test_markup_goes_out_as_text_styles_and_stays_as_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Signal shows Markdown as typed: at send time it becomes Signal's text styles; the stored text keeps it, so her
+    history (and the search) holds what she wrote."""
+    answer = "# Plan\n- **Gym** at 7\n- ~~Bob~~ Anna"
+    harness = await start(tmp_path, monkeypatch, FakeGemma(text(answer), text("ok")))
+    try:
+        deliver(harness.folder, "plan my day", T0)
+        await until(lambda: len(sent(harness.folder)) == 1)
+        assert sent(harness.folder) == ["Plan\n• Gym at 7\n• Bob Anna"]
+        assert styles(harness.folder) == [["0:4:BOLD", "7:3:BOLD", "18:3:STRIKETHROUGH"]]
+        assert harness.app.store.message(2).text == answer
+        deliver(harness.folder, "thanks", T0 + 1)
+        await until(lambda: len(sent(harness.folder)) == 2)
+        assert answer in [m["content"] for m in harness.gemma.calls[1]["messages"]]
+        assert styles(harness.folder)[1] == []  # plain text: no textStyle at all
+    finally:
+        await stop(harness)
+
+
+async def test_a_converter_failure_sends_the_text_as_written(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The send path's rule: when the styles fail, the plain text goes out (never a message left pending)."""
+
+    def broken(markup: str) -> Any:
+        raise ValueError("converter bug")
+
+    monkeypatch.setattr(app_module, "styled", broken)
+    harness = await start(tmp_path, monkeypatch, FakeGemma(text("**Hi** Alex!")))
+    try:
+        deliver(harness.folder, "hello", T0)
+        await until(lambda: sent(harness.folder) == ["**Hi** Alex!"])
+        assert styles(harness.folder) == [[]]
+        await until(lambda: harness.app.store.message(2).status == "sent")
+    finally:
+        await stop(harness)
+
+
+async def test_a_resend_after_a_restart_converts_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Recovery rebuilds the text from the stored one (markup and footer), so it goes out exactly as the first try
+    would have."""
+    now = time.time()
+
+    def prepare(store: Store) -> None:
+        conv = store.current_conversation()
+        asked = store.add_incoming(conv.id, ME, int((now - 60) * 1000), "text", "what's on?")
+        assert asked is not None
+        store.set_status(asked, "answered")
+        out_id = store.add_outgoing(conv.id, ME, "text", "**Today**: the *dentist* at 09:30", asked)
+        store.set_status(out_id, "failed")
+        store.set_state(ALIVE_KEY, str(now - 30))
+
+    harness = await start(tmp_path, monkeypatch, FakeGemma(), prepare=prepare)
+    try:
+        await until(lambda: len(sent(harness.folder)) == 1)
+        assert sent(harness.folder) == ["Today: the dentist at 09:30"]
+        assert styles(harness.folder) == [["0:5:BOLD", "11:7:ITALIC"]]
+        assert harness.app.store.message(2).text == "**Today**: the *dentist* at 09:30"
     finally:
         await stop(harness)
 
@@ -214,7 +286,8 @@ async def test_commands_and_voice_skip_gemma(tmp_path: Path, monkeypatch: pytest
         voice = put(harness.folder, "v1.aac", b"voice bytes")
         deliver(harness.folder, "/help", T0)
         deliver(harness.folder, None, T0 + 1, attachments=[{"contentType": "audio/aac", "id": "v1.aac", "size": 11}])
-        await until(lambda: sent(harness.folder) == [prompts.HELP, prompts.TEXT_ONLY])
+        shown = on_phone(prompts.help_text(harness.app.capability_lines()))
+        await until(lambda: sent(harness.folder) == [shown, prompts.TEXT_ONLY])
         assert harness.gemma.calls == []
         assert not voice.exists()  # unsupported files are deleted at once
     finally:
@@ -355,7 +428,7 @@ async def test_profile_changes_come_as_a_separate_note(tmp_path: Path, monkeypat
         await until(lambda: len(sent(harness.folder)) == 2)
         assert sent(harness.folder) == [
             "Noted: you like tea.",
-            "Profile changes:\nSaved #1: The user likes tea. (/forget 1 undoes it)",
+            "Profile changes\nSaved #1: The user likes tea. (/forget 1 undoes it)",
         ]
         deliver(harness.folder, "and now?", T0 + 1)
         await until(lambda: len(sent(harness.folder)) == 3)
@@ -541,6 +614,7 @@ class Clock:
 
 async def test_health_alerts_reach_the_user_as_notes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     health, clock = FakeHealth(), Clock()
+    clock.now = datetime(2026, 10, 8, 11, 40, tzinfo=TZ_APP).timestamp()  # in the day: quiet hours would hold it
     harness = await start(tmp_path, monkeypatch, FakeGemma(), health=health, clock=clock, host_label="the study Mac")
     try:
         assert "You can check the study Mac's health" in harness.app.context.system_prompt(
@@ -553,9 +627,36 @@ async def test_health_alerts_reach_the_user_as_notes(tmp_path: Path, monkeypatch
         await harness.app.scheduler.tick()
         await until(lambda: len(sent(harness.folder)) == 1)
         [alert] = sent(harness.folder)
-        assert alert.startswith("⚠ Problem on the study Mac:\n- Extra check: not answering (since ")
+        assert alert.startswith("⚠ Problem on the study Mac:\n• Extra check: not answering (since ")  # "- ": "•"
         out = harness.app.store.message(1)
         assert (out.direction, out.kind, out.peer_aci) == ("out", "note", ME)
+    finally:
+        await stop(harness)
+
+
+async def test_health_alerts_wait_for_the_morning_and_security_notes_do_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Quiet hours (22:00-08:00 by default): a host problem is told at 08:00; a new linked device at once."""
+    devices = [{"id": 1, "createdTimestamp": 1}, {"id": 2, "createdTimestamp": 2}]
+    monkeypatch.setenv("FAKE_SIGNAL_DEVICES", json.dumps(devices))
+    health, clock = FakeHealth(), Clock()
+    clock.now = datetime(2026, 10, 9, 3, 0, tzinfo=TZ_APP).timestamp()
+    harness = await start(tmp_path, monkeypatch, FakeGemma(), health=health, clock=clock)
+    try:
+        await until(lambda: len(sent(harness.folder)) == 1)
+        assert sent(harness.folder) == [prompts.LINKED_ALERT.format(count=2)]  # security: at once, also at 03:00
+        health.problems = [Problem("extra", "Extra check", "not answering")]
+        clock.now += 4 * 60
+        await harness.app.scheduler.tick()
+        clock.now += 5 * 60
+        await harness.app.scheduler.tick()
+        await asyncio.sleep(0.2)
+        assert len(sent(harness.folder)) == 1  # the host problem waits
+        clock.now = datetime(2026, 10, 9, 8, 0, tzinfo=TZ_APP).timestamp()
+        await harness.app.scheduler.tick()
+        await until(lambda: len(sent(harness.folder)) == 2)
+        assert sent(harness.folder)[1] == "⚠ Problem on the Mac:\n• Extra check: not answering (since 03:04)"
     finally:
         await stop(harness)
 
@@ -714,7 +815,7 @@ async def test_a_photo_message_is_stored_whole_or_not_at_all(tmp_path: Path, mon
     harness = await start(tmp_path, monkeypatch, FakeGemma())
     try:
 
-        def broken(*_args: Any) -> int:
+        def broken(*_args: Any, **_kwargs: Any) -> int:
             raise RuntimeError("disk full")
 
         monkeypatch.setattr(harness.app.store, "add_attachment", broken)
@@ -829,7 +930,8 @@ async def test_a_calendar_only_digest_goes_out_at_its_time(tmp_path: Path, monke
     harness = await start(tmp_path, monkeypatch, FakeGemma(), health=FakeHealth(), clock=clock, **settings)
     try:
         await until(lambda: len(sent(harness.folder)) == 1)
-        assert sent(harness.folder) == ["Fri 9 Oct\nCalendar today:\n- 09:30–10:00 Dentist\nTomorrow: nothing"]
+        assert sent(harness.folder) == ["Fri 9 Oct\n\nToday\n• 09:30–10:00 Dentist\n\nTomorrow: nothing"]
+        assert styles(harness.folder) == [["0:9:BOLD", "11:5:BOLD", "40:8:BOLD"]]  # the date and the headings
     finally:
         await stop(harness)
 
@@ -880,7 +982,13 @@ async def test_the_calendar_gets_its_tools_rules_and_status_line(tmp_path: Path)
         app = App(cfg, store, SignalClient([sys.executable, str(FAKE)], cfg.allowed_acis), FakeGemma(), Fetcher())
         assert "calendar_agenda" in [schema["function"]["name"] for schema in app.tools.schemas]
         assert app.context.system_prompt(store.current_conversation()).startswith(
-            prompts.rules(name=NAME, calendar=True, reminders=True, practice_last=prompts.PRACTICE_NEVER)
+            prompts.rules(
+                name=NAME,
+                calendar=True,
+                reminders=True,
+                practice_last=prompts.PRACTICE_NEVER,
+                capabilities=app.capability_lines(),
+            )
         )
         assert await app._status_lines() == ["Calendar: ok (0 events in the next 7 days)"]
     finally:
@@ -1156,6 +1264,43 @@ async def test_a_light_is_switched_and_the_note_says_what_changed(
         await stop(harness)
 
 
+async def test_a_switch_claimed_with_no_device_change_gets_codes_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gemma = FakeGemma(text("Done! I've turned off the living room lamp."), text("Ok."))
+    harness, home = await devices_app(tmp_path, monkeypatch, gemma)
+    try:
+        deliver(harness.folder, "turn off the living room lamp", T0)
+        await until(lambda: len(sent(harness.folder)) == 2)
+        assert sent(harness.folder) == ["Done! I've turned off the living room lamp.", "Nothing was switched."]
+        assert home.sets() == []
+        deliver(harness.folder, "hm", T0 + 60_000)
+        await until(lambda: len(gemma.calls) == 2)
+        history = json.dumps(gemma.calls[1]["messages"])
+        assert "Nothing was switched" not in history  # a note: never in her history
+    finally:
+        await stop(harness)
+
+
+async def test_on_a_call_a_switch_claimed_with_no_change_is_said_by_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gemma = FakeGemma(text("I've switched off the living room lamp."))
+    home = Home(tmp_path, monkeypatch)
+    harness = await start(
+        tmp_path, monkeypatch, gemma, tapo_devices=DEVICE_SPECS, tapo_helper=home.helper, **call_settings(tmp_path)
+    )
+    try:
+        app = harness.app
+        app.call_started(ME)
+        said = await app.call_turn(ME, "turn off the living room lamp", lambda: None)
+        assert (said.text, said.code_text) == ("I've switched off the living room lamp.", "Nothing was switched.")
+        await until(lambda: "Nothing was switched." in sent(harness.folder))  # and the note as a text
+        assert home.sets() == []
+    finally:
+        await stop(harness)
+
+
 async def test_an_ask_first_device_changes_only_after_the_users_yes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1386,7 +1531,8 @@ async def test_without_calls_there_is_no_voice_ready_note(tmp_path: Path, monkey
 
 
 async def test_with_loudness_status_shows_no_speech_detector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    harness = await start(tmp_path, monkeypatch, FakeGemma(), **call_settings(tmp_path))
+    settings = call_settings(tmp_path) | {"calls_barge": "loudness"}  # interrupt = "any sound"
+    harness = await start(tmp_path, monkeypatch, FakeGemma(), **settings)
     try:
         assert harness.app.calls is not None and harness.app.calls.settings.barge == "loudness"
         assert "Calls: ready" in await harness.app._status_lines()  # as before: no detector line, no request
@@ -1407,7 +1553,8 @@ async def test_with_calls_texts_wait_during_a_call(tmp_path: Path, monkeypatch: 
         app.call_ended()
         await until(lambda: sent(harness.folder) == ["Hi."])
         assert not app._is_busy()
-        assert "Calls: ready" in await app._status_lines()
+        lines = await app._status_lines()  # only speech, the default: the line names the speech detector's state
+        assert "Calls: ready · speech detector: not ready" in lines
     finally:
         await stop(harness)
 
@@ -1587,10 +1734,39 @@ async def test_a_call_starts_knowing_todays_numbers_and_times_never_a_title(
         system = [call["messages"][0]["content"] for call in gemma.calls]
         glance = prompts.call_glance(GLANCE_LINES.split("\n"), at="13:10", calendar=True, mail=True)
         assert system[0].endswith(f"\n\n{glance}") and system[1] == system[0]  # the same for the whole call
-        assert system[0] == f"{app.context.system_prompt(app.store.current_conversation())}\n\n{glance}"
+        # a call's rules leave out the list of what she can do (spoken answers, never a list)
+        assert system[0] == f"{app.context.system_prompt(app.store.current_conversation(), call=True)}\n\n{glance}"
         for words in ("Sam", "Dentist", "Prinsengracht", "Anna", "Dinner", "Bob", "shipping", "Contract", "Acme"):
             assert words not in glance, words
         assert app.store.tool_calls() == []  # numbers only: no calendar or mail tool ran, nothing outside was read
+    finally:
+        await stop(harness)
+
+
+async def test_a_call_glance_counts_a_mailbox_not_read_never_naming_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """status.json says the family mailbox fails since Monday (a sign-in): the glance adds a count and a time."""
+
+    def prepare(store: Store) -> None:
+        glance_mail(store)
+        monday = datetime(2026, 10, 5, 9, 10, tzinfo=TZ_APP).timestamp()
+        moments = iter((monday, monday + 300))
+        status = PartStatus(tmp_path / "data" / "status.json", clock=lambda: next(moments))
+        status.ok(mail_part("family"))
+        status.failed(mail_part("family"), "sign_in")
+
+    gemma = FakeGemma(text("Hi!"))
+    harness = await start(
+        tmp_path, monkeypatch, gemma, prepare=prepare, clock=glance_clock(), **glance_settings(tmp_path)
+    )
+    try:
+        app = harness.app
+        app.call_started(ME)
+        await app.call_turn(ME, "hi, it's me", lambda: None)
+        system = gemma.calls[0]["messages"][0]["content"]
+        assert "Mail digest: 2 to answer (1 urgent), 1 action.\n1 mailbox not read since Mon 09:10.\n" in system
+        assert "family" not in system.rpartition("AT THE START OF THIS CALL")[2]
     finally:
         await stop(harness)
 
@@ -1752,7 +1928,7 @@ async def test_a_practice_call_and_a_setup_without_calendar_or_mail_get_no_glanc
         await app.call_turn(ME, "hi", lambda: None)
         system = harness.gemma.calls[0]["messages"][0]["content"]
         assert "AT THE START OF THIS CALL" not in system  # nothing to count: her input as before
-        assert system == app.context.system_prompt(app.store.current_conversation())
+        assert system == app.context.system_prompt(app.store.current_conversation(), call=True)  # no list either
         app.call_ended()
     finally:
         await stop(harness)
@@ -1854,7 +2030,7 @@ async def test_after_a_call_the_summary_is_a_note(tmp_path: Path, monkeypatch: p
         # the note is sent before call_summary returns (no waiting). Under heavy load the fake's answer can miss the
         # harness's 5 s request timeout; the bridge then sends again (at-least-once), so the same note may be there twice
         assert set(sent(harness.folder)) == {
-            "📞 Call summary (3 min):\n- an idea about the garden\n- follow up: ask Anna"
+            "📞 Call summary (3 min)\n• an idea about the garden\n• follow up: ask Anna"  # as the phone shows it
         }
         [call] = gemma.calls
         assert call["messages"][0] == {"role": "system", "content": prompts.CALL_SUMMARY_RULES.format(name=NAME)}
@@ -2046,7 +2222,7 @@ async def test_with_web_search_the_links_come_in_a_code_written_note(
         app.tools._web = FakeWeb({"ajax": [NOS]})
         deliver(harness.folder, "did Ajax win?", T0)
         await until(lambda: len(sent(harness.folder)) == 2)
-        assert sent(harness.folder) == ["Ajax won 2-1, says nos.nl.", "🔎 Sources:\n• nos.nl: https://nos.nl/1"]
+        assert sent(harness.folder) == ["Ajax won 2-1, says nos.nl.", "🔎 Sources\n• nos.nl: https://nos.nl/1"]
         history = app.context.build(app.store.current_conversation(), None)
         assert "Ajax won 2-1, says nos.nl." in json.dumps(history) and "nos.nl/1" not in json.dumps(history)
     finally:
@@ -2064,7 +2240,7 @@ async def test_on_a_call_the_web_links_are_texted(tmp_path: Path, monkeypatch: p
         turn = await app.call_turn(ME, "did Ajax win", lambda: None)
         assert turn.text == "Ajax won, says nos.nl."
         await until(lambda: len(sent(harness.folder)) == 1)
-        assert sent(harness.folder) == ["🔎 Sources:\n• nos.nl: https://nos.nl/1"]
+        assert sent(harness.folder) == ["🔎 Sources\n• nos.nl: https://nos.nl/1"]
     finally:
         await stop(harness)
 
@@ -2337,13 +2513,13 @@ async def test_a_fresh_install_says_welcome_once(tmp_path: Path, monkeypatch: py
         deliver(harness.folder, "hello", T0)
         await until(lambda: len(sent(harness.folder)) == 2)
         seen = json.dumps(harness.gemma.calls[0]["messages"])
-        assert "/help lists the commands" not in seen and "Hi, I'm Estia" not in seen
+        assert prompts.WELCOME_HELP not in seen and "Hi, I'm Estia" not in seen
     finally:
         await stop(harness)
     restarted = await start(tmp_path, monkeypatch, FakeGemma(), welcome=True)
     try:
         deliver(restarted.folder, "/help", T0 + 1)
-        await until(lambda: sent(restarted.folder)[-1] == prompts.HELP)
+        await until(lambda: sent(restarted.folder)[-1] == on_phone(prompts.help_text(restarted.app.capability_lines())))
         assert sent(restarted.folder).count(WELCOME) == 1
     finally:
         await stop(restarted)
@@ -2357,7 +2533,7 @@ async def test_the_welcome_flag_alone_means_no_second_welcome(tmp_path: Path, mo
     try:
         deliver(harness.folder, "/help", T0)
         await until(lambda: len(sent(harness.folder)) == 1)
-        assert sent(harness.folder) == [prompts.HELP]
+        assert sent(harness.folder) == [on_phone(prompts.help_text(harness.app.capability_lines()))]
     finally:
         await stop(harness)
 
@@ -2412,7 +2588,7 @@ async def test_an_existing_install_never_gets_the_welcome(tmp_path: Path, monkey
     try:
         deliver(harness.folder, "/help", T0)
         await until(lambda: len(sent(harness.folder)) == 1)
-        assert sent(harness.folder) == [prompts.HELP]
+        assert sent(harness.folder) == [on_phone(prompts.help_text(harness.app.capability_lines()))]
         assert harness.app.store.get_state(WELCOME_KEY) is None
     finally:
         await stop(harness)
@@ -2502,7 +2678,7 @@ async def test_an_account_allowed_later_gets_no_welcome(tmp_path: Path, monkeypa
     restarted = await start(tmp_path, monkeypatch, FakeGemma(), welcome=True, allowed_acis=frozenset({ME, PARTNER}))
     try:
         deliver(restarted.folder, "/help", T0)
-        await until(lambda: sent(restarted.folder)[-1] == prompts.HELP)
+        await until(lambda: sent(restarted.folder)[-1] == on_phone(prompts.help_text(restarted.app.capability_lines())))
         assert welcomed_accounts(restarted.folder) == [ME]
     finally:
         await stop(restarted)
@@ -2530,7 +2706,7 @@ async def test_an_account_no_longer_allowed_is_not_owed_the_welcome(
 
 def test_the_welcome_names_only_the_parts_that_are_set_up() -> None:
     plain = prompts.welcome(name=NAME)
-    assert plain.startswith("Hi, I'm Estia") and plain.endswith("/help lists the commands.")
+    assert plain.startswith("Hi, I'm Estia") and plain.endswith("/help lists what I can do here and the commands.")
     assert "Everything stays on this Mac." in plain and "Only you get answers from me." in plain
     for part in ("Mail", "Calendar", "Voice notes", "Calls", "Lights and plugs", "Web search", "Places", "Music"):
         assert part not in plain
@@ -2542,13 +2718,14 @@ def test_the_welcome_names_only_the_parts_that_are_set_up() -> None:
     every = prompts.welcome(
         name=NAME, mail=True, calendar=True, voice=True, calls=True, device="desk lamp", web=True, maps=True, music=True
     )
-    tries = [line for line in every.splitlines() if line.startswith("- ")]
+    tries = [line for line in every.splitlines() if line.startswith("• ")]
     assert len(tries) == 8 and all(":" in line for line in tries)
+    assert "\n\n**Set up and ready to try**\n• Mail: " in every  # a bold heading, one part per line
     assert "except what web search, places and music need to send" in every
     assert "I only read your mail and calendar, never change them" in every
     assert "Reminder set" not in every  # the contract comes with reminders only
     with_reminders = prompts.welcome(name=NAME, reminders=True, wake_calls=True)
-    [line] = [line for line in with_reminders.splitlines() if line.startswith("- Reminders:")]
+    [line] = [line for line in with_reminders.splitlines() if line.startswith("• Reminders:")]
     assert line.endswith('(a reminder is set only when my "Reminder set" note says so)')
 
 
@@ -2963,8 +3140,11 @@ async def test_with_reminders_off_nothing_changes(tmp_path: Path, monkeypatch: p
     try:
         app = harness.app
         assert app.reminders is None and app.reminder_scheduler is None
-        rules = prompts.rules(name=NAME, practice_last=prompts.PRACTICE_NEVER)  # every rules text names practice
+        rules = prompts.rules(  # every rules text names practice; the list has no reminders
+            name=NAME, practice_last=prompts.PRACTICE_NEVER, capabilities=app.capability_lines()
+        )
         assert app.context.system_prompt(app.store.current_conversation()).startswith(rules)
+        assert not any("Reminders" in line for line in app.capability_lines())
         deliver(harness.folder, "hello", T0)
         await until(lambda: sent(harness.folder) == ["Hi."])
         assert harness.gemma.calls[0]["tools"] == TOOL_SCHEMAS
@@ -3001,6 +3181,8 @@ async def test_a_message_she_starts_goes_out_with_its_footer(tmp_path: Path, mon
         await harness.app.initiative.tick()
         footer = prompts.INITIATIVE_FOOTERS["followup"]
         await until(lambda: sent(harness.folder) == [f"Did you get hold of the dentist?\n{footer}"])
+        start_at = len("Did you get hold of the dentist?\n")
+        assert styles(harness.folder) == [[f"{start_at}:{len(footer)}:ITALIC"]]  # the footer in italics
         [entry] = harness.app.store.initiative_entries()
         message = harness.app.store.message(entry.message_id or 0)
         assert (message.kind, message.text, message.footer, message.status) == (
@@ -3044,7 +3226,7 @@ async def test_a_fresh_installs_welcome_tells_and_no_announcement_follows(
         tmp_path, monkeypatch, FakeGemma(), welcome=True, initiative_enabled=True, initiative_quiet_hours=""
     )
     try:
-        welcome = harness.app._welcome_text()
+        welcome = on_phone(harness.app._welcome_text())
         await until(lambda: sent(harness.folder) == [welcome])
         assert "Reminders:" in welcome and "/quiet pauses that." in welcome
         assert harness.app.initiative is not None
@@ -3094,7 +3276,7 @@ async def test_off_by_default_nothing_changes_until_the_user_types_initiative_on
     try:
         app = harness.app
         assert app.initiative is not None and not app.initiative.enabled
-        plain = prompts.welcome(name=NAME, reminders=True)
+        plain = on_phone(prompts.welcome(name=NAME, reminders=True))
         await until(lambda: sent(harness.folder) == [plain])
         assert "/quiet" not in plain
         deliver(harness.folder, "I'll call the dentist tomorrow", T0)
@@ -3387,7 +3569,7 @@ async def test_a_changed_safety_number_is_recorded_and_shown_until_a_message_ope
         assert ME not in status_file.read_text() and ME not in caplog.text
         assert "safety number changed" in caplog.text
         info = await harness.app.status()
-        assert any(line.startswith("Safety number: ✗ changed") for line in info.parts)
+        assert any(line.startswith("Safety number: ✗ changed") for line in info.security)
         deliver(harness.folder, "it's me again", T0)
         await until(lambda: sent(harness.folder) == ["hi"])
         assert "identity_changed" not in status_file.read_text()
@@ -3410,7 +3592,7 @@ async def test_her_accounts_devices_are_counted_and_more_than_this_mac_is_report
         assert await harness.app.check_linked_devices() == 2
         assert len(sent(harness.folder)) == 1  # told once, not on every check
         info = await harness.app.status()
-        assert any(line.startswith("Her Signal account: ✗ 2 devices") for line in info.parts)
+        assert any(line.startswith("Her Signal account: ✗ 2 devices") for line in info.security)
     finally:
         await stop(harness)
 
@@ -3566,7 +3748,7 @@ async def test_a_practice_text_is_answered_without_tools_in_its_own_conversation
         chat = app.store.current_conversation()
         deliver(folder, "/babble nl", T0)
         await until(lambda: len(sent(folder)) == 1)
-        assert sent(folder)[0].startswith("Practice: Nederlands, Dutch (nl), level A2.")
+        assert sent(folder)[0].startswith("Practice: Nederlands, Dutch (nl), level A2\nAnswers in Dutch")
         deliver(folder, "Ik woon in Utrecht.", T0 + 1)
         await until(lambda: len(sent(folder)) == 2)
         assert sent(folder)[1] == "Wat leuk! Waar woon je?"
@@ -3977,5 +4159,89 @@ async def test_a_long_videos_note_comes_first_and_no_busy_note(tmp_path: Path, m
         assert harness.app.videos.held() == 1  # kept for a follow-up
         deliver(harness.folder, "/new", T0 + 1)
         await until(lambda: harness.app.videos.held() == 0)  # /new: gone from memory
+    finally:
+        await stop(harness)
+
+
+# owner, 14 Oct: "what can you do?" is answered from code's list of the parts on in this install; /help shows it word
+# for word, and a level that changes (the Mac's security, /initiative) changes her rules
+
+
+def her_rules(app: App) -> str:
+    return app.context.system_prompt(app.store.current_conversation())
+
+
+async def test_her_rules_and_help_carry_what_she_can_do_here(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    harness = await start(tmp_path, monkeypatch, FakeGemma(), security_level=lambda: "hardened")
+    try:
+        app = harness.app
+        await until(lambda: "(now: hardened)" in her_rules(app))  # read in the background at the start
+        lines = prompts.capabilities(reminders=True, security="hardened")  # this install: the defaults
+        assert app.capability_lines() == lines
+        assert "\n".join(lines) in her_rules(app)
+        deliver(harness.folder, "/help", T0)
+        await until(lambda: sent(harness.folder) == [on_phone(prompts.help_text(lines))])
+        deliver(harness.folder, "/initiative on", T0 + 1)
+        await until(lambda: len(sent(harness.folder)) == 2)
+        assert "Messages I start: now and then a check-in or a short note. On or off (now: on)" in her_rules(app)
+    finally:
+        await stop(harness)
+
+
+async def test_the_list_names_hue_lights_when_they_are_set_up(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    hall = DeviceSpec("hall light", "", "light", "normal", brand="hue", light="11111111-1111-4111-8111-111111111111")
+    harness = await start(tmp_path, monkeypatch, FakeGemma(), tapo_devices=(*DEVICE_SPECS, hall))
+    try:
+        devices = next(line for line in harness.app.capability_lines() if line.startswith("• Lights and plugs: "))
+        assert devices.startswith("• Lights and plugs: TP-Link and Philips Hue, switched by name")
+        assert "Hue lights: on, off, brightness and whites, no colours." in devices
+    finally:
+        await stop(harness)
+
+
+async def test_the_list_names_tp_link_for_kasa_and_tapo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # brand "kasa" covers Kasa and Tapo: the line names their maker, so a Tapo plug never reads as not set up
+    harness = await start(tmp_path, monkeypatch, FakeGemma(), tapo_devices=DEVICE_SPECS)
+    try:
+        devices = next(line for line in harness.app.capability_lines() if line.startswith("• Lights and plugs: "))
+        assert devices.startswith("• Lights and plugs: TP-Link, switched by name, each by its own rule. Example:")
+    finally:
+        await stop(harness)
+
+
+async def test_off_the_live_mac_the_security_level_is_not_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    harness = await start(tmp_path, monkeypatch, FakeGemma())  # the real reader, under the tests' own root
+    try:
+        await asyncio.sleep(0.2)
+        assert "Levels: hardened or nuclear (now: not read yet)" in her_rules(harness.app)
+    finally:
+        await stop(harness)
+
+
+async def test_the_list_follows_the_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = call_settings(tmp_path) | {"calls_barge": "loudness", "projects_enabled": True}
+    harness = await start(tmp_path, monkeypatch, FakeGemma(), security_level=lambda: "nuclear", **settings)
+    try:
+        lines = harness.app.capability_lines()
+        assert "• Calls: a spoken conversation on Signal. Interrupt: only speech or any sound (now: any sound)" in (
+            line.split(". Example", 1)[0] for line in lines
+        )
+        assert any(line.startswith("• Reminders and wake-up calls: ") for line in lines)
+        assert any("Levels: off, summary, docs or code (now: summary)" in line for line in lines)
+        assert any(line.startswith("• Voice notes: ") for line in lines)  # calls need [voice]: on too
+    finally:
+        await stop(harness)
+
+
+async def test_the_list_names_each_calendars_service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    icloud = CalendarSource("family", caldav="https://caldav.icloud.com", user="alex@example.com", calendar="Family")
+    sources = (CalendarSource("calendar"), icloud, replace(icloud, name="home", calendar="Home"))
+    never = (str(tmp_path / "no-calendar-helper"),)  # never the real one: it would ask iCloud
+    harness = await start(
+        tmp_path, monkeypatch, FakeGemma(), calendar_enabled=True, calendar_sources=sources, calendar_helper=never
+    )
+    try:
+        lines = harness.app.capability_lines()
+        assert any(line.startswith("• Calendar: Google and iCloud, read only, never changed.") for line in lines)
     finally:
         await stop(harness)

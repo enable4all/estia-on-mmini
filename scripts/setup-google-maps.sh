@@ -3,24 +3,31 @@
 # and Routes API switched on, and an API key that may call only those two. The key goes into the login keychain
 # (service google-maps) and her key file (scripts/set-web-keys.sh); it is never printed or logged.
 # Before: `gcloud auth login --no-launch-browser` (once). Usage: scripts/setup-google-maps.sh ["Project name"] [project-id] [key-id]
+# Safe to run again: a project with that name is used again (never a second one), and every step checks first.
 # Daily caps: she stops at [maps] daily_cap itself (default 30); daily quotas of 30 in the Cloud console are a
 # second guard in case the key ever leaks (recommended; the console page is printed at the end).
 set +x  # never trace: the key passes through a variable
 set -euo pipefail
 name="${1:-Estia AI}"
-project="${2:-estia-ai-$(openssl rand -hex 3)}"
 key_id="${3:-estia-maps}"  # an existing key by its id: the third argument
 cd "$(dirname "$0")/.."
 
+command -v gcloud >/dev/null \
+  || { echo "The gcloud command is missing: brew install --cask gcloud-cli, then gcloud auth login --no-launch-browser." >&2; exit 1; }
 account="$(gcloud config get-value account 2>/dev/null || true)"
 [[ -n "$account" ]] || { echo "Not signed in: run gcloud auth login --no-launch-browser first." >&2; exit 1; }
 
+# a project made by an earlier run, by its name: used again, never a second one
+project="${2:-$(gcloud projects list --filter="name='$name'" --format='value(projectId)' --limit=1 2>/dev/null || true)}"
+project="${project:-estia-ai-$(openssl rand -hex 3)}"
+again="to go on later: scripts/setup-google-maps.sh \"$name\" $project"
 if gcloud projects describe "$project" >/dev/null 2>&1; then
   echo "project $project exists: using it"
 else
   echo "creating project \"$name\" ($project)"
   gcloud projects create "$project" --name="$name" --quiet >/dev/null
 fi
+echo "$again"
 
 billing="$(gcloud billing accounts list --filter=open=true --format='value(name)' | head -1)"
 [[ -n "$billing" ]] || { echo "No open billing account on this Google account." >&2; exit 1; }
@@ -35,7 +42,10 @@ gcloud services enable places.googleapis.com routes.googleapis.com apikeys.googl
 if ! gcloud services api-keys describe "$key_id" --project="$project" >/dev/null 2>&1; then
   echo "creating an API key allowed for those two APIs only"
   gcloud services api-keys create --project="$project" --key-id="$key_id" --display-name="Estia places and routes" \
-    --api-target=service=places.googleapis.com --api-target=service=routes.googleapis.com --quiet >/dev/null 2>&1
+    --api-target=service=places.googleapis.com --api-target=service=routes.googleapis.com --quiet >/dev/null || {
+    echo "The key was not made (the line above says why). APIs just switched on can take a minute; $again" >&2
+    exit 1
+  }
 fi
 key="$(gcloud services api-keys get-key-string "$key_id" --project="$project" --format='value(keyString)')"
 [[ -n "$key" ]] || { echo "Could not read the new key." >&2; exit 1; }

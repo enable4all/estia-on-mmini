@@ -11,9 +11,16 @@ from typing import Any
 
 from local_assistant import prompts
 from local_assistant.babble import PracticeTurn, broken, tidy, users_words
-from local_assistant.claims import claiming_clauses, clauses, mentions_reminder, restates, without_reminder_talk
+from local_assistant.claims import (
+    claiming_clauses,
+    clauses,
+    mentions_reminder,
+    restates,
+    without_reminder_talk,
+)
 from local_assistant.context import ContextBuilder, without_fake_notices
 from local_assistant.gemma import Completion, GemmaClient, ToolCall
+from local_assistant.signal_text import MARKERS, unmarked
 from local_assistant.store import Conversation, Message
 from local_assistant.tools import ReminderAttempt, Tools, Turn
 from local_assistant.video import without_copies
@@ -39,6 +46,10 @@ class Reply:
     # sentences that mention no reminder, waking or call (in any language); kept in the history with her words
     not_set: str = ""
     not_set_spoken: str = ""  # the same to say on a call, in English (the spoken reasons: nothing to type)
+    # she said she switched a light or plug while nothing was switched in this answer: code's line, a note (and said on a
+    # call), never in her history
+    device: str = ""
+    device_spoken: str = ""
 
     @property
     def hers(self) -> str:
@@ -50,15 +61,33 @@ class Reply:
 _LINK = re.compile(r"(?:https?://|www\.)[^\s()<>]+|\b(?:[a-z0-9-]+\.)+[a-z]{2,}/[^\s()<>]*", re.IGNORECASE)
 
 
+def _split_links(text: str, pattern: re.Pattern[str], change: Callable[[str], str], allowed: str = "") -> str:
+    """Links that only markers split ("**evil**.com", "evil.**com**", "`evil`.com"): the phone's text styles drop
+    markers (signal_text), so the text is read again with every marker left out, and each link found only there, which
+    the user did not send (`allowed`), is changed where it stands (`change`: defanged or left out), the markers inside
+    it dropped. A link the markup shows whole is the first pass's."""
+    kept = [index for index, char in enumerate(text) if char not in MARKERS]
+    said = (allowed.casefold(), unmarked(allowed).casefold())
+    for match in reversed(list(pattern.finditer("".join(text[index] for index in kept)))):
+        core = match.group(0).rstrip(".,;:!?")
+        if not core or any(core.casefold() in user for user in said):
+            continue
+        start, end = kept[match.start()], kept[match.start() + len(core) - 1] + 1
+        if any(char in MARKERS for char in text[start:end]):
+            text = text[:start] + change(core) + text[end:]
+    return text
+
+
 def without_links(text: str) -> str:
     """An answer that searched the web: its links come only in the code-written Sources note, so a link a web page
-    planted (a fake login page) never reaches the user in her words."""
+    planted (a fake login page) never reaches the user in her words, also one that markup splits."""
 
     def keep_punctuation(match: re.Match[str]) -> str:
         link = match.group(0)
         return link[len(link.rstrip(".,;:!?")) :]
 
-    return re.sub(r"[ \t]{2,}", " ", _LINK.sub(keep_punctuation, text)).strip()
+    text = _split_links(_LINK.sub(keep_punctuation, text), _LINK, lambda core: "")
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
 
 
 # a bare domain Signal would make tappable (common top-level domains only, so file names stay as they are)
@@ -72,7 +101,8 @@ _BARE_DOMAIN = re.compile(
 
 def defang_links(text: str, allowed: str) -> str:
     """After outside text: links in her answer that the user did not send (`allowed`: their message) lose what makes
-    them tappable ("https://evil.example/login" -> "evil[.]example/login"); the Sources note stays code's."""
+    them tappable ("https://evil.example/login" -> "evil[.]example/login"), also one that markup splits
+    ("**evil**.com" -> "**evil[.]com"); the Sources note stays code's."""
     said = allowed.casefold()
 
     def defang(match: re.Match[str]) -> str:
@@ -84,9 +114,12 @@ def defang_links(text: str, allowed: str) -> str:
         return host.replace(".", "[.]") + slash + rest + link[len(core) :]
 
     text = _LINK.sub(defang, text)
-    return _BARE_DOMAIN.sub(
+    text = _BARE_DOMAIN.sub(
         lambda match: match.group(0) if match.group(0).casefold() in said else match.group(0).replace(".", "[.]"), text
     )
+    for pattern in (_LINK, _BARE_DOMAIN):  # then a link that only markup splits ("**evil**.com"), as the phone joins it
+        text = _split_links(text, pattern, lambda core: defang_links(core, ""), allowed)
+    return text
 
 
 # the end_call tool's name written into her answer ("Bye!  end_call", "(end_call)", "`end_call()`")
@@ -201,7 +234,7 @@ def profile_notice(turn: Turn) -> str:
     lines = [f"Saved #{fid}: {text} (/forget {fid} undoes it)" for fid, text in turn.saved]
     lines += [f"Updated #{fid}: {text}" for fid, text in turn.updated]
     lines += [f"Removed #{fid}: {text}" for fid, text in turn.removed]
-    return "Profile changes:\n" + "\n".join(lines) if lines else ""
+    return "**Profile changes**\n" + "\n".join(lines) if lines else ""  # bold in Signal (markup)
 
 
 def _assistant_tool_message(completion: Completion) -> dict[str, Any]:
@@ -264,7 +297,9 @@ class Brain:
         # code's video lines, last in the prompt: a kept video's (reading it again), a YouTube link in this message's
         # (what read_link reads); none on a call, so never with a call's glance
         glance = "\n\n".join(part for part in (glance, self._tools.video_hint(message)) if part)
-        messages = self._context.build(conversation, shown or None, glance=glance)
+        # on a call her rules leave out the list of what she can do (spoken sentences, never a list)
+        on_call = message.text.startswith(prompts.CALL_MARK)
+        messages = self._context.build(conversation, shown or None, glance=glance, call=on_call)
         said = [str(m["content"]) for m in messages if m.get("role") == "user" and isinstance(m.get("content"), str)]
         # the user asked for a reminder, a wake-up or a call now or in their message before ("and at 17:00?")
         asked_before = any(mentions_reminder(text) for text in said[-2:]) or mentions_reminder(message.text)
@@ -361,6 +396,12 @@ class Brain:
                     )
                     spoken.append(prompts.REMINDER_NOT_SET_ONE_SPOKEN.format(reason=missed.said))
                     log.warning("message %d: one of its reminders was not set", message.id)
+            # a device change she claims that no device_set made (English first): code's line after her words; "else"
+            # when this answer did switch one (its Devices note says which)
+            device = ""
+            if self._tools.unmade_switch(turn, text):
+                device = prompts.DEVICE_GUARD_ELSE if turn.switched else prompts.DEVICE_GUARD
+                log.warning("message %d: a device change claimed, none made", message.id)
             text = text or prompts.CONFUSED
             return Reply(
                 text=text,
@@ -373,6 +414,8 @@ class Brain:
                 reminder_spoken=" ".join(spoken),
                 not_set=not_set,
                 not_set_spoken=not_set_spoken,
+                device=device,
+                device_spoken=device,
             )
 
     async def _practise(

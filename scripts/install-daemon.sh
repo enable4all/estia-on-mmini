@@ -3,15 +3,17 @@
 # /usr/local/estia, and starts at boot without a login.
 #   First time, or from an install that runs as you: the move into her own user (scripts/migrate-to-own-user.sh).
 #   Already in her own user: a new release from this checkout (/usr/bin/sudo /usr/local/estia/bin/estia-deploy).
-# Undo, within 7 days of the move: scripts/migrate-to-own-user.sh --rollback
+# Undo, within 7 days of moving an install that ran as you: scripts/migrate-to-own-user.sh --rollback (a first
+# install has nothing to go back to: her only copy is in /var/estia)
 set -euo pipefail
-repo="$(cd "$(dirname "$0")/.." && pwd)"
+here="$(cd "$(dirname "$0")" && pwd)"  # before any cd: $0 may be relative to where it was started
+repo="$(cd "$here/.." && pwd)"
 cd "$repo"
 [[ "$(id -u)" != 0 ]] || { echo "run as your normal user, not root (the script calls sudo itself)" >&2; exit 1; }
 if pgrep -f '\.venv/bin/local-assistant --foreground' >/dev/null; then
   echo "stop the foreground bridge first (Ctrl-C in its terminal)" >&2; exit 1
 fi
-source "$(dirname "$0")/own-user.sh"  # moved, and her commands' fixed paths ($estia, $estia_deploy)
+source "$here/own-user.sh"  # moved, and her commands' fixed paths ($estia, $estia_deploy)
 if moved; then
   exec "$sudo" "$estia_deploy" "$repo"
 fi

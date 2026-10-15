@@ -16,7 +16,7 @@ import urllib.parse
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -98,6 +98,24 @@ def _default_watched_logs() -> tuple[Path, ...]:
     return (_default_log_dir(),)
 
 
+DOCUMENTS_FOLDER = "Estia-KB"  # the documents folder's one name (the share, the default, doctor): directly in a home
+OWNER_HOME = re.compile(r"/Users/(?!Shared(?:/|$))[^/]+(?=/|$)")  # a home on a Mac: /Users/<name>, never Shared
+
+
+def is_estia_kb(folder: Path) -> bool:
+    """Whether `folder` is an owner's ~/Estia-KB, the only folder the share opens to her: that name, as the share
+    writes it, directly in a home on a Mac."""
+    return folder.name == DOCUMENTS_FOLDER and OWNER_HOME.fullmatch(str(folder.parent)) is not None
+
+
+def _default_documents_folder() -> Path:
+    """The owner's ~/Estia-KB, written out (in her own user her config names the owner's folder in full). Directly in
+    the home: macOS guards Documents, Desktop and Downloads (live, 14 Oct: the share could not open ~/Documents to her).
+    "-KB" keeps it apart from the README's clone ~/estia on a Mac's usual disk, which ignores case (AGENTS.md,
+    Gotchas)."""
+    return Path.home() / DOCUMENTS_FOLDER
+
+
 PROJECT_LEVELS = ("summary", "docs", "code")
 _ACCOUNT_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,19}$")
 _ADDRESS = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -118,31 +136,59 @@ MAX_CALENDARS = 8
 
 @dataclass(frozen=True)
 class CalendarSource:
-    """One calendar: a Google calendar through its iCal address (in calendar.env), or the Outlook calendar of a
-    mailbox she already reads (Microsoft Graph, delegated Calendars.Read)."""
+    """One calendar: a Google calendar through its iCal address (in calendar.env), the Outlook calendar of a mailbox
+    she already reads (Microsoft Graph, delegated Calendars.Read), or a CalDAV calendar (iCloud, Fastmail, Nextcloud:
+    its server, user name and calendar name here, its app-specific password in calendar.env), read only."""
 
     name: str  # short and unique, like a mailbox name ("family"); in part names, scripts and calendar.env keys
     label: str = ""  # shown before its events when there are several ("Family"); default: from the name
     mailbox: str = ""  # a [[mail.accounts]] name: that mailbox's calendar; "" = a Google iCal address
+    caldav: str = ""  # a CalDAV server's https address ("https://caldav.icloud.com"); "" = not a CalDAV calendar
+    user: str = ""  # the CalDAV account's user name
+    calendar: str = ""  # the CalDAV calendar's name as the calendar app shows it ("Family")
 
     @property
     def shown(self) -> str:
         return self.label or self.name.replace("_", " ").replace("-", " ").capitalize()
 
     @property
+    def kind(self) -> str:
+        """ "outlook", "caldav" or "google"."""
+        return "outlook" if self.mailbox else "caldav" if self.caldav else "google"
+
+    @property
+    def service(self) -> str:
+        """The service by name, for people: Google, Outlook, iCloud, Fastmail, Nextcloud, else the server's own name
+        ("nas.example.com"; never the protocol's)."""
+        if self.kind != "caldav":
+            return {"outlook": "Outlook", "google": "Google"}[self.kind]
+        parts = urllib.parse.urlsplit(self.caldav)
+        host = (parts.hostname or "").lower()
+        for site, name in (("icloud.com", "iCloud"), ("fastmail.com", "Fastmail")):
+            if host == site or host.endswith(f".{site}"):
+                return name
+        return "Nextcloud" if "/remote.php/" in f"{parts.path}/" else host.rstrip(".")
+
+    @property
+    def _suffix(self) -> str:
+        return "" if self.name == DEFAULT_CALENDAR else "_" + self.name.upper().replace("-", "_")
+
+    @property
     def ical_key(self) -> str:
-        """Its key in calendar.env ("school-days": CALENDAR_ICS_URL_SCHOOL_DAYS); "" for a Microsoft calendar."""
-        if self.mailbox:
-            return ""
-        if self.name == DEFAULT_CALENDAR:
-            return "CALENDAR_ICS_URL"
-        return "CALENDAR_ICS_URL_" + self.name.upper().replace("-", "_")
+        """A Google calendar's key in calendar.env ("school-days": CALENDAR_ICS_URL_SCHOOL_DAYS); "" for the others."""
+        return f"CALENDAR_ICS_URL{self._suffix}" if self.kind == "google" else ""
+
+    @property
+    def secret_key(self) -> str:
+        """Its secret's key in calendar.env: a Google calendar's address (ical_key), a CalDAV calendar's password
+        (CALDAV_PASSWORD[_NAME]); "" for a Microsoft calendar."""
+        return f"CALDAV_PASSWORD{self._suffix}" if self.kind == "caldav" else self.ical_key
 
     @property
     def saved_key(self) -> str:
-        """The key next to it that scripts/set-calendar-url.sh fills with when it saved the address ("school-days":
-        CALENDAR_SAVED_AT_SCHOOL_DAYS), for doctor; "" for a Microsoft calendar."""
-        return self.ical_key.replace("CALENDAR_ICS_URL", "CALENDAR_SAVED_AT", 1)
+        """The key next to it that scripts/set-calendar-url.sh or set-calendar-password.sh fills with when it saved the
+        secret ("school-days": CALENDAR_SAVED_AT_SCHOOL_DAYS), for doctor; "" for a Microsoft calendar."""
+        return f"CALENDAR_SAVED_AT{self._suffix}" if self.secret_key else ""
 
 
 @dataclass(frozen=True)
@@ -167,10 +213,22 @@ class ExtraCheck:
 
 @dataclass(frozen=True)
 class DeviceSpec:
-    name: str  # as in the Tapo or Kasa app, e.g. "living room lamp"; Gemma knows only names
-    host: str  # its address on the home network (a DHCP reservation keeps it fixed)
+    name: str  # as in the Tapo, Kasa or Hue app, e.g. "living room lamp"; Gemma knows only names
+    host: str  # a Kasa device's address on the home network (a DHCP reservation keeps it fixed); "" for Hue
     kind: str  # "light" or "plug"
     rule: str  # "normal", "ask first" or "never off"
+    brand: str = "kasa"  # "kasa" (Kasa and Tapo, python-kasa) or "hue" (through the paired Hue Bridge)
+    light: str = ""  # a Hue light's id on the bridge (CLIP v2); the bridge's own address is in hue.env
+
+    @property
+    def hue(self) -> bool:
+        return self.brand == "hue"
+
+    @property
+    def service(self) -> str:
+        """The brand by name, for people, as a calendar's service: "TP-Link" (the maker of Kasa and Tapo, which brand
+        "kasa" covers: "Kasa" alone would read as if a Tapo plug were not set up) or "Philips Hue"."""
+        return "Philips Hue" if self.hue else "TP-Link"
 
 
 def _default_tapo_helper() -> tuple[str, ...]:
@@ -186,6 +244,11 @@ def _default_ical_helper() -> tuple[str, ...]:
 def _default_youtube_helper() -> tuple[str, ...]:
     youtube = CODE_ROOT / "tools" / "youtube"
     return (str(youtube / ".venv" / "bin" / "python"), "-I", str(youtube / "helper.py"))
+
+
+def _default_documents_helper() -> tuple[str, ...]:
+    """tools/documents' Swift helper as SwiftPM builds it (`swift build -c release`)."""
+    return (str(CODE_ROOT / "tools" / "documents" / ".build" / "release" / "documents-helper"),)
 
 
 # what a release of her own user holds in vendor/ besides the call helpers: Homebrew's signal-cli and a JDK, copied by
@@ -303,6 +366,14 @@ class Config:
     # helper stops itself after 20 s
     youtube_helper_timeout: float = 30
     youtube_helper: tuple[str, ...] = field(default_factory=_default_youtube_helper)  # the command, without arguments
+    # documents: the PDFs in the owner's ~/Estia-KB (her access: one ACL, scripts/share-documents.sh) and the
+    # ones the user sends on Signal, read by tools/documents (PDFKit, Vision on the Mac) into her database's index;
+    # off without [documents]
+    documents_enabled: bool = False
+    documents_folder: Path = field(default_factory=_default_documents_folder)  # always absolute
+    documents_look_minutes: float = 60  # how often she lists the folder (and whenever the user asks about documents)
+    documents_helper_timeout: float = 75  # the helper stops itself after 60 s a document
+    documents_helper: tuple[str, ...] = field(default_factory=_default_documents_helper)  # without arguments
 
     # voice calls (the JVM signal-cli + our signal-call-tunnel build, see tools/call-tunnel); off without [calls]
     calls_enabled: bool = False
@@ -321,9 +392,12 @@ class Config:
     calls_answer_after_seconds: float = 5.0  # let it ring about twice
     calls_wake_call: bool = True  # "call me" reminders place a Signal call (with [calls] only: see wake_calls)
     calls_max_calls_per_day: int = 3  # call reminders a day (a retry is part of the same one)
-    # what stops her when the caller talks over her: "loudness" (default) or "speech" (the voice service's speech
-    # detector); the other one runs beside it and is only counted
-    calls_barge: str = "loudness"
+    # what stops her when the caller talks over her ([calls] interrupt): "speech" (the default, "only speech": the voice
+    # service's speech detector) or "loudness" ("any sound"); the other one runs beside it and is only counted. The
+    # internal names stay in the code and the logs.
+    calls_barge: str = "speech"
+    calls_interrupt_old: str = ""  # an older wording that was read ('barge = "speech"'): doctor suggests the new one
+    calls_barge_unread: str = ""  # an old barge line beside interrupt, which wins: doctor says it is not read
 
     # reminders the user sets ("remind me at 17:00 to ..."): on without the [reminders] section
     reminders_enabled: bool = True
@@ -539,6 +613,7 @@ def parse_config(raw: dict[str, object]) -> Config:
         **_spotify_settings(raw.get("spotify")),
         **_web_settings(raw.get("web")),
         **_maps_settings(raw.get("maps")),
+        **_documents_settings(raw.get("documents")),
         **_reminder_settings(raw.get("reminders")),
         **_initiative_settings(raw.get("initiative")),
         soul_path=DEFAULT_CONFIG_PATH.parent / "soul.md",
@@ -909,6 +984,8 @@ _HOME_NETWORKS = tuple(
 _DEVICE_NAME = re.compile(r"^[\w][\w '.-]{0,39}$")
 DEVICE_KINDS = ("light", "plug")
 DEVICE_RULES = ("normal", "ask first", "never off")
+DEVICE_BRANDS = ("kasa", "hue")
+_HUE_LIGHT = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")  # a CLIP v2 resource id
 
 
 class _TapoSettings(TypedDict, total=False):
@@ -929,24 +1006,51 @@ def _tapo_settings(tapo: dict[str, object]) -> _TapoSettings:
         fields = item if isinstance(item, dict) else {}
         name, host = fields.get("name"), fields.get("host")
         kind, rule = fields.get("kind", "light"), fields.get("rule", "normal")
+        brand, light = fields.get("brand", "kasa"), fields.get("light")
         if not isinstance(name, str) or not _DEVICE_NAME.match(name.strip()):
             raise ConfigError("tapo.devices: each name must be 1-40 letters, digits, spaces or - ' .")
+        if brand not in DEVICE_BRANDS:
+            raise ConfigError(f"tapo.devices: {name}: brand must be kasa or hue (kasa when left out)")
+        if kind not in DEVICE_KINDS or rule not in DEVICE_RULES:
+            raise ConfigError(f"tapo.devices: {name}: kind must be light or plug, rule normal, ask first or never off")
+        if brand == "hue":
+            devices.append(DeviceSpec(name.strip(), "", str(kind), str(rule), "hue", _hue_light(name, host, light)))
+            continue
+        if light is not None:
+            raise ConfigError(f'tapo.devices: {name}: only a Hue light has a light id (brand = "hue")')
         try:
             address = ipaddress.ip_address(str(host))
         except ValueError as exc:
             raise ConfigError(f"tapo.devices: {name}: host must be the device's IP address") from exc
         if not any(address in network for network in _HOME_NETWORKS if address.version == network.version):
             raise ConfigError(f"tapo.devices: {name}: host must be an address on the home network")
-        if kind not in DEVICE_KINDS or rule not in DEVICE_RULES:
-            raise ConfigError(f"tapo.devices: {name}: kind must be light or plug, rule normal, ask first or never off")
         devices.append(DeviceSpec(name.strip(), str(address), str(kind), str(rule)))
-    if len({d.name.casefold() for d in devices}) != len(devices) or len({d.host for d in devices}) != len(devices):
-        raise ConfigError("tapo.devices: names and hosts must be unique")
+    hosts = [d.host for d in devices if not d.hue]
+    lights = [d.light for d in devices if d.hue]
+    if (
+        len({d.name.casefold() for d in devices}) != len(devices)
+        or len(set(hosts)) != len(hosts)
+        or len(set(lights)) != len(lights)
+    ):
+        raise ConfigError("tapo.devices: names, hosts and Hue light ids must be unique")
     return {
         "tapo_devices": tuple(devices),
         "tapo_helper_timeout": _positive(tapo, "helper_timeout", 15, "tapo"),
         "tapo_confirm_seconds": _positive(tapo, "confirm_seconds", 120, "tapo"),
     }
+
+
+def _hue_light(name: str, host: object, light: object) -> str:
+    """A Hue light's id on the bridge (lower case); it has no host: the bridge's address is saved at pairing."""
+    if host is not None:
+        raise ConfigError(
+            f"tapo.devices: {name}: a Hue light has no host: the Hue Bridge's address is saved by scripts/hue-pair.sh"
+        )
+    if not isinstance(light, str) or not _HUE_LIGHT.match(light.strip().casefold()):
+        raise ConfigError(
+            f"tapo.devices: {name}: light must be the Hue Bridge's id for it (scripts/tapo-discover.sh lists them)"
+        )
+    return light.strip().casefold()
 
 
 class _CalendarSettings(TypedDict, total=False):
@@ -978,9 +1082,56 @@ def _calendar_settings(calendar: object, accounts: tuple[MailAccount, ...]) -> _
     return settings
 
 
+def _caldav_server(value: object) -> bool:
+    """A CalDAV server's address: https, a host, no login, query or fragment (the calendar helper checks the same)."""
+    if not isinstance(value, str) or not value or len(value) > 200 or not value.isprintable() or " " in value:
+        return False
+    try:
+        parts = urllib.parse.urlsplit(value)
+        port = parts.port
+    except ValueError:
+        return False
+    return (
+        parts.scheme == "https"
+        and bool(parts.hostname)
+        and parts.username is None
+        and parts.password is None
+        and not parts.query
+        and not parts.fragment
+        and "?" not in value
+        and "#" not in value
+        and (port is None or 0 < port < 65536)
+    )
+
+
+def _caldav_fields(name: str, fields: dict[str, Any]) -> dict[str, str]:
+    """A CalDAV calendar's caldav, user and calendar ({} for another kind), checked."""
+    if not any(key in fields for key in ("caldav", "user", "calendar")):
+        return {}
+    if not all(key in fields for key in ("caldav", "user", "calendar")):
+        raise ConfigError(f"calendar.sources: {name}: a CalDAV calendar needs caldav, user and calendar")
+    if "mailbox" in fields:
+        raise ConfigError(f"calendar.sources: {name}: either a mailbox's calendar or a CalDAV one")
+    if not _caldav_server(fields["caldav"]):
+        raise ConfigError(
+            f"calendar.sources: {name}: caldav must be the server's https address, without a login or a query "
+            '("https://caldav.icloud.com")'
+        )
+    user, calendar = fields["user"], fields["calendar"]
+    if not isinstance(user, str) or not user.strip() or len(user) > 200 or not user.isprintable():
+        raise ConfigError(f"calendar.sources: {name}: user must be the account's user name, on one line")
+    if not isinstance(calendar, str) or not calendar.strip() or len(calendar) > 100 or not calendar.isprintable():
+        raise ConfigError(
+            f"calendar.sources: {name}: calendar must be the calendar's name as the calendar app shows it, "
+            "1-100 characters on one line"
+        )
+    return {"caldav": str(fields["caldav"]), "user": user.strip(), "calendar": calendar.strip()}
+
+
 def _calendar_sources(raw: object, accounts: tuple[MailAccount, ...]) -> tuple[CalendarSource, ...]:
     """[[calendar.sources]]: a name each (a mailbox name's rule), an optional label, and a mailbox for an Outlook
-    calendar (each mailbox once). Names are unique across both kinds, "-" and "_" counting as one (calendar.env keys)."""
+    calendar (each mailbox once) or caldav, user and calendar for a CalDAV calendar. Names are unique across the kinds,
+    "-" and "_" counting as one (calendar.env keys)."""
     if not isinstance(raw, list) or not raw:
         raise ConfigError("calendar.sources must list calendars ([[calendar.sources]] with a name)")
     if len(raw) > MAX_CALENDARS:
@@ -997,12 +1148,13 @@ def _calendar_sources(raw: object, accounts: tuple[MailAccount, ...]) -> tuple[C
             not isinstance(label, str) or not label.strip() or len(label.strip()) > 30 or not label.isprintable()
         ):
             raise ConfigError(f"calendar.sources: {name}: label must be 1-30 characters on one line")
+        caldav = _caldav_fields(name, fields)
         mailbox = fields.get("mailbox", "")
         if "mailbox" in fields and not mailboxes:
             raise ConfigError(f"calendar.sources: {name}: a mailbox's calendar needs [mail] with that mailbox")
         if "mailbox" in fields and mailbox not in mailboxes:
             raise ConfigError(f"calendar.sources: {name}: mailbox must be the name of one of the [[mail.accounts]]")
-        sources.append(CalendarSource(name, str(label).strip(), str(mailbox)))
+        sources.append(CalendarSource(name, str(label).strip(), str(mailbox), **caldav))
     if len({source.name.replace("-", "_") for source in sources}) != len(sources):
         raise ConfigError("calendar.sources: names must be unique (- and _ count as the same)")
     used = [source.mailbox for source in sources if source.mailbox]
@@ -1029,9 +1181,31 @@ class _CallsSettings(TypedDict, total=False):
     calls_wake_call: bool
     calls_max_calls_per_day: int
     calls_barge: str
+    calls_interrupt_old: str
+    calls_barge_unread: str
 
 
-BARGE_RULES = ("loudness", "speech")
+# [calls] interrupt, in the words people read, and the rule each one means (owner, 14 Oct; call_audio.Barge's names)
+INTERRUPT = {"only speech": "speech", "any sound": "loudness"}
+# still read, with doctor's suggestion of the new wording: the short forms, and the old key barge with its values
+INTERRUPT_READ = INTERRUPT | {"speech": "speech", "sound": "loudness", "loudness": "loudness"}
+INTERRUPT_NEW = {rule: words for words, rule in INTERRUPT.items()}  # the rule's new wording, for doctor
+INTERRUPT_ERROR = 'calls.interrupt must be "only speech" or "any sound"'
+
+
+def _interrupt(calls: dict[str, object]) -> tuple[str, str, str]:
+    """What stops her on a call: (the rule, an older wording that was read or "", an old barge line that was not read
+    or ""). interrupt wins over the old barge."""
+    for key in ("interrupt", "barge"):
+        if key in calls and (not isinstance(calls[key], str) or calls[key] not in INTERRUPT_READ):
+            raise ConfigError(INTERRUPT_ERROR)
+    barge = f'barge = "{calls["barge"]}"' if "barge" in calls else ""
+    if "interrupt" in calls:
+        words = str(calls["interrupt"])
+        return INTERRUPT_READ[words], "" if words in INTERRUPT else f'interrupt = "{words}"', barge
+    if "barge" in calls:
+        return INTERRUPT_READ[str(calls["barge"])], barge, ""
+    return "speech", "", ""
 
 
 def _calls_settings(calls: object, *, voice: bool) -> _CallsSettings:
@@ -1087,9 +1261,7 @@ def _calls_settings(calls: object, *, voice: bool) -> _CallsSettings:
     per_day = calls.get("max_calls_per_day", 3)
     if isinstance(per_day, bool) or not isinstance(per_day, int) or not 1 <= per_day <= 10:
         raise ConfigError("calls.max_calls_per_day must be a whole number from 1 to 10")
-    barge = calls.get("barge", "loudness")
-    if barge not in BARGE_RULES:
-        raise ConfigError('calls.barge must be "loudness" or "speech"')
+    barge, interrupt_old, barge_unread = _interrupt(calls)
     settings: _CallsSettings = {
         "calls_enabled": True,
         "calls_speed": float(speed),
@@ -1104,6 +1276,8 @@ def _calls_settings(calls: object, *, voice: bool) -> _CallsSettings:
         "calls_wake_call": wake_call,
         "calls_max_calls_per_day": per_day,
         "calls_barge": barge,
+        "calls_interrupt_old": interrupt_old,
+        "calls_barge_unread": barge_unread,
     }
     if "signal_cli" in paths:
         settings["calls_signal_cli"] = paths["signal_cli"]
@@ -1217,6 +1391,29 @@ def _maps_settings(maps: object) -> _MapsSettings:
         "maps_daily_cap": cap,
         "maps_region": region.strip().upper(),
     }
+
+
+class _DocumentsSettings(TypedDict, total=False):
+    documents_enabled: bool
+    documents_folder: Path
+    documents_look_minutes: float
+
+
+def _documents_settings(documents: object) -> _DocumentsSettings:
+    """The [documents] table as Config keyword arguments; an empty [documents] turns documents on, in
+    ~/Estia-KB. The folder is always an absolute path (~ is written out)."""
+    if documents is None:
+        return {}
+    if not isinstance(documents, dict):
+        raise ConfigError("[documents] must be a table")
+    folder = documents.get("folder", "~/Estia-KB")
+    path = Path(folder.strip()).expanduser() if isinstance(folder, str) and folder.strip() else None
+    if path is None or not path.is_absolute():
+        raise ConfigError("documents.folder must be an absolute path, like /Users/<you>/Estia-KB")
+    minutes = documents.get("look_minutes", 60)
+    if isinstance(minutes, bool) or not isinstance(minutes, int | float) or not 5 <= minutes <= 1440:
+        raise ConfigError("documents.look_minutes must be a number of minutes from 5 to 1440 (default 60)")
+    return {"documents_enabled": True, "documents_folder": path, "documents_look_minutes": float(minutes)}
 
 
 class _ReminderSettings(TypedDict, total=False):

@@ -35,6 +35,14 @@ def local_when(epoch_s: float, now_s: float, tz: ZoneInfo) -> str:
     return f"{moment.day} {moment:%b %Y %H:%M}"
 
 
+def local_recent(epoch_s: float, now_s: float, tz: ZoneInfo) -> str:
+    """'09:10' today, 'Mon 09:10' in the six days before, else as `local_when` ('1 Oct 08:00')."""
+    moment, today = datetime.fromtimestamp(epoch_s, tz), datetime.fromtimestamp(now_s, tz)
+    if 0 < (today.date() - moment.date()).days < 7:
+        return f"{moment:%a %H:%M}"
+    return local_when(epoch_s, now_s, tz)
+
+
 def local_date(iso_utc: str, tz: ZoneInfo) -> str:
     """'8 Oct 2026' for a UTC ISO timestamp from the database."""
     moment = datetime.fromisoformat(iso_utc).astimezone(tz)

@@ -322,3 +322,42 @@ def test_every_language_has_its_words_that_ask_for_a_code_or_a_password() -> Non
     """initiative.check_text refuses her own message that asks for one, in any of the 11 languages."""
     assert set(language.SECRET_WORDS) == set(CODES)
     assert all(language.SECRET_WORDS[code] for code in CODES)
+
+
+def test_every_language_has_its_acknowledgements_and_its_but() -> None:
+    """On a call a listener's "okay" alone carries on and a "but" alone stops her (owner, 14 Oct), in the 11."""
+    assert set(language.ACKNOWLEDGEMENTS) == set(CODES) and set(language.BUT) == set(CODES)
+    assert all(language.ACKNOWLEDGEMENTS[code] and language.BUT[code] for code in CODES)
+    english = set(language.acknowledgements("en"))
+    assert {"ok", "okay", "yes", "yeah", "mm-hm", "uh-huh", "all right", "i see", "got it", "exactly"} <= english
+    assert {"ja", "oké", "okee", "klopt", "precies"} <= set(language.acknowledgements("nl"))
+    assert {"はい", "うん", "なるほど", "そうですね"} <= set(language.acknowledgements("ja"))
+    assert {"alles klar", "genau"} <= set(language.acknowledgements("de"))
+    for code in CODES:  # the sounds Whisper writes for a listener's hum, in every language
+        assert {"mm-hmm", "uh huh"} <= set(language.acknowledgements(code)), code
+    but = {"but", "maar", "aber", "mais", "pero", "mas", "ma", "でも", "но", "ale", "하지만", "그런데"}
+    assert but == language.BUT_WORDS
+    assert not {"no", "stop", "wait", "but"} & set(language.acknowledgements("en"))
+
+
+def test_every_language_has_its_leave_taking() -> None:
+    """On a call, "I have to go" or "I'm hanging up" ends the call after her reply (owner, 14 Oct): English, Dutch and
+    German at least, the others where the phrase is clear."""
+    assert set(language.LEAVING) == set(CODES) and set(language.LEAVING_SOFT) == set(CODES)
+    assert all(language.LEAVING[code] for code in CODES)
+    english = set(language.LEAVING["en"])
+    assert {"i'm hanging up", "i'll hang up", "hanging up", "i have to go", "i've got to go", "gotta go"} <= english
+    assert {"i need to go", "i'm off"} <= english
+    assert {"ik hang op", "ik moet gaan"} <= set(language.LEAVING["nl"])
+    assert {"ich lege auf", "ich muss los"} <= set(language.LEAVING["de"])
+
+
+def test_leave_takings_soft_words_are_an_okay_never_a_yes_and_what_goes_on_is_known() -> None:
+    """Around leave-taking only a language's "okay", "so" or "now" (review 14 Oct: "Yes, I have to go" answers her);
+    a comma part starting with CONTINUING goes on from it ("I have to go, uh, to the dentist")."""
+    soft = {word for words in language.LEAVING_SOFT.values() for word in words}
+    assert {"ok", "okay", "alright", "right", "oké", "vale", "alles klar"} <= soft
+    assert not {"yes", "yeah", "exactly", "true", "fine", "good", "ja", "sí", "oui", "tak", "да", "네", "はい"} & soft
+    assert set(language.LEAVING_NOT_ALONE["en"]) <= set(language.LEAVING["en"])
+    assert set(language.CONTINUING) <= set(CODES) - {"ja", "ko"}
+    assert {"to", "back"} <= set(language.CONTINUING["en"]) and "naar" in language.CONTINUING["nl"]

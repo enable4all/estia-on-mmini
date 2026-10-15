@@ -106,6 +106,21 @@ def test_a_calendar_address_gets_its_saved_time(tmp_path: Path) -> None:
     assert bad.returncode == 1 and env.read_text().splitlines() == lines
 
 
+def test_a_caldav_password_gets_its_saved_time(tmp_path: Path) -> None:
+    env = folder(tmp_path) / "calendar.env"
+    env.write_text("CALENDAR_ICS_URL=first\nCALENDAR_SAVED_AT=1\n")
+    began = int(time.time())
+    password = "abcd-efgh-ijkl-mnop"  # privacy-ok: made up, an app-specific password's shape
+    done = secret(tmp_path, "set", "calendar.env", "CALDAV_PASSWORD_FAMILY", value=password)
+    assert done.returncode == 0, done.stderr
+    lines = env.read_text().splitlines()
+    assert lines[:3] == ["CALENDAR_ICS_URL=first", "CALENDAR_SAVED_AT=1", f"CALDAV_PASSWORD_FAMILY={password}"]
+    assert lines[3].startswith("CALENDAR_SAVED_AT_FAMILY=") and int(lines[3].split("=")[1]) >= began
+    assert password not in done.stdout + done.stderr
+    assert secret(tmp_path, "set", "calendar.env", "CALDAV_PASSWORD", value=password).returncode == 0
+    assert secret(tmp_path, "set", "calendar.env", "CALDAV_PASSWORD_family", value=password).returncode == 2
+
+
 @pytest.mark.parametrize("value", ["", "two\nlines"])
 def test_an_empty_or_broken_value_is_refused(tmp_path: Path, value: str) -> None:
     folder(tmp_path)

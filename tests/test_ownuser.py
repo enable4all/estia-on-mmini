@@ -81,6 +81,7 @@ def test_the_plist_values_are_her_user_and_the_root_owned_code() -> None:
         "RUN_GROUP": "_estia",
         "RUN_HOME": "/var/estia",
         "CODE": "/usr/local/estia/current",
+        "LOG_DIR": "/var/log/estia",  # her services' output: a root-owned folder she cannot change
     }  # no Homebrew: its folders are yours, and what she runs comes from the release
 
 
@@ -105,7 +106,10 @@ def test_the_plists_render_with_her_values(tmp_path: Path, label: str) -> None:
     assert plist["EnvironmentVariables"]["CFFIXED_USER_HOME"] == "/var/estia"  # Swift and Foundation read this home
     assert plist["ProgramArguments"][0].startswith("/usr/local/estia/current/")
     assert plist["WorkingDirectory"].startswith("/usr/local/estia/current")
-    assert plist["StandardErrorPath"].startswith("/var/estia/Library/Logs/local-assistant/")
+    log = "/var/log/estia/" + {"bridge": "launchd.log", "voice": "voice.log"}[label]
+    assert (
+        plist["StandardOutPath"] == plist["StandardErrorPath"] == log
+    )  # launchd opens it as root: never in her folder
     assert plist["Umask"] == 63
     if label == "bridge":
         assert (
@@ -212,6 +216,31 @@ def test_the_rollback_window(tmp_path: Path, as_her: None, days: int, status: st
     assert "rollback" not in by_key(ownuser.install_checks(tmp_path))
 
 
+@pytest.mark.parametrize(
+    ("marker", "rollback"),
+    [
+        ({"fresh": False, "moved_at_days": 2}, True),  # her old folders held, within the 7 days
+        ({"fresh": True, "moved_at_days": 2}, False),  # a new install: nothing was held
+        ({"fresh": False, "moved_at_days": 9}, False),  # the window is over
+        ({"fresh": False, "moved_at_days": 2, "removed": True}, False),  # remove-old ran
+        (None, False),  # no record at all
+    ],
+)
+def test_a_missing_home_offers_the_rollback_only_when_one_is_held(
+    tmp_path: Path, as_her: None, marker: dict[str, Any] | None, rollback: bool
+) -> None:
+    installed(tmp_path)
+    (tmp_path / "var/estia").rmdir()
+    if marker is not None:
+        record = {"owner": "alex", "moved_at": time.time() - marker.pop("moved_at_days") * 86400, **marker}
+        (tmp_path / "usr/local/estia/migration.json").write_text(json.dumps(record))
+    check = by_key(ownuser.install_checks(tmp_path))["own_user"]
+    assert check.status == "fail" and "/var/estia is missing" in check.text
+    assert ("estia rollback" in check.fix) is rollback, check.fix
+    if not rollback:
+        assert "no copy of her data is held" in check.fix and "backup" in check.fix
+
+
 def test_her_home_must_be_hers_alone(tmp_path: Path, as_her: None) -> None:
     installed(tmp_path)
     (tmp_path / "var/estia").chmod(0o755)
@@ -261,7 +290,11 @@ def her_old_setup(home: Path, root: Path, *, services: bool = True) -> None:
         ".config/local-assistant/web.env": ("BRAVE_API_KEY=abc\n", 0o600),
         "Library/Application Support/local-assistant/assistant.db": ("db", 0o600),
         "Library/Application Support/local-assistant/vendor/big.bin": ("x", 0o755),
-        ".local/share/signal-cli/data/accounts.json": (json.dumps({"accounts": [{"number": NUMBER}]}), 0o644),
+        ".local/share/signal-cli/data/accounts.json": (
+            json.dumps({"accounts": [{"path": "111111", "number": NUMBER}], "version": 2}),
+            0o644,
+        ),
+        ".local/share/signal-cli/data/111111": (json.dumps({"registered": True, "number": NUMBER}), 0o600),
         ".local/share/signal-cli/data/111111.d/account.db": ("signal", 0o644),  # signal-cli's own default
         "Library/Logs/local-assistant/bridge.log": ("log", 0o600),
         "Library/Caches/voice-service/cache.bin": ("ane", 0o644),
@@ -379,6 +412,8 @@ def test_the_migration_moves_her_data_into_her_home_with_private_modes(tmp_path:
     plist = plistlib.loads((root / "Library/LaunchDaemons/com.local-assistant.bridge.plist").read_bytes())
     assert plist["UserName"] == "_estia" and plist["ProgramArguments"][0].startswith("/usr/local/estia/current/")
     assert (root / "Library/LaunchDaemons/com.local-assistant.voice.plist").exists()
+    assert plist["StandardOutPath"] == "/var/log/estia/launchd.log"
+    assert (root / "var/log/estia/launchd.log").is_file() and (root / "var/log/estia/voice.log").is_file()
     assert not (root / "etc/newsyslog.d/local-assistant.conf").exists()
     assert (root / "usr/local/estia/rollback/com.local-assistant.bridge.plist").read_bytes() == OLD_PLIST
     marker = json.loads((root / "usr/local/estia/migration.json").read_text())
@@ -433,23 +468,56 @@ def test_a_failed_build_changes_nothing(tmp_path: Path, no_user: None) -> None:
     assert any("Nothing changed" in line for line in said)
 
 
-@pytest.mark.parametrize("missing", ["config", "account", "voice"])
+@pytest.mark.parametrize("missing", ["config", "account", "verified"])
 def test_the_preflight_stops_before_anything_changes(tmp_path: Path, no_user: None, missing: str) -> None:
     said: list[str] = []
     seen: list[str] = []
     move, host, home, root = migration(tmp_path, said=said, seen=seen)
     her_old_setup(home, root)
+    signal = home / ".local/share/signal-cli/data"
     if missing == "config":
         (home / ".config/local-assistant/config.toml").unlink()
     elif missing == "account":
-        (home / ".local/share/signal-cli/data/accounts.json").unlink()
-    else:
-        (tmp_path / "checkout/tools/voice/.build/release/voice-service").unlink()
+        (signal / "accounts.json").unlink()
+    else:  # signal-cli lists a number as soon as its registration starts: the code from Signal never entered
+        (signal / "111111").write_text(json.dumps({"registered": False, "number": NUMBER}))
     assert move.run() == 1
     assert seen == [] and host.asked == []  # nothing built, nothing run
     text = "\n".join(said)
     assert "Nothing changed" in text
-    assert {"config": "scripts/setup.sh", "account": "registers", "voice": "swift build -c release"}[missing] in text
+    assert {"config": "scripts/setup.sh", "account": "registers", "verified": "registers"}[missing] in text
+
+
+def test_a_number_counts_as_her_account_only_once_verified(tmp_path: Path) -> None:
+    signal = tmp_path / "signal-cli"
+    data = signal / "data"
+    data.mkdir(parents=True)
+    assert not ownuser.has_account(signal, NUMBER)  # nothing registered here
+    (data / "accounts.json").write_text(json.dumps({"accounts": [{"path": "111111", "number": NUMBER}]}))
+    assert not ownuser.has_account(signal, NUMBER)  # listed, no account file
+    (data / "111111").write_text(json.dumps({"number": NUMBER}))
+    assert not ownuser.has_account(signal, NUMBER)  # registration started, never verified
+    (data / "111111").write_text(json.dumps({"registered": False, "number": NUMBER}))
+    assert not ownuser.has_account(signal, NUMBER)
+    (data / "111111").write_text(json.dumps({"registered": "true", "number": NUMBER}))
+    assert not ownuser.has_account(signal, NUMBER)  # only signal-cli's own true
+    (data / "111111").write_text(json.dumps({"registered": True, "number": NUMBER}))
+    assert ownuser.has_account(signal, NUMBER)
+    assert not ownuser.has_account(signal, "+306900000001")  # another number
+    assert not ownuser.has_account(signal, "")  # the move names her number: never "the only one there"
+    (data / "accounts.json").write_text(json.dumps({"accounts": [{"path": "../111111", "number": NUMBER}]}))
+    assert not ownuser.has_account(signal, NUMBER)  # a path out of signal-cli's folder is never read
+
+
+def test_the_move_needs_no_voice_build_in_the_checkout(tmp_path: Path, no_user: None) -> None:
+    """Her release builds the voice service from the commit's own sources (estia-deploy): the checkout's build,
+    which may be older or from another branch, is neither needed nor used."""
+    said: list[str] = []
+    seen: list[str] = []
+    move, _host, home, root = migration(tmp_path, said=said, seen=seen)
+    her_old_setup(home, root)
+    shutil.rmtree(tmp_path / "checkout/tools/voice")
+    assert move.preflight(list(ownuser.LABELS)) == []
 
 
 @needs_plutil
@@ -503,12 +571,56 @@ def test_a_fresh_install_that_fails_says_she_does_not_run_yet(
     assert (home / ".config/local-assistant/config.toml").exists()
 
 
+def failing_start(move: ownuser.Migration) -> None:
+    """Her services start, then the bridge exits (a hand-edited config): the move fails after its service files."""
+
+    def start(labels: list[str]) -> None:
+        move.started.extend(labels)
+        raise RuntimeError("the bridge did not stay up")
+
+    move._start = start  # type: ignore[method-assign]
+
+
+@needs_plutil
+def test_a_fresh_install_that_fails_after_its_service_files_leaves_none(tmp_path: Path, no_user: None) -> None:
+    """Nothing was installed means no service file either: one left behind would say she moved (the scripts, a
+    re-run of the move) and launchd would start her at the next boot from a half-made copy."""
+    said: list[str] = []
+    move, host, home, root = migration(tmp_path, said=said)
+    her_old_setup(home, root, services=False)
+    failing_start(move)
+    assert move.run() == 1
+    assert list((root / "Library/LaunchDaemons").iterdir()) == []
+    assert ("/bin/launchctl", "bootout", "system/com.local-assistant.bridge") in host.asked
+    assert not ownuser.moved(root)
+    assert any("Nothing was installed: she does not run yet" in line for line in said)
+
+
+@needs_plutil
+def test_a_service_file_of_hers_left_by_an_earlier_try_is_not_her_old_setup(tmp_path: Path, no_user: None) -> None:
+    """A try before this fix left her service file (runs as _estia, no move on record): it is neither kept as her
+    old setup nor left when this try fails."""
+    said: list[str] = []
+    move, _host, home, root = migration(tmp_path, said=said)
+    her_old_setup(home, root, services=False)
+    daemons = root / "Library/LaunchDaemons"
+    left = daemons / "com.local-assistant.bridge.plist"
+    left.write_bytes(plistlib.dumps({"Label": "com.local-assistant.bridge", "UserName": ROLE_USER}))
+    failing_start(move)
+    assert move.run() == 1
+    assert not left.exists() and not (root / "usr/local/estia/rollback/com.local-assistant.bridge.plist").exists()
+    assert any("Nothing was installed" in line for line in said) and not any("comes back" in line for line in said)
+
+
 @needs_plutil
 def test_a_fresh_install_keeps_no_old_copy(tmp_path: Path, no_user: None) -> None:
-    move, _host, home, root = migration(tmp_path)
+    said: list[str] = []
+    move, _host, home, root = migration(tmp_path, said=said)
     her_old_setup(home, root, services=False)
     assert move.run() == 0
     assert not (root / "usr/local/estia/rollback/data").exists()  # her only copy is in /var/estia
+    done = next(line for line in said if line.startswith("✓ She runs as"))
+    assert "no rollback" in done and "estia rollback" not in "\n".join(said)  # said, never offered
     marker = json.loads((root / "usr/local/estia/migration.json").read_text())
     assert marker["fresh"] is True
     assert migration(tmp_path, mode="rollback")[0].rollback() == 1  # no earlier setup to go back to
@@ -553,6 +665,141 @@ def test_the_rollback_brings_back_her_old_setup_with_what_she_saved_since(tmp_pa
 
 
 @needs_plutil
+def test_the_rollback_never_copies_a_program_of_hers_into_your_folders(tmp_path: Path, no_user: None) -> None:
+    """Her vendor/ folder is code, never data (the move leaves it out too): a launcher planted there by her account
+    would run as you, from your data folder, after the rollback."""
+    move, _host, home, root = migration(tmp_path)
+    her_old_setup(home, root)
+    assert move.run() == 0
+    her = root / "var/estia"
+    planted = (
+        "Library/Application Support/local-assistant/vendor/signal-cli-0.14.9-jvm/signal-cli-0.14.9/bin/signal-cli"
+    )
+    (her / planted).parent.mkdir(parents=True)
+    (her / planted).write_text("#!/bin/sh\nplanted\n")
+    (her / planted).chmod(0o755)
+    (her / "Library/Application Support/local-assistant/assistant.db").write_text("a week of messages")
+    assert migration(tmp_path, mode="rollback")[0].rollback() == 0
+    assert not (home / planted).exists()
+    assert (home / "Library/Application Support/local-assistant/vendor/big.bin").exists()  # your own, from before
+    assert (home / "Library/Application Support/local-assistant/assistant.db").read_text() == "a week of messages"
+
+
+def plant(her: Path, home: Path, planted: str) -> Path:
+    """What her data never holds, put in her config folder: a program, a link out of her home or a FIFO."""
+    odd = her / ".config/local-assistant/hook"
+    if planted == "program":
+        odd.write_text("#!/bin/sh\n")
+        odd.chmod(0o700)
+    elif planted == "link":
+        odd.symlink_to(home / ".ssh")
+    else:
+        os.mkfifo(odd)
+    return odd
+
+
+@needs_plutil
+@pytest.mark.parametrize("planted", ["program", "link", "fifo"])
+def test_the_rollback_refuses_her_newer_data_with_a_program_or_a_way_out_and_changes_nothing(
+    tmp_path: Path, no_user: None, planted: str
+) -> None:
+    """Her data holds no program, no link out of her home and no FIFO: one found there means her account was used to
+    plant it (or a program of yours put it in your folder before the move). Your old services on your old Signal
+    sessions alone would break decryption, so the rollback refuses before anything stops: she keeps running as
+    _estia, your folders stay held, and the lines name the file and its fix, run as her (review 15 Oct, 1)."""
+    move, _host, home, root = migration(tmp_path)
+    her_old_setup(home, root)
+    assert move.run() == 0
+    her = root / "var/estia"
+    (her / "Library/Application Support/local-assistant/assistant.db").write_text("a week of messages")
+    plant(her, home, planted)
+    said: list[str] = []
+    back, host2, _, _ = migration(tmp_path, mode="rollback", said=said)
+    assert back.rollback() == 1
+    assert not any(argv[0] in (ownuser.LAUNCHCTL, hostsec.TAR) for argv in host2.asked)  # nothing stopped or copied
+    for old in SECRET_FOLDERS:
+        assert not os.path.lexists(home / old), old  # still held
+    assert json.loads((root / "usr/local/estia/migration.json").read_text())["rolled_back"] is False
+    assert ownuser.moved(root)
+    text = "\n".join(said)
+    shown = "/var/estia/.config/local-assistant/hook"
+    fix = "/bin/chmod a-x" if planted == "program" else "/bin/rm"
+    assert f"/usr/bin/sudo -u _estia {fix} -- {shown}" in text, text
+    assert "Nothing changed" in text and "/usr/bin/sudo /usr/local/estia/bin/estia rollback" in text
+    assert not any(line.startswith("✓") for line in said)
+
+
+@needs_plutil
+@pytest.mark.parametrize("step", ["journals", "copy"])
+def test_a_rollback_whose_copy_back_fails_starts_her_again_never_your_old_sessions_alone(
+    tmp_path: Path, no_user: None, step: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The copy back is what keeps your old services from running on your old Signal sessions alone: when it fails,
+    nothing says she runs as you, nothing is noted, and her own services start again (review 15 Oct, 1)."""
+    move, _host, home, root = migration(tmp_path)
+    her_old_setup(home, root)
+    assert move.run() == 0
+    her = root / "var/estia"
+    (her / ".local/share/signal-cli/data/111111.d/account.db").write_text("ratchet moved on")
+    said: list[str] = []
+    back, host2, _, _ = migration(tmp_path, mode="rollback", said=said)
+    if step == "journals":
+        monkeypatch.setattr(back, "_stale_journals", lambda present, owner: [home / "x.db-wal"])
+        run = host2.run
+
+        def refused(argv: Sequence[str], **kwargs: Any) -> tuple[int, str]:
+            return (1, "rm: Operation not permitted") if argv[0] == hostsec.RM else run(argv, **kwargs)
+
+        monkeypatch.setattr(host2, "run", refused)
+    else:
+        monkeypatch.setattr(host2, "pipe", lambda first, second, **kwargs: (1, "tar: No space left on device"))
+    assert back.rollback() == 1
+    text = "\n".join(said)
+    assert not any(line.startswith("✓") for line in said), text
+    assert "✗ " in text and f"She runs as {ROLE_USER} again" in text
+    assert json.loads((root / "usr/local/estia/migration.json").read_text())["rolled_back"] is False
+    for label in ownuser.LABELS:
+        plist = plistlib.loads((root / f"Library/LaunchDaemons/{label}.plist").read_bytes())
+        assert plist["UserName"] == ROLE_USER  # hers, never your old one put back
+        assert (ownuser.LAUNCHCTL, "bootstrap", "system", f"/Library/LaunchDaemons/{label}.plist") in host2.asked
+    assert ownuser.moved(root)
+    assert (her / ".local/share/signal-cli/data/111111.d/account.db").read_text() == "ratchet moved on"
+
+
+@needs_plutil
+@pytest.mark.parametrize("planted", ["program", "link", "fifo"])
+def test_a_failed_move_after_she_ran_defuses_what_her_data_never_holds_then_copies_it_back(
+    tmp_path: Path, no_user: None, planted: str
+) -> None:
+    """A move that fails after her bridge ran: what she saved meanwhile (Signal sessions) must come back with your old
+    services. A program, a link or a FIFO in her data is made harmless as her (the execute bit off, the rest
+    deleted) and named, then the copy goes on: never your old sessions alone, never her program in your folders."""
+    said: list[str] = []
+    move, _host, home, root = migration(tmp_path, said=said)
+    her_old_setup(home, root)
+    her = root / "var/estia"
+    start = move._start
+
+    def started_then_failed(labels: list[str]) -> None:
+        start(labels)
+        (her / ".local/share/signal-cli/data/111111.d/account.db").write_text("ratchet moved on")
+        plant(her, home, planted)
+        raise RuntimeError("the bridge did not stay up")
+
+    move._start = started_then_failed  # type: ignore[method-assign]
+    assert move.run() == 1
+    assert (home / ".local/share/signal-cli/data/111111.d/account.db").read_text() == "ratchet moved on"
+    hook = home / ".config/local-assistant/hook"
+    if planted == "program":
+        assert hook.is_file() and not hook.stat().st_mode & 0o111
+    else:
+        assert not os.path.lexists(hook)
+    assert any("/var/estia/.config/local-assistant/hook" in line and line.startswith("!") for line in said), said
+    for label in ownuser.LABELS:
+        assert (root / f"Library/LaunchDaemons/{label}.plist").read_bytes() == OLD_PLIST
+
+
+@needs_plutil
 def test_no_rollback_after_the_window(tmp_path: Path, no_user: None) -> None:
     move, _, home, root = migration(tmp_path)
     her_old_setup(home, root)
@@ -565,16 +812,35 @@ def test_no_rollback_after_the_window(tmp_path: Path, no_user: None) -> None:
 
 
 @needs_plutil
-def test_a_move_after_a_rollback_keeps_her_earlier_copy_aside(tmp_path: Path, no_user: None) -> None:
+def test_a_move_after_a_rollback_keeps_her_earlier_copy_aside(
+    tmp_path: Path, no_user: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Her home is hers: her account may have planted links there (.config to your ~/.config, .before-<time> to /).
+    Her earlier copy is kept aside by her own mkdir and mv, never by root following a path she controls."""
     said: list[str] = []
     move, _, home, root = migration(tmp_path)
     her_old_setup(home, root)
     assert move.run() == 0
     assert migration(tmp_path, mode="rollback")[0].rollback() == 0
-    again, _, _, _ = migration(tmp_path, said=said)
+    her = root / "var/estia"
+    real_rename, real_mkdir = os.rename, Path.mkdir
+
+    def rename(source: object, target: object, *args: object, **kwargs: object) -> None:
+        assert not str(source).startswith(str(her)) and not str(target).startswith(str(her)), (source, target)
+        real_rename(source, target, *args, **kwargs)  # type: ignore[arg-type]
+
+    def mkdir(self: Path, *args: object, **kwargs: object) -> None:
+        assert self == her or not str(self).startswith(f"{her}/"), self  # root makes only her home itself
+        real_mkdir(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "rename", rename)
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    again, host, _, _ = migration(tmp_path, said=said)
     assert again.run() == 0
-    kept = [p for p in (root / "var/estia").iterdir() if p.name.startswith(".before-")]
+    kept = [p for p in her.iterdir() if p.name.startswith(".before-")]
     assert kept and (kept[0] / ".local/share/signal-cli").is_dir()  # never deleted
+    assert ("/bin/mkdir", "-p", str(kept[0] / ".local/share")) in host.asked
+    assert ("/bin/mv", str(her / ".local/share/signal-cli"), str(kept[0] / ".local/share/signal-cli")) in host.asked
     assert any("kept her earlier copy" in line for line in said)
 
 
@@ -723,6 +989,11 @@ def test_the_account_settings_are_set_again_when_the_user_exists(
     assert not any("sysadminctl" in line for line in joined)
 
 
+# her record as `ownuser.read_account` asks dscl for it (UserShell IsHidden Password AuthenticationAuthority), on the live
+# Mac, 14 Oct (macOS 27; "No such key: AuthenticationAuthority" went to stderr)
+LIVE_RECORD = "dsAttrTypeNative:IsHidden: 1\nPassword: *\nUserShell: /usr/bin/false\n"
+
+
 @pytest.mark.parametrize(
     ("record", "problem"),
     [
@@ -737,11 +1008,23 @@ def test_the_account_settings_are_set_again_when_the_user_exists(
             "AuthenticationAuthority",
         ),
         ("NFSHomeDirectory: /var/estia\nUserShell: /usr/bin/false\nIsHidden: 1\nPassword: ********\n", "password"),
+        # live, 14 Oct (macOS 27): dscl names IsHidden as a native attribute, with its prefix
+        (LIVE_RECORD, None),
+        (LIVE_RECORD.replace("IsHidden: 1", "IsHidden: 0"), "login window"),
+        (LIVE_RECORD.replace("UserShell: /usr/bin/false", "dsAttrTypeNative:UserShell: /bin/zsh"), "shell"),
     ],
 )
 def test_her_account_record_is_checked(record: str, problem: str | None) -> None:
     found = ownuser.account_problem(record)
     assert (found is None) if problem is None else (found is not None and problem in found)
+
+
+def test_doctor_reads_her_live_record_as_hidden(tmp_path: Path, as_her: None) -> None:
+    """Live, 14 Oct: doctor said "Own user: it shows on the login window" for a hidden account, as dscl printed
+    "dsAttrTypeNative:IsHidden: 1" and the key was read up to its first colon."""
+    installed(tmp_path)
+    check = by_key(ownuser.install_checks(tmp_path, account=lambda: LIVE_RECORD))["own_user"]
+    assert check.status == "ok", check.text
 
 
 def test_doctor_shows_an_account_with_a_password_as_a_failure(tmp_path: Path, as_her: None) -> None:
@@ -767,7 +1050,7 @@ GOOD: dict[str, Any] = {
         "PYTHONUNBUFFERED": "1",
     },
     "WorkingDirectory": "/usr/local/estia/current",
-    "StandardOutPath": "/var/estia/Library/Logs/local-assistant/launchd.log",
+    "StandardOutPath": "/var/log/estia/launchd.log",
 }
 
 
@@ -783,7 +1066,9 @@ GOOD: dict[str, Any] = {
             {"EnvironmentVariables": {**GOOD["EnvironmentVariables"], "CFFIXED_USER_HOME": "/Users/alex"}},
             "CFFIXED_USER_HOME",
         ),
-        ({"StandardOutPath": "/etc/sudoers.d/zz"}, "log folder"),
+        ({"StandardOutPath": "/etc/sudoers.d/zz"}, "/var/log/estia"),
+        ({"StandardErrorPath": "/var/log/estia/../../etc/x"}, "/var/log/estia"),
+        ({"StandardOutPath": "/var/estia/Library/Logs/local-assistant/launchd.log"}, "her own folder"),
         ({"Label": "com.example.other"}, "Label"),
     ],
 )
@@ -791,6 +1076,63 @@ def test_a_service_file_that_is_not_only_hers_is_named(change: dict[str, object]
     assert ownuser.plist_problem(GOOD, "com.local-assistant.bridge") is None
     problem = ownuser.plist_problem({**GOOD, **change}, "com.local-assistant.bridge")
     assert problem is not None and word in problem
+
+
+def test_service_logs_left_in_her_folder_name_the_tools_update(tmp_path: Path, as_her: None) -> None:
+    """An install from before /var/log/estia: launchd still opens her logs as root in her folder. Not her code being
+    wrong: the tools' update and one more deploy render the new service files."""
+    installed(tmp_path)
+    plist = tmp_path / "Library/LaunchDaemons/com.local-assistant.bridge.plist"
+    data = plistlib.loads(plist.read_bytes())
+    data["StandardOutPath"] = data["StandardErrorPath"] = "/var/estia/Library/Logs/local-assistant/launchd.log"
+    plist.write_bytes(plistlib.dumps(data))
+    check = by_key(ownuser.install_checks(tmp_path))["plists"]
+    assert check.status == "warn" and "her own folder" in check.text
+    assert check.fix == (
+        "/usr/bin/sudo /usr/local/estia/bin/estia-deploy --update-tools (read the diff), then "
+        "/usr/bin/sudo /usr/local/estia/bin/estia-deploy: it moves them to /var/log/estia"
+    )
+
+
+def test_her_service_logs_are_made_in_a_root_owned_folder(tmp_path: Path) -> None:
+    """/var/log/estia (0755) and one file per service (0600, hers on the Mac): launchd opens them as root, in a folder
+    only root can change, so it never follows a link of hers; she empties them through the open file it gives her."""
+    host = RecordingHost(tmp_path)
+    ownuser.make_stream_logs(host)
+    folder = tmp_path / "var/log/estia"
+    assert stat.S_IMODE(folder.stat().st_mode) == 0o755
+    for name in ("launchd.log", "voice.log"):
+        assert stat.S_ISREG((folder / name).lstat().st_mode) and stat.S_IMODE((folder / name).stat().st_mode) == 0o600
+    (folder / "voice.log").write_text("kept")
+    ownuser.make_stream_logs(host)  # again: nothing emptied
+    assert (folder / "voice.log").read_text() == "kept"
+    (folder / "voice.log").unlink()
+    (folder / "voice.log").symlink_to(tmp_path / "elsewhere")
+    ownuser.make_stream_logs(host)  # only root could put a link there: replaced, never followed
+    assert not os.path.lexists(tmp_path / "elsewhere")
+    assert stat.S_ISREG((folder / "voice.log").lstat().st_mode)
+
+
+def test_a_second_name_of_her_log_never_blocks_an_update(tmp_path: Path) -> None:
+    """Her log is on the same volume as her home, so her account can give it a second name (`ln`) at any time; the
+    folder is root's, so that name can only lead to her own file. Root gives the service a fresh file instead of
+    refusing: a refusal would stop every update, security fixes too (review 15 Oct, 5)."""
+    host = RecordingHost(tmp_path)
+    ownuser.make_stream_logs(host)
+    folder = tmp_path / "var/log/estia"
+    (folder / "launchd.log").write_text("before")
+    os.link(folder / "launchd.log", tmp_path / "her-name")
+    ownuser.make_stream_logs(host)
+    info = (folder / "launchd.log").lstat()
+    assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600
+    assert (folder / "launchd.log").read_text() == "" and (tmp_path / "her-name").read_text() == "before"
+
+
+def test_a_link_in_place_of_her_log_folder_is_refused(tmp_path: Path) -> None:
+    (tmp_path / "var/log").mkdir(parents=True)
+    (tmp_path / "var/log/estia").symlink_to(tmp_path)
+    with pytest.raises(OSError, match="not a folder"):
+        ownuser.make_stream_logs(RecordingHost(tmp_path))
 
 
 def test_a_service_file_others_can_change_is_a_failure(tmp_path: Path, as_her: None) -> None:
@@ -978,6 +1320,7 @@ def test_a_leftover_in_the_holding_folder_never_stops_the_move(tmp_path: Path, n
 def test_a_folder_given_back_gets_its_missing_parents_as_yours(tmp_path: Path) -> None:
     """The rollback renames a held folder back; parents you deleted meanwhile are made again, and yours."""
     home, root = tmp_path / "home", tmp_path / "root"
+    home.mkdir()
     held = root / "usr/local/estia/rollback/data/1-0"
     held.mkdir(parents=True)
     (held / "account.db").write_text("x")
@@ -987,6 +1330,43 @@ def test_a_folder_given_back_gets_its_missing_parents_as_yours(tmp_path: Path) -
     move._unhold([(str(home / ".local/share/signal-cli"), str(held))])
     assert (home / ".local/share/signal-cli/account.db").read_text() == "x"
     assert (home / ".local").stat().st_uid == os.getuid()
+    assert stat.S_IMODE((home / ".local/share").stat().st_mode) == 0o700
+
+
+@pytest.mark.parametrize("planted", [".local", ".local/share"])
+def test_the_rollback_never_follows_a_link_you_made_on_the_way(tmp_path: Path, planted: str) -> None:
+    """Root gives your folders back one name at a time, never through a link: a link a program of yours put on the
+    way (~/.local to a folder only root may write) would have root make folders there, yours, and move your Signal
+    keys into it. The held folder stays held; the rollback prints the command that puts it back."""
+    home, root = tmp_path / "home", tmp_path / "root"
+    (home / ".local").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    if (home / planted).is_dir():
+        (home / planted).rmdir()
+    (home / planted).symlink_to(elsewhere)
+    held = root / "usr/local/estia/rollback/data/1-0"
+    held.mkdir(parents=True)
+    (held / "account.db").write_text("x")
+    move = ownuser.Migration(
+        RecordingHost(root), ownuser.Owner("alex", home, os.getuid()), checkout=tmp_path, mode="real", deploy=lambda: 0
+    )
+    with pytest.raises(OSError, match="link"):
+        move._unhold([(str(home / ".local/share/signal-cli"), str(held))])
+    assert list(elsewhere.iterdir()) == [] and (held / "account.db").is_file()
+
+
+def test_a_held_folder_recorded_outside_your_home_is_never_given_back(tmp_path: Path) -> None:
+    home, root = tmp_path / "home", tmp_path / "root"
+    home.mkdir()
+    held = root / "usr/local/estia/rollback/data/1-0"
+    held.mkdir(parents=True)
+    move = ownuser.Migration(
+        RecordingHost(root), ownuser.Owner("alex", home, os.getuid()), checkout=tmp_path, mode="real", deploy=lambda: 0
+    )
+    with pytest.raises(OSError, match="not in your home"):
+        move._unhold([(str(tmp_path / "etc/sudoers.d/x"), str(held))])
+    assert held.is_dir() and not (tmp_path / "etc").exists()
 
 
 def test_a_hang_up_while_the_release_builds_changes_nothing(tmp_path: Path, no_user: None) -> None:
@@ -1027,9 +1407,11 @@ def test_a_folder_reached_through_a_link_out_of_your_home_is_never_moved(tmp_pat
 
 
 def test_her_config_is_rewritten_from_the_copy_you_could_read(tmp_path: Path, no_user: None) -> None:
-    """Root never opens your config through a path you control: it rewrites the copy your tar made for her."""
-    move, _host, home, root = migration(tmp_path)
+    """Root never opens a config through a path someone else controls: not yours (your links), not hers (her links,
+    a racing process of hers). Her copy, which your tar made for her, is read and written as her."""
+    move, host, home, root = migration(tmp_path)
     her_old_setup(home, root)
+    config = root / "var/estia/.config/local-assistant/config.toml"
     opened: list[str] = []
     real_open = os.open
 
@@ -1042,8 +1424,9 @@ def test_her_config_is_rewritten_from_the_copy_you_could_read(tmp_path: Path, no
     with unittest.mock.patch.object(os, "open", watch):
         move._make_user()
         move._copy_data()
-    assert str(home / ".config/local-assistant/config.toml") not in opened
-    assert str(root / "var/estia/.config/local-assistant/config.toml") in opened
+    assert str(home / ".config/local-assistant/config.toml") not in opened and str(config) not in opened
+    assert ("/bin/cat", str(config)) in host.asked and ("/usr/bin/tee", str(config)) in host.asked
+    assert f'root = "{home / "dev"}"' in config.read_text()  # rewritten: your projects folder by its full path
 
 
 def test_her_programs_name_what_she_runs(tmp_path: Path) -> None:
@@ -1074,7 +1457,7 @@ GOOD_RECORD = "UserShell: /usr/bin/false\nIsHidden: 1\nPassword: *\n"
 
 @pytest.mark.parametrize(
     ("state", "fix"),
-    [("no user", "estia account"), ("no home", "estia rollback"), ("a password", "estia account")],
+    [("no user", "estia account"), ("no home", "backup"), ("a password", "estia account")],  # no move on record
 )
 def test_once_moved_the_own_user_fix_never_names_the_move(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str, fix: str
@@ -1207,6 +1590,10 @@ def go(move: ownuser.Migration, path: str) -> int:
 def test_a_failed_unhold_still_brings_her_services_back_and_prints_each_held_folder(
     tmp_path: Path, no_user: None, path: str
 ) -> None:
+    """A failed move brings her old services back; a rollback that stopped short starts hers again (your old ones never
+    run without what she saved since). Each folder still held is printed as two steps: root moves it straight into
+    your home under a fresh name (`mv -h`: no folder on the way, no link followed), then you move it into place
+    without admin rights (review 15 Oct, 1 and 4)."""
     import shlex
 
     said: list[str] = []
@@ -1218,15 +1605,25 @@ def test_a_failed_unhold_still_brings_her_services_back_and_prints_each_held_fol
     move._unhold = stuck  # type: ignore[method-assign]
     assert go(move, path) == 1
     for label in ownuser.LABELS:
-        assert (root / f"Library/LaunchDaemons/{label}.plist").read_bytes() == OLD_PLIST  # put back
+        service = (root / f"Library/LaunchDaemons/{label}.plist").read_bytes()
+        if path == "restore":
+            assert service == OLD_PLIST  # put back
+        else:
+            assert plistlib.loads(service)["UserName"] == ROLE_USER  # hers: she runs as before
         assert (ownuser.LAUNCHCTL, "bootstrap", "system", f"/Library/LaunchDaemons/{label}.plist") in host.asked
-    lines = [shlex.split(line) for line in said if line.strip().startswith("/usr/bin/sudo mv ")]
     held = root / "usr/local/estia/rollback/data"
-    assert sorted(words[3] for words in lines) == sorted(str(home / old) for old in SECRET_FOLDERS)
-    assert all(words[:2] == ["/usr/bin/sudo", "mv"] and Path(words[2]).parent == held for words in lines)
-    assert all(Path(words[2]).is_dir() for words in lines)  # each really still held
+    roots = [shlex.split(line) for line in said if line.strip().startswith("/usr/bin/sudo /bin/mv ")]
+    assert roots and all(words[:3] == ["/usr/bin/sudo", "/bin/mv", "-h"] for words in roots)
+    assert all(Path(words[3]).parent == held and Path(words[3]).is_dir() for words in roots)  # each really still held
+    assert all(Path(words[4]).parent == home and Path(words[4]).name.startswith("estia-restore-") for words in roots)
+    yours = [shlex.split(line.split("&&", 1)[1]) for line in said if line.strip().startswith("/bin/mkdir -p ")]
+    assert all(words[0] == "/bin/mv" for words in yours)  # yours already: no admin rights
+    assert sorted(words[2] for words in yours) == sorted(str(home / old) for old in SECRET_FOLDERS)
+    assert sorted(words[1] for words in yours) == sorted(words[4] for words in roots)
+    assert len({words[4] for words in roots}) == len(roots)  # a name of its own each
     if path == "rollback":
         assert json.loads((root / "usr/local/estia/migration.json").read_text())["rolled_back"] is False
+        assert any(f"She runs as {ROLE_USER} again" in line for line in said)
 
 
 @needs_plutil

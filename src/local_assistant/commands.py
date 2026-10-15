@@ -14,10 +14,10 @@ from local_assistant.babble import LEVELS, NOT_YET, OFFERED, START_LEVEL, Babble
 from local_assistant.context import ContextBuilder
 from local_assistant.initiative import Initiative
 from local_assistant.language import ENGLISH, LANGUAGE_KEY, LANGUAGES, find
-from local_assistant.profile import Profile
+from local_assistant.profile import Profile, by_category, category_of
 from local_assistant.reminders import ReminderError, Reminders, parse_when
 from local_assistant.soul import SOUL_MAX_CHARS
-from local_assistant.store import Message, Store
+from local_assistant.store import Fact, Message, Store
 from local_assistant.timefmt import local_date, local_datetime
 
 log = logging.getLogger(__name__)
@@ -64,6 +64,7 @@ class StatusInfo:
     messages: int
     restarts: int
     parts: tuple[str, ...] = ()  # what each part that is turned on last did (part_status), one line each
+    security: tuple[str, ...] = ()  # part_status.security_lines: the safety number, her devices, the model's pause
     reminders: str = ""  # "Reminders: 3 open · next Tue 13 Oct 07:00 (call) · 0 failed" (times and counts only)
     initiative: tuple[str, ...] = ()  # the messages she starts: counts, the improvised note, the last skips
 
@@ -158,7 +159,7 @@ class Guard:
         return prompts.DEVICE_HELD.format(device=device)
 
     def listing(self, aci: str) -> str:
-        """/devices: the devices she answers and the held ones."""
+        """/devices: the devices she answers and the held ones, each list under a bold heading, one per line."""
         known, held = [], []
         for item in self._store.devices(aci):
             day = local_date(item.first_seen, self._tz)
@@ -168,12 +169,11 @@ class Guard:
                 known.append(prompts.DEVICES_ALLOWED.format(device=item.device, day=day))
             else:
                 held.append(prompts.DEVICES_HELD_LINE.format(device=item.device, day=day))
-        lines = [f"{prompts.DEVICES_HEADER} {', '.join(known) or '-'}"]
+        blocks = ["\n".join([prompts.DEVICES_HEADER, *(known or ["-"])])]
         if held:
-            lines += [prompts.DEVICES_HELD_HEADER, *held]
-        lines.append(prompts.DEVICES_CALLS)
-        lines.append(prompts.DEVICES_FORGET_HINT.format(days=TRUST_DAYS))
-        return "\n".join(lines)
+            blocks.append("\n".join([prompts.DEVICES_HELD_HEADER, *held]))
+        blocks.append(f"{prompts.DEVICES_CALLS}\n{prompts.DEVICES_FORGET_HINT.format(days=TRUST_DAYS)}")
+        return "\n\n".join(blocks)
 
     def devices(self, aci: str, device: int | None, args: str) -> str:
         """/devices ok N or /devices forget N."""
@@ -260,6 +260,7 @@ class Guard:
 
 StatusProvider = Callable[[], Awaitable[StatusInfo]]
 Learn = Callable[[str, Message], Awaitable[str]]  # link, the /learn message → reply text
+Docs = Callable[[str, Message], Awaitable[str]]  # /docs' words after the command, its message → reply text
 VoiceLanguages = Callable[[], Awaitable[tuple[str, ...] | None]]  # the voice service's languages; None: no answer
 
 
@@ -283,7 +284,13 @@ class Commands:
         initiative: Initiative | None = None,
         babble: Babble | None = None,
         guard: Guard | None = None,
+        capabilities: Callable[[], list[str]] | None = None,
+        changed: Callable[[], None] | None = None,
+        docs: Docs | None = None,
     ) -> None:
+        """`capabilities`: code's list of what she can do here, which /help shows above the commands (the lines her
+        rules carry); `changed`: told when a level that list shows changes (/voice auto|on|off, /initiative on|off),
+        so her rules follow."""
         self._store = store
         self._profile = profile
         self._context = context
@@ -300,6 +307,9 @@ class Commands:
         self._initiative = initiative
         self._babble = babble
         self._guard = guard
+        self._capabilities = capabilities
+        self._changed = changed or (lambda: None)
+        self._docs = docs  # the documents (/docs, /docs send N): off without [documents]
 
     async def handle(self, message: Message) -> str:
         command, _, rest = message.text.strip().partition(" ")
@@ -333,6 +343,8 @@ class Commands:
                 return self._reminder_list(args, message)
             case "/quiet":
                 return self._quiet(args.lower())
+            case "/docs":
+                return await self._docs(args, message) if self._docs is not None else prompts.DOCS_OFF
             case "/initiative":
                 return self._initiative_switch(args.lower())
             case "/devices" if self._guard is not None:
@@ -344,9 +356,13 @@ class Commands:
             case "/unlock" if self._guard is not None:
                 return self._guard.unlock(message.peer_aci, message.source_device) or prompts.LOCK_NOT_FROM_KNOWN
             case "/help":
-                return prompts.HELP
+                return self._help()
             case _:
-                return f"Unknown command {command}.\n\n{prompts.HELP}"
+                return f"Unknown command {command}.\n\n{self._help()}"
+
+    def _help(self) -> str:
+        """The list of what she can do here (word for word as her rules carry it), then the commands."""
+        return prompts.help_text(self._capabilities() if self._capabilities is not None else [])
 
     def _remind(self, args: str, message: Message) -> str:
         """/remind [call] [daily|weekdays|weekly] <when> <text>: the same checks and note as Gemma's tool."""
@@ -383,7 +399,7 @@ class Commands:
             return prompts.REMINDERS_OFF
         words = args.lower().split()
         if not words:
-            return self._reminders.listing(message.peer_aci)
+            return self._reminders.listing(message.peer_aci, marked=True)
         if len(words) != 2 or words[0] != "cancel":
             return prompts.REMINDERS_USAGE
         target = words[1].lstrip("#")
@@ -417,7 +433,9 @@ class Commands:
         if not args:
             return self._initiative.state_text()
         if args in ("on", "off"):
-            return self._initiative.set_enabled(args == "on")
+            reply = self._initiative.set_enabled(args == "on")
+            self._changed()  # the list in her rules shows on or off
+            return reply
         return prompts.INITIATIVE_USAGE
 
     def _soul(self) -> str:
@@ -440,6 +458,7 @@ class Commands:
         words = args.split()
         if words and words[0] in _VOICE_MODES and len(words) == 1:
             self._store.set_state(VOICE_MODE_KEY, words[0])
+            self._changed()  # the list in her rules shows the voice answers' level
             return f"Voice replies: {_VOICE_MODES[words[0]]}."
         if words == ["voices"]:
             listed = "\n".join(f"{name}: {about}" for name, about in VOICES.items())
@@ -568,7 +587,7 @@ class Commands:
         installed = await self._voice_languages() if self._voice_languages is not None and code != ENGLISH else None
         if installed is not None and code not in installed:
             lines.append(prompts.LANGUAGE_VOICE_TOO_OLD.format(english=language.english))
-        reply = "\n".join(lines)
+        reply = "\n\n".join(lines)
         if resumed:  # the list below, the last one marked; never "start with" (practice runs)
             reply += "\n\n" + prompts.BABBLE_RESUMED_LIST.format(lines=listing_lines((code, level)))
         return reply
@@ -581,17 +600,25 @@ class Commands:
         return f"New conversation started. I still have your profile ({count} facts) and can search our earlier chats."
 
     def _profile_text(self) -> str:
+        """/profile: one fact per line with its number, under its category as a bold heading (the snapshot's order;
+        without a category: Other; no category at all: no headings), a blank line between groups."""
         facts = self._profile.facts()
         if not facts:
             return 'Your profile is empty so far. Tell me about yourself, or say "remember that ...".'
         used = sum(len(fact.text) for fact in facts)
-        lines = [f"Your profile ({used:,} of {self._profile.max_chars:,} characters):"]
-        lines += [
-            f"#{fact.id} {fact.text} ({_SOURCES[fact.source_kind]}, {local_date(fact.created_at, self._tz)})"
-            for fact in facts
-        ]
-        lines.append(prompts.PROFILE_FOOTER)
-        return "\n".join(lines)
+
+        def line(fact: Fact, text: str) -> str:
+            return f"#{fact.id} {text} ({_SOURCES[fact.source_kind]}, {local_date(fact.created_at, self._tz)})"
+
+        blocks = [prompts.PROFILE_HEADER.format(used=used, limit=self._profile.max_chars)]
+        groups = by_category(facts)
+        if groups is None:
+            blocks.append("\n".join(line(fact, fact.text) for fact in facts))
+        else:
+            blocks += [
+                "\n".join([f"**{category}**", *(line(f, rest) for f, rest in entries)]) for category, entries in groups
+            ]
+        return "\n\n".join([*blocks, prompts.PROFILE_FOOTER])
 
     def _forget(self, args: str, message_id: int) -> str:
         if not args:
@@ -611,30 +638,37 @@ class Commands:
         number = words[0].removeprefix("#") if words else ""
         if len(words) < 2 or not number.isdecimal():
             return prompts.FIX_USAGE
-        fact_id, text = int(number), words[1]
-        if all(fact.id != fact_id for fact in self._profile.facts()):
+        fact_id, text = int(number), words[1].strip()
+        fact = next((fact for fact in self._profile.facts() if fact.id == fact_id), None)
+        if fact is None:
             return prompts.FIX_NO_FACT.format(number=fact_id)
+        kept = category_of(fact.text)
+        if kept is not None and category_of(text) is None:  # /profile shows the category as a heading: it stays
+            text = f"{kept[0]}: {text}"
         problem = self._profile.fix(fact_id, text, source_message_id=message_id)
         if problem:
             return prompts.FIX_REFUSED.format(reason=problem)
         self._context.refresh_snapshot()
-        return prompts.FIX_DONE.format(number=fact_id, text=text.strip())
+        return prompts.FIX_DONE.format(number=fact_id, text=text)
 
     async def _status(self) -> str:
         info = await self._status_provider()
         facts = self._profile.facts()
         used = sum(len(fact.text) for fact in facts)
         learned = local_datetime(info.last_learning_run, self._tz) if info.last_learning_run else "not yet"
-        return "\n".join(
-            [
+        sections = {
+            prompts.STATUS_RUNNING: [
                 f"Gemma: {info.gemma}",
                 f"Waiting messages: {info.queue_length}",
+                f"Signal connection restarts: {info.restarts}",
+            ],
+            prompts.STATUS_MEMORY: [
                 f"Profile: {len(facts)} facts, {round(100 * used / self._profile.max_chars)}% full",
                 f"Last learning run: {learned}",
                 f"History: {info.messages} messages, database {info.db_bytes / 1_000_000:.1f} MB",
-                f"Signal connection restarts: {info.restarts}",
-                *info.parts,
-                *([info.reminders] if info.reminders else []),
-                *info.initiative,
-            ]
-        )
+            ],
+            prompts.STATUS_PARTS: list(info.parts),
+            prompts.STATUS_SECURITY: list(info.security),
+            prompts.STATUS_REMINDERS: [*([info.reminders] if info.reminders else []), *info.initiative],
+        }
+        return "\n\n".join("\n".join([f"**{head}**", *lines]) for head, lines in sections.items() if lines)

@@ -284,8 +284,10 @@ def test_upgrade_from_version_6_keeps_messages_and_adds_the_new_tables(tmp_path:
     kept = old.add_incoming(conv.id, ME, T0, "text", "hello")
     old.close()
     conn = sqlite3.connect(path)
-    for table in ("reminders", "followups", "initiative_log", "known_devices"):  # back to a real V6 database
-        conn.execute(f"DROP TABLE IF EXISTS {table}")
+    for table in ("reminders", "followups", "initiative_log", "known_devices", "doc_pages_fts", "doc_pages"):
+        conn.execute(f"DROP TABLE IF EXISTS {table}")  # back to a real V6 database
+    conn.execute("DROP TABLE IF EXISTS doc_files")
+    conn.execute("ALTER TABLE attachments DROP COLUMN filename")  # added by v10
     columns = [row[1] for row in conn.execute("PRAGMA table_info(messages)")]
     for column in ("footer", "source_device"):  # added by v7 and v9
         if column in columns:

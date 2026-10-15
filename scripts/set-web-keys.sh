@@ -4,8 +4,9 @@
 # the login keychain. Keys are never shown, logged or passed on a command line; only their lengths are printed.
 # Run again after changing a key in the keychain (no restart needed).
 # Add a key to the keychain with a hidden prompt: security add-generic-password -U -a "$USER" -s brave-search -w
-# (same with -s ollama or -s google-maps). Without a keychain, write web.env yourself (mode 0600, one per line):
-# BRAVE_API_KEY=..., OLLAMA_API_KEY=..., GOOGLE_MAPS_API_KEY=...
+# (same with -s ollama or -s google-maps). Without a keychain: in her own user, type each key into her web.env with
+# /usr/bin/sudo /usr/local/estia/bin/estia secret set web.env BRAVE_API_KEY (a hidden prompt; OLLAMA_API_KEY,
+# GOOGLE_MAPS_API_KEY); before it, write ~/.config/local-assistant/web.env yourself (mode 0600, one per line).
 # A key the keychain does not hold keeps its line from the old web.env; to remove a key, delete its line there.
 # Once she runs as her own user _estia, her web.env is hers alone: each key goes through a pipe into
 # /usr/bin/sudo /usr/local/estia/bin/estia secret set web.env <KEY> (never on a command line, never printed).
@@ -15,23 +16,38 @@ kc="$HOME/Library/Keychains/login.keychain-db"
 dir="$HOME/.config/local-assistant"
 file="$dir/web.env"
 
+source "$(dirname "$0")/own-user.sh"  # moved, and her commands' fixed paths ($estia, $estia_deploy)
+services=(brave-search ollama google-maps)
 read_key() { security find-generic-password -s "$1" -w "$kc" 2>/dev/null | tr -d '\r\n' || true; }
-
+# an item is found without its value even in a locked keychain: 44 means the keychain has none
+stored=0
+for service in "${services[@]}"; do
+  code=0; security find-generic-password -s "$service" "$kc" >/dev/null 2>&1 || code=$?
+  [[ $code == 44 ]] || stored=1
+done
+if ((!stored)); then
+  echo "No key is in the login keychain yet (services brave-search, ollama, google-maps); nothing saved." >&2
+  echo "Add each key with a hidden prompt, then run this again:" >&2
+  echo '  security add-generic-password -U -a "$USER" -s brave-search -w     (-s ollama for Ollama'"'"'s key)' >&2
+  if moved; then
+    echo "Or type one into her key file (a hidden prompt): /usr/bin/sudo /usr/local/estia/bin/estia secret set web.env BRAVE_API_KEY" >&2
+  fi
+  exit 1
+fi
 brave="$(read_key brave-search)"
 ollama="$(read_key ollama)"
 maps="$(read_key google-maps)"
 if [[ -z "$brave" && -z "$ollama" && -z "$maps" ]]; then
-  echo "The login keychain is locked (or holds no key): unlocking it."
+  echo "The login keychain is locked: unlocking it."
   security unlock-keychain "$kc"
   brave="$(read_key brave-search)"
   ollama="$(read_key ollama)"
   maps="$(read_key google-maps)"
 fi
 if [[ -z "$brave" && -z "$ollama" && -z "$maps" ]]; then
-  echo "No key is in the login keychain (services brave-search, ollama, google-maps); nothing saved." >&2
+  echo "No key could be read from the login keychain (services brave-search, ollama, google-maps); nothing saved." >&2
   exit 1
 fi
-source "$(dirname "$0")/own-user.sh"  # moved, and her commands' fixed paths ($estia, $estia_deploy)
 if moved; then
   pipe_key() { [[ -z "$2" ]] || printf '%s\n' "$2" | "$sudo" "$estia" secret set web.env "$1" >/dev/null; }
   pipe_key BRAVE_API_KEY "$brave"

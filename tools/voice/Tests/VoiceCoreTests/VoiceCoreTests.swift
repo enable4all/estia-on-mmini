@@ -167,6 +167,14 @@ private func sine(_ hertz: Double, rate: Int, count: Int, amplitude: Float = 1) 
         #expect(NumberNormalizer.normalize("It costs $5.99, 20% off, 3.5 kg, 1,200 items")
             == "It costs five dollars and ninety nine cents, twenty percent off, three point five kg, one thousand two hundred items")
     }
+
+    /// A number too large for Int (19 digits or more: a reference or tracking number) stays as written, never "zero".
+    @Test func aNumberTooLargeForIntStaysAsWritten() {
+        #expect(NumberNormalizer.normalize("Reference 12345678901234567890, please") == "Reference 12345678901234567890, please")
+        #expect(NumberNormalizer.normalize("$12345678901234567890.50") == "12345678901234567890 dollars and fifty cents")
+        #expect(NumberNormalizer.normalize("99999999999999999999% sure") == "99999999999999999999 percent sure")
+        #expect(NumberNormalizer.normalize("12345678901234567890.5") == "12345678901234567890 point five")
+    }
 }
 
 @Suite struct Transcripts {
@@ -361,5 +369,46 @@ private struct LoadFailed: Error {}
         #expect(throws: VoiceError.tooLong) {
             try TranscriptionRequest(target: "/v1/audio/transcriptions?language=nl", body: wav + Data(count: Limits.maxAudioBytes))
         }
+    }
+}
+
+/// FluidAudio 0.15.8's own advisory (KokoroAneManager.isBnnsCrashProneOS): an Apple BNNS bug in macOS 26.4 and 26.5
+/// can crash Kokoro's speech (EXC_BAD_ACCESS in libBNNS) whatever the compute units; 26.6 fixes it. The service
+/// says so in its log at start.
+@Suite struct KokoroOnThisMac {
+    @Test(arguments: [
+        (26, 3, false), (26, 4, true), (26, 5, true), (26, 6, false), (27, 0, false), (15, 6, false), (25, 4, false),
+    ])
+    func onlyMacOS264And265AreCrashProne(major: Int, minor: Int, prone: Bool) {
+        #expect(KokoroAdvisory.crashProne(OperatingSystemVersion(majorVersion: major, minorVersion: minor, patchVersion: 1)) == prone)
+    }
+
+    @Test func theWarningNamesTheFix() {
+        #expect(KokoroAdvisory.warning.contains("26.6 or later") && KokoroAdvisory.warning.contains("English"))
+    }
+}
+
+/// Speaking that fails to load keeps the service up (listening and the speech detector work on) and is tried again in
+/// the process after 1, 5 and 30 minutes, then every 30 minutes: never a restart loop that reloads Whisper each time.
+@Suite struct SpeakingRetries {
+    actor Record {
+        var slept: [TimeInterval] = []
+        var tries = 0
+        func sleep(_ seconds: TimeInterval) { slept.append(seconds) }
+        func attempt(succeedOn: Int) -> Bool {
+            tries += 1
+            return tries >= succeedOn
+        }
+    }
+
+    @Test func theDelaysGrowToHalfAnHour() {
+        #expect((0..<5).map(SpeakingRetry.delay(afterFailures:)) == [60, 300, 1800, 1800, 1800])
+    }
+
+    @Test func itTriesAgainUntilSpeakingLoads() async {
+        let record = Record()
+        await SpeakingRetry.run(sleep: { await record.sleep($0) }, load: { await record.attempt(succeedOn: 4) })
+        #expect(await record.slept == [60, 300, 1800, 1800])
+        #expect(await record.tries == 4)
     }
 }

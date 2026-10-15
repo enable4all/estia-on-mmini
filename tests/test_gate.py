@@ -56,7 +56,7 @@ def test_missing_sender_is_a_stranger() -> None:
 @pytest.mark.parametrize(
     "data",
     [
-        {"message": "look", "attachments": [{"contentType": "application/pdf", "id": "doc.pdf", "size": 9}]},
+        {"message": "look", "attachments": [{"contentType": "application/zip", "id": "doc.zip", "size": 9}]},
         {"attachments": [{"contentType": "audio/aac"}]},
         {"sticker": {"packId": "x", "stickerId": 1}},
         {"contacts": [{"name": {"given": "A"}}]},
@@ -236,3 +236,38 @@ def test_without_a_device_field_the_device_is_unknown() -> None:
     decision = classify(env, ALLOWED)
     assert (decision.kind, decision.device) == (Kind.TEXT, None)
     assert classify(envelope(data={"message": "hi"}, sourceDevice=3), ALLOWED).device == 3
+
+
+def test_a_pdf_is_a_document_with_its_name_and_the_words_sent_with_it() -> None:
+    pdf = {"contentType": "application/pdf", "id": "a1.pdf", "size": 9000, "filename": "Lease 2026.pdf"}
+    other = {"contentType": "application/zip", "id": "a2.zip", "size": 10}
+    decision = classify(envelope(data={"message": " what about pets? ", "attachments": [pdf, other]}), ALLOWED)
+    assert (decision.kind, decision.text) == (Kind.DOCUMENT, "what about pets?")
+    assert decision.documents == (AttachmentRef("a1.pdf", "application/pdf", 9000, filename="Lease 2026.pdf"),)
+    assert [ref.id for ref in decision.discard] == ["a2.zip"]  # deleted at once, as next to a photo
+
+
+def test_several_pdfs_and_the_old_pdf_type() -> None:
+    files = [
+        {"contentType": "application/pdf", "id": "a1.pdf", "size": 1, "filename": "one.pdf"},
+        {"contentType": "application/x-pdf", "id": "a2.pdf", "size": 2},
+        {"contentType": "application/pdf", "id": "a3.pdf", "size": 3, "filename": 7},
+    ]
+    decision = classify(envelope(data={"attachments": files}), ALLOWED)
+    assert decision.kind is Kind.DOCUMENT and decision.text == ""
+    assert [(ref.id, ref.filename) for ref in decision.documents] == [
+        ("a1.pdf", "one.pdf"),
+        ("a2.pdf", ""),
+        ("a3.pdf", ""),
+    ]
+
+
+def test_a_pdf_next_to_a_photo_is_discarded_and_a_strangers_pdf_too() -> None:
+    files = [
+        {"contentType": "image/jpeg", "id": "p1.jpeg", "size": 1},
+        {"contentType": "application/pdf", "id": "a1.pdf", "size": 2},
+    ]
+    photo = classify(envelope(data={"attachments": files}), ALLOWED)
+    assert photo.kind is Kind.PHOTO and [ref.id for ref in photo.discard] == ["a1.pdf"]
+    stranger = classify(envelope(source=STRANGER, data={"attachments": files[1:]}), ALLOWED)
+    assert stranger.kind is Kind.STRANGER and [ref.id for ref in stranger.discard] == ["a1.pdf"]

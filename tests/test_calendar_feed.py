@@ -1,5 +1,7 @@
+import ast
 import asyncio
 import json
+import logging
 import os
 import sys
 import time
@@ -11,7 +13,16 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from local_assistant.calendar_feed import CalendarFeed, FeedError, FeedGone, FeedNotSet
+from local_assistant.calendar_feed import (
+    INVALID_CODES,
+    CalendarFeed,
+    FeedError,
+    FeedGone,
+    FeedNoCalendar,
+    FeedNoPassword,
+    FeedNotSet,
+    FeedPasswordRefused,
+)
 from local_assistant.config import CalendarSource, Config
 from local_assistant.part_status import PartStatus, Record
 from tests.conftest import ME, TZ
@@ -63,6 +74,10 @@ class Calendar:
 
     def calls(self) -> list[list[str]]:
         path = Path(f"{self.state}.calls")
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def stdin(self) -> list[dict[str, str]]:
+        path = Path(f"{self.state}.stdin")
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
     def env(self) -> list[str]:
@@ -355,3 +370,88 @@ async def test_a_single_named_calendar_reads_its_own_address(tmp_path: Path) -> 
     calendars.save()
     with pytest.raises(FeedGone):  # one calendar: as before
         await feed.events(day(2026, 10, 9), day(2026, 10, 10))
+
+
+ICLOUD = CalendarSource(
+    "family", "Family", caldav="https://caldav.icloud.com", user="alex@example.com", calendar="Family"
+)
+
+
+async def test_a_caldav_calendar_gets_its_account_on_stdin_never_in_its_arguments(tmp_path: Path) -> None:
+    calendars = Several(tmp_path)
+    calendars.data["calendars"]["family"] = {"events": []}
+    calendars.config = replace(calendars.config, calendar_sources=(CalendarSource("calendar"), ICLOUD))
+    calendars.add("Dinner", "2026-10-09 19:00", "2026-10-09 21:00")
+    calendars.add_to("family", "Football", "2026-10-09 16:00", "2026-10-09 17:30")
+    agenda = await calendars.feed().events(day(2026, 10, 9), day(2026, 10, 10))
+    assert [(e.calendar, e.title) for e in agenda.events] == [("Family", "Football"), ("Calendar", "Dinner")]
+    assert sorted(call[7:] for call in calendars.calls()) == [[], ["--calendar", "family", "--caldav"]]
+    assert "icloud" not in json.dumps(calendars.calls()) and "alex" not in json.dumps(calendars.calls())
+    assert calendars.stdin() == [
+        {"server": "https://caldav.icloud.com", "user": "alex@example.com", "calendar": "Family"}
+    ]  # the Google calendar's run reads nothing there
+
+
+@pytest.mark.parametrize(
+    ("error", "kind", "reason"),
+    [
+        ("no_password", FeedNoPassword, "no_password"),
+        ("password_refused", FeedPasswordRefused, "password_refused"),
+        ("no_calendar", FeedNoCalendar, "no_calendar"),
+    ],
+)
+async def test_a_caldav_calendars_failures_are_its_own(
+    tmp_path: Path, error: str, kind: type[FeedError], reason: str
+) -> None:
+    calendar = Calendar(tmp_path)
+    calendar.data["calendars"] = {"family": {"error": error}}
+    calendar.save()
+    calendar.config = replace(calendar.config, calendar_sources=(ICLOUD,))
+    status = PartStatus(tmp_path / "status.json", clock=lambda: NOW)
+    with pytest.raises(kind) as exc:
+        await calendar.feed(status).events(day(2026, 10, 9), day(2026, 10, 10))
+    assert exc.value.reason == reason and isinstance(exc.value, FeedNotSet) == (reason == "no_password")
+    assert status.snapshot() == {"calendar:family": Record(failed=NOW, reason=reason)}
+
+
+@pytest.mark.parametrize(
+    ("code", "logged"),
+    [
+        ("redirect_refused", "invalid (redirect_refused)"),
+        ("other_server", "invalid (other_server)"),
+        ("Location: https://evil.example/ secret stuff", "invalid in"),  # not one of the helper's codes: not logged
+        (["redirect_refused"], "invalid in"),
+    ],
+)
+async def test_a_caldav_calendars_invalid_answer_names_its_service_and_logs_only_a_known_code(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, code: Any, logged: str
+) -> None:
+    calendar = Calendar(tmp_path)
+    calendar.data["calendars"] = {"family": {"error": "invalid", "code": code}}
+    calendar.save()
+    calendar.config = replace(calendar.config, calendar_sources=(ICLOUD,))
+    caplog.set_level(logging.INFO, logger="local_assistant.calendar_feed")
+    with pytest.raises(FeedError, match=r"^invalid answer from iCloud$"):
+        await calendar.feed().events(day(2026, 10, 9), day(2026, 10, 10))
+    assert logged in caplog.text and "secret stuff" not in caplog.text and "evil" not in caplog.text
+
+
+async def test_a_google_calendars_invalid_answer_names_google(tmp_path: Path) -> None:
+    calendar = Calendar(tmp_path)
+    calendar.data = {"error": "invalid"}
+    calendar.save()
+    with pytest.raises(FeedError, match=r"^invalid answer from Google$"):
+        await calendar.feed().events(day(2026, 10, 9), day(2026, 10, 10))
+
+
+def test_the_bridge_knows_the_helpers_codes() -> None:
+    """The codes the bridge logs are the helper's own (tools/ical/helper.py INVALID_CODES, read, not imported)."""
+    tree = ast.parse((Path(__file__).parents[1] / "tools" / "ical" / "helper.py").read_text())
+    found = next(
+        node.value
+        for node in tree.body
+        if isinstance(node, ast.Assign) and any(getattr(t, "id", "") == "INVALID_CODES" for t in node.targets)
+    )
+    assert isinstance(found, ast.Call) and isinstance(found.args[0], ast.Set)
+    helpers = {element.value for element in found.args[0].elts if isinstance(element, ast.Constant)}
+    assert helpers == INVALID_CODES

@@ -4,13 +4,14 @@
 # in [[calendar.sources]], the sign-in asks for Calendars.Read too; --mail-only signs in mail alone (for an
 # organisation where an administrator must approve Calendars.Read first).
 set -euo pipefail
-cd "$(dirname "$0")/.."
+here="$(cd "$(dirname "$0")" && pwd)"  # before the cd: $0 may be relative to where it was started
+cd "$here/.."
 usage="usage: scripts/mail-login.sh <mailbox address> [--mail-only]"
 case $# in
   1) ;;
   2) [[ "$2" == --mail-only ]] || { echo "$usage" >&2; exit 2; } ;;
   *) echo "$usage" >&2; exit 2 ;;
 esac
-source "$(dirname "$0")/own-user.sh"  # moved, and her commands' fixed paths ($estia, $estia_deploy)
+source "$here/own-user.sh"  # moved, and her commands' fixed paths ($estia, $estia_deploy)
 if moved; then exec "$sudo" "$estia" mail-login "$@"; fi  # the sign-in is saved in her data, as her
 exec uv run --quiet local-assistant --mail-login "$@"

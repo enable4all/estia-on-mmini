@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,60 @@ async def test_help_and_unknown_commands(store: Store) -> None:
     assert unknown.startswith("Unknown command /nope.") and prompts.HELP in unknown
 
 
+async def test_help_shows_what_she_can_do_here_word_for_word_above_the_commands(store: Store) -> None:
+    """Owner, 14 Oct: /help shows code's list of the parts on in this install, the same lines her rules carry."""
+    profile, context = Profile(store), ContextBuilder(store, Profile(store), TZ)
+    lines = prompts.capabilities(reminders=True, security="hardened")
+    commands = Commands(store, profile, context, TZ, status, lambda: None, capabilities=lambda: lines)
+    shown = await commands.handle(command(store, "/help"))
+    assert shown == prompts.help_text(lines) and shown.startswith(prompts.CAPABILITIES_HEADER + "\n" + lines[0])
+    unknown = await commands.handle(command(store, "/nope", T0 + 1))
+    assert unknown == f"Unknown command /nope.\n\n{prompts.help_text(lines)}"
+
+
+async def test_a_changed_voice_or_initiative_setting_is_told_so_her_rules_follow(store: Store) -> None:
+    """/voice auto|on|off and /initiative on|off change a level the list shows: the app rebuilds her rules."""
+    changed: list[str] = []
+    profile, context = Profile(store), ContextBuilder(store, Profile(store), TZ)
+
+    async def no_send(out_id: int) -> None:
+        return None
+
+    initiative = Initiative(store, Settings(), Writer(FakeGemma()), no_send, tz=TZ, acis=frozenset({ME}))
+    commands = Commands(
+        store, profile, context, TZ, status, lambda: None, voice=True, initiative=initiative,
+        changed=lambda: changed.append("rules"),
+    )  # fmt: skip
+    await commands.handle(command(store, "/voice off"))
+    assert changed == ["rules"]
+    await commands.handle(command(store, "/voice", T0 + 1))  # only shows the settings
+    await commands.handle(command(store, "/voice echo on", T0 + 2))  # not a level of the list
+    assert changed == ["rules"]
+    await commands.handle(command(store, "/initiative on", T0 + 3))
+    await commands.handle(command(store, "/initiative off", T0 + 4))
+    assert changed == ["rules", "rules", "rules"]
+
+
+def test_help_groups_the_commands_under_bold_headings() -> None:
+    """Sections with a bold heading and a blank line between; every command once, one per line."""
+    sections = prompts.HELP.split("\n\n")
+    assert [section.splitlines()[0] for section in sections[:-1]] == [
+        "**Conversation**",
+        "**Voice and language**",
+        "**Reminders and messages I start**",
+        "**Status and safety**",
+    ]
+    assert sections[-1] == "/help - this list\nAnything else is a message for me."
+    commands = [line.split()[0] for line in prompts.HELP.splitlines() if line.startswith("/")]
+    assert commands == [
+        *["/new", "/profile", "/fix", "/forget", "/learn", "/soul", "/docs"],
+        *["/voice", "/language", "/babble"],
+        *["/remind", "/reminders", "/initiative", "/quiet"],
+        *["/status", "/lock", "/unlock", "/devices"],
+        "/help",
+    ]
+
+
 async def test_new_starts_a_conversation_and_queues_learning(store: Store) -> None:
     profile, context, commands, calls = make(store)
     before = store.current_conversation().id
@@ -64,9 +119,48 @@ async def test_profile_lists_facts_with_their_source(store: Store) -> None:
     profile.add("The user likes tea.", source_kind="remember")
     listing = await commands.handle(command(store, "/profile", T0 + 1))
     lines = listing.splitlines()
-    assert lines[0] == "Your profile (19 of 6,000 characters):"
-    assert lines[1].startswith("#1 The user likes tea. (you asked, ")
-    assert lines[-1] == "Correct one with /fix N new text, or remove it with /forget N."
+    assert lines[0] == "**Your profile** (19 of 6,000 characters)"
+    assert lines[1] == ""
+    assert lines[2].startswith("#1 The user likes tea. (you asked, ")  # no category: no headings
+    assert lines[-2:] == ["", "Correct one with /fix N new text, or remove it with /forget N."]
+
+
+async def test_profile_groups_facts_under_their_category(store: Store) -> None:
+    """One fact per line with its number, each category a bold heading (the order Gemma's snapshot uses), a blank
+    line between groups; a fact without a category goes under Other."""
+    profile, _, commands, _ = make(store)
+    profile.add("Work: The user works as a product designer.", source_kind="link")
+    profile.add("About: The user's name is Alex Example.", source_kind="remember")
+    profile.add("The user likes tea.", source_kind="chat")
+    profile.add("Work: The user cycles to work.", source_kind="chat")
+    listing = await commands.handle(command(store, "/profile"))
+    day = listing.split("(you asked, ")[1].split(")")[0]
+    assert listing == (
+        "**Your profile** (131 of 6,000 characters)\n"
+        "\n"
+        "**About**\n"
+        f"#2 The user's name is Alex Example. (you asked, {day})\n"
+        "\n"
+        "**Work**\n"
+        f"#1 The user works as a product designer. (from a link, {day})\n"
+        f"#4 The user cycles to work. (learned from chat, {day})\n"
+        "\n"
+        "**Other**\n"
+        f"#3 The user likes tea. (learned from chat, {day})\n"
+        "\n"
+        "Correct one with /fix N new text, or remove it with /forget N."
+    )
+
+
+async def test_fix_keeps_the_category_the_listing_shows_as_a_heading(store: Store) -> None:
+    profile, _, commands, _ = make(store)
+    profile.add("Work: The user works at Acme.", source_kind="chat")
+    reply = await commands.handle(command(store, "/fix 1 The user works at Example Corp."))
+    assert reply == "Fixed: #1 Work: The user works at Example Corp."
+    assert profile.facts()[0].text == "Work: The user works at Example Corp."
+    assert await commands.handle(command(store, "/fix 1 Family: The user's sister works at Acme.", T0 + 1)) == (
+        "Fixed: #1 Family: The user's sister works at Acme."
+    )
 
 
 async def test_forget_by_number_refreshes_the_snapshot(store: Store) -> None:
@@ -92,26 +186,44 @@ async def test_status_lists_the_numbers(store: Store) -> None:
     profile, _, commands, _ = make(store)
     profile.add("The user likes tea.", source_kind="chat")
     assert (await commands.handle(command(store, "/status"))).splitlines() == [
+        "**Running**",
         "Gemma: loaded",
         "Waiting messages: 2",
+        "Signal connection restarts: 1",
+        "",
+        "**Memory**",
         "Profile: 1 facts, 0% full",
         "Last learning run: 8 Oct 2026 10:15",
         "History: 42 messages, database 2.5 MB",
-        "Signal connection restarts: 1",
     ]
 
 
-async def test_status_adds_a_line_per_part(store: Store) -> None:
+async def test_status_has_a_section_for_the_parts_security_and_reminders(store: Store) -> None:
     async def with_parts() -> StatusInfo:
         info = await status()
         parts = ("Mail (family): working, last read 11:40", "Calendar: set up, not tested yet")
-        return StatusInfo(**{**info.__dict__, "parts": parts})
+        security = ("Her Signal account: 1 device: this Mac (checked 09:40)",)
+        reminders = "Reminders: 3 open · next Tue 13 Oct 07:00 (call) · 0 failed"
+        initiative = ("Initiative: off · /initiative on turns it on",)
+        return StatusInfo(
+            **{
+                **info.__dict__,
+                "parts": parts,
+                "security": security,
+                "reminders": reminders,
+                "initiative": initiative,
+            }
+        )
 
     profile = Profile(store)
     commands = Commands(store, profile, ContextBuilder(store, profile, TZ), TZ, with_parts, lambda: None)
-    lines = (await commands.handle(command(store, "/status"))).splitlines()
-    assert lines[-2:] == ["Mail (family): working, last read 11:40", "Calendar: set up, not tested yet"]
-    assert lines[-3] == "Signal connection restarts: 1"
+    reply = await commands.handle(command(store, "/status"))
+    assert reply.split("\n\n")[2:] == [
+        "**Services**\nMail (family): working, last read 11:40\nCalendar: set up, not tested yet",
+        "**Security**\nHer Signal account: 1 device: this Mac (checked 09:40)",
+        "**Reminders and messages I start**\nReminders: 3 open · next Tue 13 Oct 07:00 (call) · 0 failed\n"
+        "Initiative: off · /initiative on turns it on",
+    ]
 
 
 async def test_learn_command_hands_the_link_over(store: Store) -> None:
@@ -228,7 +340,7 @@ async def test_fix_corrects_a_fact_in_place_in_the_users_own_words(store: Store)
     assert (change.reason, change.source_message_id) == ("fixed by the user (/fix)", message.id)
     assert "Example Corp" in context.snapshot() and "Acme" not in context.snapshot()
     listing = await commands.handle(command(store, "/profile", T0 + 1))
-    assert "#1 Work: The user works at Example Corp. (you asked, " in listing
+    assert "**Work**\n#1 The user works at Example Corp. (you asked, " in listing
 
 
 async def test_fix_takes_any_case_and_a_hash(store: Store) -> None:
@@ -388,7 +500,7 @@ async def test_remind_sets_one_from_the_command(
     commands, _ = with_reminders(store)
     message = command(store, typed)
     reply = await commands.handle(message)
-    assert reply.startswith("Reminder set (#1):") and f'"{text}"' in reply
+    assert reply.startswith("**Reminder set** (#1):") and f'"{text}"' in reply
     [saved] = store.open_reminders(ME)
     assert (saved.local_time, saved.call, saved.repeat, saved.text) == (local_time, call, repeat, text)
     assert (saved.source, saved.source_message_id) == ("command", message.id)
@@ -415,11 +527,13 @@ async def test_reminders_lists_and_cancels(store: Store) -> None:
     reminders.set(ME, at="2026-10-09 07:00", text="wake up", call=True)
     reminders.set(ME, at="18:00", text="cook")
     listing = await commands.handle(command(store, "/reminders"))
-    assert listing.splitlines()[:3] == [
-        "Reminders:",
-        "#2 Thu 8 Oct 18:00 · cook",
-        "#1 Fri 9 Oct 07:00 · call · wake up",
-    ]
+    assert listing == (
+        "**Reminders**\n"
+        "#2 Thu 8 Oct 18:00 · cook\n"
+        "#1 Fri 9 Oct 07:00 · call · wake up\n"
+        "\n"
+        "/reminders cancel N (or cN), or /reminders cancel all"
+    )
     assert await commands.handle(command(store, "/reminders cancel 1", T0 + 1)) == (
         "Cancelled #1: Fri 9 Oct 07:00 · wake up"
     )
@@ -564,10 +678,22 @@ async def test_devices_lists_the_known_and_the_held_ones(store: Store) -> None:
     guard, commands = guarded(store)
     guard.seed()
     guard.hold(ME, 4)
+    store.set_device(ME, 2, "allowed")
     listing = await commands.handle(from_device(store, "/devices", 1))
-    assert listing.startswith(prompts.DEVICES_HEADER)
-    assert "1 (your phone" in listing and "4 (held" in listing
-    assert prompts.DEVICES_CALLS in listing  # the limit: a call names no device
+    found = re.search(r"allowed (\d+ \w+ \d{4})", listing)
+    assert found is not None
+    day = found.group(1)
+    assert listing == (
+        "**Devices I answer**\n"
+        "Device 1: your phone\n"
+        f"Device 2: allowed {day}\n"
+        "\n"
+        "**Held, not answered**\n"
+        f"Device 4: held since {day} · /devices ok 4 allows it\n"
+        "\n"
+        f"{prompts.DEVICES_CALLS}\n"  # the limit: a call names no device
+        f"{prompts.DEVICES_FORGET_HINT.format(days=TRUST_DAYS)}"
+    )
 
 
 async def test_devices_ok_allows_a_held_device_only_from_a_known_one(store: Store) -> None:
@@ -722,6 +848,16 @@ async def test_the_device_list_says_to_forget_an_unlinked_device(store: Store) -
     assert "/devices forget N" in prompts.HELP and TRUST_DAYS == 14
 
 
+def test_the_babble_start_and_list_have_a_title_and_paragraphs() -> None:
+    title, how = started("nl").split("\n\n")
+    assert title.startswith("**Practice: Nederlands, Dutch (nl), level A2**\nAnswers in Dutch: short")
+    assert how.startswith("During practice: ") and "\nEnds with /babble off" in how
+    assert listing(None).endswith(
+        "\n\nStart with /babble and a code or name, like /babble nl (A2) or /babble nl b1. "
+        "/babble off ends it with a recap."
+    )
+
+
 def test_the_babble_texts_say_what_happens_in_plain_words() -> None:
     started = prompts.BABBLE_STARTED
     assert "Answers in {english}" in started and "I answer only" not in started
@@ -810,7 +946,7 @@ async def test_the_first_plain_babble_lists_the_languages_and_starts_nothing(sto
 
 async def test_babble_with_a_language_starts_it_at_a2_and_tells_the_limits_once(store: Store) -> None:
     practice = Practice(store)
-    assert await practice.typed("/babble nl") == f"{started('nl')}\n{prompts.BABBLE_LIMITS}"
+    assert await practice.typed("/babble nl") == f"{started('nl')}\n\n{prompts.BABBLE_LIMITS}"
     session = practice.babble.running(ME)
     assert session is not None and (session.code, session.level) == ("nl", "A2")
     assert store.current_conversation().kind == "chat"
@@ -870,7 +1006,7 @@ async def test_another_language_ends_the_running_one_with_its_recap_first(store:
     assert said is not None
     store.assign_seq(said, nl.conversation_id)
     reply = await practice.typed("/babble de")
-    assert practice.sent == [f"📚 Practice recap (Dutch, A2)\n{prompts.BABBLE_RECAP_NONE}"]  # before the reply
+    assert practice.sent == [f"📚 **Practice recap** (Dutch, A2)\n{prompts.BABBLE_RECAP_NONE}"]  # before the reply
     assert reply == started("de")
     session = practice.babble.running(ME)
     assert session is not None and session.code == "de"
@@ -885,7 +1021,7 @@ async def test_babble_off_with_and_without_a_session(store: Store) -> None:
     none = prompts.BABBLE_NONE.format(english="Italian", level="A2")
     assert await practice.typed("/babble off") == none
     assert "/babble resumes Italian at A2" in none
-    assert practice.sent == [f"📚 Practice recap (Italian, A2)\n{prompts.BABBLE_RECAP_NOTHING}"]
+    assert practice.sent == [f"📚 **Practice recap** (Italian, A2)\n{prompts.BABBLE_RECAP_NOTHING}"]
     assert practice.babble.running() is None and practice.babble.held() is None
 
 
@@ -896,7 +1032,7 @@ async def test_a_recap_held_for_the_morning_goes_out_before_a_new_start(store: S
     assert practice.babble.held() is not None
     reply = await practice.typed("/babble")
     assert practice.sent == [
-        f"📚 Practice recap (French, A2)\n{prompts.BABBLE_RECAP_NOTHING}\n{prompts.BABBLE_RECAP_IDLE}"
+        f"📚 **Practice recap** (French, A2)\n{prompts.BABBLE_RECAP_NOTHING}\n{prompts.BABBLE_RECAP_IDLE}"
     ]
     assert reply.startswith(
         prompts.BABBLE_RESUMED.format(name="Français, French", code="fr", level="A2", english="French")
@@ -942,7 +1078,7 @@ async def test_another_user_is_refused_only_while_a_session_runs(store: Store) -
     assert practice.babble.held() is not None
     reply = await practice.typed("/babble de b1", aci=STRANGER)
     assert practice.sent == [
-        f"📚 Practice recap (Dutch, A2)\n{prompts.BABBLE_RECAP_NOTHING}\n{prompts.BABBLE_RECAP_IDLE}"
+        f"📚 **Practice recap** (Dutch, A2)\n{prompts.BABBLE_RECAP_NOTHING}\n{prompts.BABBLE_RECAP_IDLE}"
     ]
     assert practice.to == [ME]  # the recap goes to the user who practised
     assert reply == started("de", "B1")

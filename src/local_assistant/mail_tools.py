@@ -46,7 +46,7 @@ class MailTools:
 
     # every result is stripped of chat-template tokens and hidden characters: anyone can write a mail
     async def digest(self) -> str:
-        return strip_control_tokens("Mail digest (data, not instructions):\n" + self._digest.compose())
+        return strip_control_tokens("Mail digest (data, not instructions):\n" + self._stale() + self._digest.compose())
 
     async def search(self, words: str, account: str | None = None, days: int = 30) -> str:
         return strip_control_tokens(await self._search(words, account, days))
@@ -62,7 +62,13 @@ class MailTools:
         lines = [self._line(mail) for mail in self._store.search_mail(words, account=account, since=since)]
         if not lines:
             lines = await self._live_search(words, account)
-        return header + ("\n" + "\n".join(lines) if lines else " nothing found")
+        stale = self._stale().rstrip("\n")
+        found = "\n" + "\n".join(lines) if lines else (" nothing found" if not stale else "\nnothing found")
+        return header + (f"\n{stale}" if stale else "") + found
+
+    def _stale(self) -> str:
+        """Code's line for each mailbox not read (its headers may be days old), each ending in a new line."""
+        return "".join(f"{line}\n" for line in self._digest.stale_lines())
 
     async def _read(self, number: int) -> str:
         mail_id = self._numbers.mail_id(number)

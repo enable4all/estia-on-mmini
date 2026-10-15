@@ -23,14 +23,15 @@ In scope, for this project's code:
 
 - the bridge (`src/local_assistant/`), including its configuration handling and slash commands;
 - the voice service (`tools/voice/`);
-- the device, calendar, YouTube and call helpers (`tools/tapo/`, `tools/ical/`, `tools/youtube/`, and the build and patch
-  in `tools/call-tunnel/`);
+- the device, calendar, YouTube, documents and call helpers (`tools/tapo/`, `tools/ical/`, `tools/youtube/`,
+  `tools/documents/`, and the build and patch in `tools/call-tunnel/`);
 - the scripts and the launchd templates in `scripts/` and `launchd/`.
 
 Out of scope, report them upstream:
 
 - signal-cli, RingRTC, the upstream signal-call-tunnel and youtube-transcript-api (see `THIRD_PARTY_NOTICES.md`);
 - Ollama and the Gemma model;
+- macOS and Apple's frameworks, PDFKit and Vision among them;
 - the Signal, Microsoft, Google, YouTube, Spotify, Brave and TP-Link services and apps.
 
 ## What the project tries to protect
@@ -45,9 +46,31 @@ The full threat model is in [setup_assistant.md, section 8](setup_assistant.md#8
   password; what she sends to Ollama is not (see the known gaps).
 - Projects are an extra, off by default: without `[projects]` her user reads no folder of yours. With it, her user
   reads one folder of yours, the projects folder named in setup, read-only (`scripts/share-projects.sh`, as you, no
-  admin rights); in your home she only passes through to that folder, by name, and never lists or reads anything else.
+  admin rights); in your home she only passes through to that folder (and to `~/Estia-KB` with Documents on, below), by
+  name, and her code never lists or reads anything else (what passing through by name leaves open: known
+  gaps).
+- Documents are an extra too, off without `[documents]`. With it, her user lists and reads every file in your
+  `~/Estia-KB` and saves the PDFs you send her there (`scripts/share-documents.sh`, as you, no admin rights; `--revoke`
+  takes it back, her index of the documents goes at her next look, and a new share starts a fresh one). The folder is
+  directly in your home: macOS guards Documents, Desktop and Downloads; a folder in your home needs no extra permission.
+  In your home, her account adds files only to `~/Estia-KB`, and never deletes or changes yours. It adds files to the
+  folder itself, never a folder and never anything below it. The share refuses a folder that holds a git checkout
+  (`.git`): her account would add files to code you run. An entry for you, inherited by every new file, gives you
+  full control of what she adds. A file there with a second name (a hard link, which macOS lets any account make to a
+  file it cannot read) is never shared, and the share goes into no folder that is not yours: an access entry belongs to
+  the file, not to the name, so sharing such a link would open your file elsewhere. A PDF is read by Apple's PDFKit and
+  Vision in a helper program that runs as her account: a PDF made to attack the reader reaches only that program and her
+  account, never yours. The helper runs with fixed arguments, a clean environment and bounded output, one PDF at a time,
+  stopped at 75 s (it stops itself at 60 s); a file over 25 MB never reaches it, and no link is followed. Gemma is not
+  used in the look at the folder, the reading, the index or the note on new PDFs. A document's text is outside text: an
+  answer that read one saves no fact, sets no reminder, runs no web search or Google Maps request, and its device
+  changes wait for a yes; the tool log keeps a stub. A PDF from a stranger is never saved, and `/docs send N` goes only
+  to the account that asks. Logs hold counts and codes, never a document's name or text.
 - A change to your copy of the code goes live only through an update, `/usr/bin/sudo /usr/local/estia/bin/estia-deploy`,
-  which shows the list of changes and the files they touch and asks first. Root runs only `/usr/local/estia/tools`
+  which shows the list of changes and the files they touch and asks first. It also names each program she runs from
+  outside git (signal-cli, the call helper, Java) that differs from the live release's, with the folder it comes from,
+  and stops when one changed after that question. Her voice service is built from the update's own code, never from a
+  build in your copy. Root runs only `/usr/local/estia/tools`
   (their own Python, the update code, the service templates), which change only with `--update-tools`, after showing
   what changed in them; the rollback runs from there too.
 - Only the devices you allowed get answers: your phone (Signal's device 1) from the start; a new linked device (Signal
@@ -67,6 +90,9 @@ The full threat model is in [setup_assistant.md, section 8](setup_assistant.md#8
 - With `model_digest` set, a model put in place of hers under the same name gets no message once the pin is checked: at
   the start, every 5 minutes and before every chat. Answers pause, a note says so, and doctor shows the digest. The
   pin cannot stop your own account, which runs Ollama.
+- The Mac's health alerts and their "back to normal" wait until quiet hours end: those of the messages she starts,
+  22:00 to 08:00 by default, and still 22:00 to 08:00 with `quiet_hours = ""`. Security notes (a new linked device on
+  her account, the model paused or a cloud model) are never held.
 - Whisper (speech to text) and the speech detector on calls load only files of one fixed version (one commit on
   Hugging Face), each checked against its fingerprint (sha256) at every start: a model with a changed or extra file
   is never loaded. Whisper's folder is then set aside (`<folder>.refused-<time>`, only the latest kept) and downloaded
@@ -79,14 +105,17 @@ The full threat model is in [setup_assistant.md, section 8](setup_assistant.md#8
   option, adds the firewall, stealth mode, python3 and ruby off the firewall's list and the keychain lock, after saying
   plainly that they may stop other services on this Mac (programs other machines reach stop answering them unless
   allowed, no answer to ping, more keychain prompts). Without it they are one neutral line in harden and doctor, never
-  a warning; nothing turns off what a Mac already has.
+  a warning; nothing turns off what a Mac already has. The Mac's security has two levels: hardened, set by the
+  security step (`scripts/harden.sh`), and nuclear, the hardened level with the Mac's firewall on and python3 and ruby
+  off its list (`scripts/harden.sh --nuclear`; its stealth mode and keychain lock do not count toward the level).
+  Doctor names the level the Mac is at.
 - With `[privacy] keep_days` set, older messages, pages and tool calls are deleted each night and overwritten in the
   database file; the summary of the current conversation and the profile's facts stay until `/new` or `/forget`.
 - The model has no shell. With Projects on, its project tools read only files git tracks, at the level chosen
   (summary, docs or code), never secret-like file names, binaries or files over 200 KB, and never through symlinks.
-- Mail and project text never go to a search engine or Google Maps: an answer that read mail or the user's projects
-  runs no web search and no Google Maps request (refused in code). An answer that read the calendar runs no web search;
-  an event's place may go to Google Maps.
+- Mail, project and document text never go to a search engine or Google Maps: an answer that read mail, the user's
+  projects or the user's documents runs no web search and no Google Maps request (refused in code). An answer that read
+  the calendar runs no web search; an event's place may go to Google Maps.
 - Her home address stays in the private config: the database keeps only its area, rounded to about 1 km, and a tag of
   the address (HMAC-SHA256 keyed with the Google Maps key, which is never in the database), never the address, so the
   database alone cannot confirm a guessed address. A Directions link to or from home names that rounded area. Rows an
@@ -94,11 +123,28 @@ The full threat model is in [setup_assistant.md, section 8](setup_assistant.md#8
   next start, and deleted rows are overwritten in the file.
 - Mail access is read-only (`Mail.Read`), and mail bodies are not stored.
 - Calendar access is read-only: Google calendars through their iCal address, Outlook calendars with `Calendars.Read`
-  only (its own token request, never mail's token).
+  only (its own token request, never mail's token), CalDAV calendars (iCloud, Fastmail, Nextcloud) with CalDAV's two
+  read requests only, PROPFIND and REPORT (any other request is refused in code).
 - A Google calendar's secret iCal address is kept in a mode 0600 file, read only by the calendar helper.
-- Lights and plugs are reached on the home network only. A device change requested after outside text (a web page,
-  YouTube captions, mail, a calendar entry, a project file or a photo) waits for the user's yes.
-- Text from outside sources is treated as data, never as instructions.
+- A CalDAV calendar's app-specific password is kept in that same file, read only by the calendar helper; the account's
+  server, user name and calendar name reach the helper on its input, never on its command line. Its requests go over
+  HTTPS only, to the configured server only (iCloud: Apple's icloud.com servers, as it answers from several), with at
+  most 3 redirects, no proxy and no cookies kept, all within 12 seconds; an answer that declares XML entities is
+  refused.
+- Lights and plugs are reached on the home network only. Philips Hue lights are reached only through the Hue Bridge on
+  the home network, never through Philips' cloud (no discovery service, no remote access). The bridge's key is kept in
+  a mode 0600 file (`hue.env`), read only by the device helper, never shown and never on a command line. Every
+  connection to the bridge checks its certificate against the SHA-256 fingerprint saved at pairing, and nothing is
+  sent, the key included, to a bridge that shows another certificate. A device change requested after outside text (a
+  mail, a calendar entry, a page, a search or map result, YouTube captions, a project file, a document, a photo or a
+  shared audio file) waits for the user's yes. In English, an answer that says a light or plug was switched, dimmed or
+  set while it was not changed gets the code's note "Nothing was switched." ("Nothing else was switched." when another
+  one was); a plain report of a device's state is never flagged.
+- Text from outside sources is treated as data, never as instructions. Outside text may hold her back, never start
+  anything but a note the code writes: a mail, a calendar entry, a page, a search or map result, YouTube captions, a
+  project file, a document, a photo or a shared audio file can pause the music or turn it down, make a device change
+  wait for your yes, or fill a note the code writes (the digest; a calendar change, or a new PDF in the documents
+  folder, starts one); it never starts a message the model writes, a call, a reminder or a device change.
 - YouTube: only a video link in the user's current message is read, and only its 11-character video ID reaches the
   YouTube helper, never the link; a video found by a web search is never read. The helper asks only
   https://www.youtube.com (every request and redirect checked, at most 3 redirects), with no proxy settings, no
@@ -123,27 +169,35 @@ The full threat model is in [setup_assistant.md, section 8](setup_assistant.md#8
 - Keys live in mode 0600 files or the login keychain. Logs hold only what happened and when, never message text, and so does
   `status.json` (each part's last use for doctor and `/status`: times and fixed reasons only).
 - A privacy check (`scripts/privacy_scan.py`) keeps private files, keys and personal values out of the repo. It runs in
-  `scripts/verify.sh` and, if you turn it on, before every commit.
+  `scripts/verify.sh` and, if you turn it on, before every commit. In her own user, her config's private values are
+  checked through salted hashes of them that her account gives (`~/.config/local-assistant/privacy-values.json`; the
+  check's note shows the command), never the values themselves.
 
 ## If the Mac is compromised
 
-Assume everything she holds was copied: her Signal identity, the Microsoft sign-ins, the calendar addresses, the keys
-and the TP-Link login. The same holds when a program of yours may have read her folders before the move into her own
-user: a copy taken then still works. In this order:
+Assume everything she holds was copied: her Signal identity, the Microsoft sign-ins, the calendar addresses and
+passwords, the keys, the TP-Link login and the Hue Bridge's key. The same holds when a program of yours may have read
+her folders before the move into her own user: a copy taken then still works. In this order:
 
-1. Stop her: `/usr/bin/sudo launchctl bootout system/com.local-assistant.bridge`.
+1. Stop her: `/usr/bin/sudo /usr/local/estia/bin/estia stop`. She starts again at the next restart of the Mac, with
+   the copied keys still valid: finish steps 2 to 7 first.
 2. Re-register her number from a clean machine (setup_assistant.md, 2.3): this logs out every copy of her Signal
    identity. Then compare her safety number on your phone and mark it verified.
 3. Microsoft: at mysignins.microsoft.com choose "Sign out everywhere" for each mailbox, then sign in again with
    `/usr/bin/sudo /usr/local/estia/bin/estia mail-login <address>`.
 4. Google calendars: reset each calendar's secret iCal address (Google Calendar, Settings, Integrate calendar), then
-   save the new one with `scripts/set-calendar-url.sh [name]`.
+   save the new one with `scripts/set-calendar-url.sh [name]`. CalDAV calendars: revoke each app-specific password
+   (account.apple.com, Fastmail's or Nextcloud's settings), then save a new one with
+   `scripts/set-calendar-password.sh [name]`.
 5. Keys: create new Brave, Ollama and Google Maps keys, delete the old ones in each console, then save them with
    `scripts/set-web-keys.sh`.
 6. TP-Link: change the account's password (and turn on its two-step check), then save it with
-   `scripts/set-tapo-credentials.sh`.
-7. Registration Lock PIN: set a new one for her number with `scripts/harden.sh` (it stops her, sends signal-cli `setPin`
-   through `jsonRpc` with the PIN on its input, and starts her), and keep it in your password manager, off the Mac.
+   `scripts/set-tapo-credentials.sh`. Hue: a copied key works from the home network until the bridge forgets it; a
+   factory reset of the bridge removes every key (its rooms and scenes too); then pair it again with
+   `scripts/hue-pair.sh`.
+7. Registration Lock PIN: set a new one for her number with `scripts/harden.sh --new-pin` (also while the lock is on;
+   it stops her, sends signal-cli `setPin` through `jsonRpc` with the PIN on its input, and starts her), and keep it in
+   your password manager, off the Mac.
 8. Check your own phone: Signal, Linked devices; remove any device you do not know, then send her
    `/devices forget N` for it. Check hers: `/usr/bin/sudo /usr/local/estia/bin/estia signal listDevices` (only the Mac).
 
@@ -157,14 +211,23 @@ user: a copy taken then still works. In this order:
 - The call helper is built on an old version of WebRTC, the calling library (revision 7444f).
 - Prompt injection is reduced by code-level rules, not eliminated. A model can still be talked into a wrong answer.
   Device changes and profile changes have their own checks in code.
-- One user per Mac is assumed. Ollama and the voice service, reachable only from the Mac itself (127.0.0.1:11434 and
-  127.0.0.1:8150), are trusted local services; on a Mac shared with other accounts, another user could start a
-  look-alike service at the same address first.
+- One user per Mac is assumed. Ollama, reachable only from the Mac itself (127.0.0.1:11434), is a trusted local
+  service; on a Mac shared with other accounts, another user could start a look-alike service at the same address
+  first. The voice service (127.0.0.1:8150) runs as her: the bridge sends it audio and text only over a connection
+  that a program of her own account took, checked after the connection is made and before anything is sent (macOS's
+  `lsof`, run as her, lists only her own programs). A program of yours, or of another account, that takes that
+  address while her voice service is not running gets nothing, and its words never count as yours; her voice notes
+  and calls fail meanwhile, her log says why ("not hers"), and doctor and `/status` say "another program holds its
+  address: nothing sent". Doctor's voice lines, the "voice: ready" line at the end of a move, a setup or an update,
+  and `/usr/bin/sudo /usr/local/estia/bin/estia check` read that program's health answer without the check. Before
+  her own user the bridge and the voice service run as you, and the check cannot tell your programs apart.
 - A voice note forwarded inside Signal keeps its voice-note flag, so it counts as your own words.
 - The speaking models (Kokoro for English, Supertonic-3 for the other ten languages) come from Hugging Face as
   published: no fixed version, no check of their files. By FluidAudio 0.15.8's code they are fetched only when a file
   is missing; that was not tested with the network off.
 - Health checks (`[health] extra_checks`) follow redirects; list only services you run.
+- CalDAV is untested live with iCloud, Fastmail and Nextcloud (recorded answers only). A server that sends the
+  calendar helper on to another host (iCloud's own aside) is not followed: its final address goes in the config.
 - YouTube's terms forbid automated access and downloading its content, captions included, with no exception for
   personal use; the YouTube helper does both: accepted for personal use. YouTube blocks heavy use and cloud servers; two reads from a home
   connection worked, repeated use is untested. No proxy is used, so a block stops video links until YouTube lifts it
@@ -185,30 +248,59 @@ user: a copy taken then still works. In this order:
   uncommon ending stays as written.
   Check a link's address before you open it, as with any message.
 - Calls name no device: a call from a new linked device rings like one from your phone (texts from it are held).
+- The TP-Link login goes to a configured device's address over the login that device asks for: KLAP, or AES login
+  v2 (a hash of the password, never the password itself; AES login v1 is refused, and listing devices sends no login).
+  A machine that takes a device's address (a guest's laptop, after the router gives that address away) and asks for
+  AES login v2 gets that hash: enough to guess the password offline and to control your TP-Link devices on the home
+  network. Use a TP-Link password used nowhere else, with TP-Link's two-step check on, and a fixed address per device
+  (a reservation in the router).
+- The privacy check's hashed values (`~/.config/local-assistant/privacy-values.json`) are readable by programs of
+  yours: a short value (a device's address, a phone number) can be found from its hash by trying every possible one.
+- Pairing the Hue Bridge trusts the certificate it sees first (trust on first use): a machine on the home network that
+  answered in the bridge's place while you pressed its button would be trusted. Pairing shows the certificate's check
+  value, and every later connection checks the same certificate. A certificate that changes (a factory reset, a new
+  bridge, perhaps a firmware update) stops the Hue lights until the bridge is paired again; doctor names it.
+- Hue lights are untested on a real Hue Bridge so far: the tests use answers in the shape of Philips' published
+  API (CLIP v2) and a local test server, not a bridge.
 - The local AgentJev service (the optional mail pre-filter) is a separate project: its server does not check the Host
   and Origin headers of a request, so a web page in a browser on this Mac could reach it (DNS rebinding). Run it only
   reachable only from the Mac itself (127.0.0.1), and only while you use it.
 - Ollama and AgentJev run as you: every prompt she sends (her history, profile, mail summaries, calendar events, call
   transcripts) and every mail header passes through a program your account can change, its logs or a look-alike on its
   port. Her own user keeps her files and keys from your programs, not what she sends there.
-- Root, and any program that gets root, still reads everything. While an admin rule skips the password (`NOPASSWD`
-  in `/etc/sudoers.d`), every program you run gets root without it: the security step removes such a rule. An admin's
-  password, caught once, is root.
+- Root, and any program that gets root, still reads everything. While an admin rule skips the password (`NOPASSWD`,
+  in `/etc/sudoers` or `/etc/sudoers.d`), or one admin sign-in counts for every program of yours
+  (`timestamp_type=global`), every program you run gets root without it. Doctor and the security step read what sudo
+  lists for you, and the Mac is then not at the hardened level. In `/etc/sudoers.d` the security step removes such a rule.
+  One in `/etc/sudoers` is shown with `visudo`, to remove by hand. An admin's password, caught once, is root. Every
+  command after `/usr/bin/sudo` is named by its full path too (`/bin/launchctl`, not `launchctl`): sudo looks a bare name
+  up in your Terminal's folders first.
+- Typing `/usr/bin/sudo` stops a fake `sudo` in your Terminal's folders, not one written into your shell's startup
+  files: zsh, macOS's shell, runs a function or an alias named `/usr/bin/sudo` (in `~/.zshrc` or `~/.zshenv`, which
+  programs of yours can change) even when the full path is typed. Before you type the password,
+  `whence -va /usr/bin/sudo` must list only the file, never a shell function or an alias.
 - The move and each update trust your copy of the code (the checkout) and Homebrew at that moment: what they copy is
   what she runs (the update shows the list of changes and the files first). The first move runs your copy's code as
   root, after your Mac password; after it root runs only `/usr/local/estia/tools`. `scripts/harden.sh` runs from your
   copy as you, and its admin sign-in lasts 5 minutes in that Terminal window: run it from a copy you trust.
-- Her old folders are held for 7 days where only root reaches them (`/usr/bin/sudo /usr/local/estia/bin/estia remove-old` deletes
-  them sooner, and ends the rollback). Earlier copies kept aside in `/var/estia/.before-<time>` (a retried move or a
-  move after a rollback) hold older copies of her keys and Signal data, readable only by `_estia`: the move lists them,
+- After moving an older install (one that already ran always on as you), her old folders are held for 7 days where
+  only root reaches them (`/usr/bin/sudo /usr/local/estia/bin/estia remove-old` deletes them sooner, and ends the
+  rollback). A first install has no rollback: the move keeps no copy, and her only copy of her data is in `/var/estia`.
+  Earlier copies kept aside in
+  `/var/estia/.before-<time>` (a retried move or a move after a rollback) hold older copies of her keys and Signal data, readable only by `_estia`: the move lists them,
   and the same `remove-old` deletes them. A copy a program of yours took before the move still works: if one may have, follow "If the Mac is
   compromised". A rehearsal (`--rehearse`) holds a copy of her keys in the folder you name: delete it afterwards.
+- A retried move changes her home only as her: root never makes, moves or writes anything there by a path her account
+  could have changed. The rollback gives your folders back a name at a time, never through a link in your home, and
+  copies back only her data: never her `vendor/` folder, and nothing at all when her data holds a program, a link out
+  of her home, a named pipe or a device (her newer data then stays in `/var/estia`).
 - `_estia` has no password: the move sets `Password *` and deletes `AuthenticationAuthority` and `ShadowHashData`, doctor
   checks the record, and the SSH drop-in denies the account. The first real move ran on 13 Oct; that macOS 27's
   `sysadminctl -roleAccount` leaves nothing else to log in with is still untested beyond doctor's record check
   (docs/e2e-checklist.md, 113).
-- launchd opens her two launchd log files (`launchd.log`, `voice.log`) as root in a folder she owns; that it never
-  follows a link she puts there is untested (docs/e2e-checklist.md).
+- launchd opens her services' two output files (`launchd.log`, `voice.log`) as root. They are in `/var/log/estia`, a
+  folder only root can change, so no link of hers is followed there. An install from before keeps them in her own
+  folder until `--update-tools` and one more update; doctor names it.
 - A value typed on a `/usr/bin/sudo …` command line lands in sudo's log, which admins can read: `estia secret set` refuses one,
   but the log keeps it; change that key.
 - A linked device's number is trusted until the device is silent for 14 days or `/devices forget N`: a device linked
@@ -218,6 +310,40 @@ user: a copy taken then still works. In this order:
   `scripts/share-projects.sh`), also files git does not track, such as `.env.local`: her project tools open only
   tracked files at the level chosen, and she has no shell, so
   only code running as her could read the rest.
+- Documents: macOS guards Documents, Desktop and Downloads itself (its privacy protection), whatever the access
+  entries allow. On the live Mac (14 Oct) it refused even your own SSH session a change to `~/Documents`' access
+  entries ("operation not permitted"), so the documents folder is `~/Estia-KB`, which it does not guard. A `[documents]
+  folder` set inside one of those three may be refused to her account: her log names that refusal (`EPERM`, apart from
+  a missing share's `EACCES`), and so do `/status` and doctor's last-look line. Doctor's own read runs from your SSH or
+  Terminal session, which macOS may judge apart from her background service, so its own line may differ from what she
+  gets. macOS refusing `~/Estia-KB` itself is not expected and untested: doctor and `/status` then say "macOS refuses
+  ~/Estia-KB itself (unexpected)", and her log has the `EPERM`.
+- The share looks for a git checkout (`.git`) only when it runs, and only in `~/Estia-KB` itself: code put there later
+  (a `git init`, or scripts without a `.git`) sits beside the files her account adds. Keep no code in `~/Estia-KB`.
+- With Projects or Documents on, her account passes through your home by name. Your home is closed to her otherwise,
+  and that is what normally keeps the files in it closed: a file directly in your home that lets everyone read it, or
+  a folder there that lets everyone in, and every file below such a folder that lets everyone read it, can be opened
+  by her account once it knows the name. That is the macOS default for a new file or folder: `~/.zshrc`, `~/.gitconfig`,
+  `~/.config` and the settings in it, other folders of code. Her code never does; a program that took over her
+  account (a flaw in PDFKit or Vision, below) could. Both share scripts, and doctor in her own user, name what directly
+  in your home lets every account in, with the command that closes it (`chmod o-rwx`); they change nothing of yours.
+  Doctor runs as her and cannot list your home: it looks up only the usual names (`.zshrc`, `.config`, `.ssh` and the
+  like), and says so. A projects folder deeper than your home's first level (`~/code/work`) passes her through each
+  folder on the way too (`~/code`), whatever its own mode: the projects share names what each of those folders holds
+  that every account may open, with the same `chmod o-rwx`; doctor does not look there.
+- With a flaw in PDFKit or Vision, her account could also leave files of any kind in `~/Estia-KB`. A `.command`
+  file or an app made on the Mac carries no download mark, so Gatekeeper does not check it when opened: open only PDFs
+  from that folder.
+- The documents helper runs as her account without a sandbox of its own: a PDF that exploits a flaw in PDFKit or
+  Vision could run code as her, with her keys and data. The helper opens no network connection in its own code and
+  reads a scan with every connection denied (tested); running it under macOS's `sandbox-exec` with no network is
+  planned, not built.
+- With Documents on, her user reads every file in `~/Estia-KB`, not only PDFs, and the text of each PDF stays
+  in her database until the file leaves the folder (`[privacy] keep_days` leaves it alone). PDFKit also reads text
+  that does not show on the page, such as white text: an order hidden there is outside text like any other.
+- The tests set the documents folder's access entries with the current user standing in for her: that `_estia`
+  cannot delete or change your files there, and that Finder, Spotlight and Time Machine handle the files she adds
+  (hers, readable by you through the inherited entry), is untested on a live Mac.
 - Her git trusts your repositories with `-c safe.directory=*` on its own command line (never in a config file), after
   the check of each repository's local git config; `git status` leaves submodules alone. A program of yours that changes
   a repository's git config between that check and her git command could still make git run a program as her: the

@@ -1,20 +1,25 @@
 #!/usr/bin/env bash
-# Voice, run by the user (asks for sudo): build the voice service (tools/voice) as you, put it into her release with
-# /usr/bin/sudo /usr/local/estia/bin/estia-deploy --voice, which installs and starts it as an always-on LaunchDaemon (runs as
-# her own user _estia, 127.0.0.1:8150). Her own user comes first: scripts/install-daemon.sh.
-# The first start downloads the models (~1.6 GB; the move into her own user copies them when they are there) and the
+# Voice, run by the user (asks for sudo): /usr/bin/sudo /usr/local/estia/bin/estia-deploy --voice builds the voice service
+# (tools/voice) as you from the commit's own sources, puts it into her release and installs and starts it as an
+# always-on LaunchDaemon (runs as her own user _estia, 127.0.0.1:8150). Her own user comes first: scripts/install-daemon.sh.
+# Later updates need no extra step: each deploy builds it again when the commit's tools/voice changed.
+# The first start downloads the models (~1.7 GB; the move into her own user copies them when they are there) and the
 # Neural Engine compiles them (up to ~15 minutes; again after a macOS update): /health says "loading" until then.
 # Then turn voice on in her config (take the # off [voice] and its lines):
-#   /usr/bin/sudo -u _estia -e /var/estia/.config/local-assistant/config.toml
-# and restart the bridge: /usr/bin/sudo launchctl kickstart -k system/com.local-assistant.bridge
-# Undo: /usr/bin/sudo launchctl bootout system/com.local-assistant.voice
-#       /usr/bin/sudo rm /Library/LaunchDaemons/com.local-assistant.voice.plist
+#   /usr/bin/sudo /usr/local/estia/bin/estia config   (nano as her; Ctrl-O, Enter saves; Ctrl-X quits)
+# and restart the bridge: /usr/bin/sudo /usr/local/estia/bin/estia restart
+# Undo: /usr/bin/sudo /usr/local/estia/bin/estia stop voice
+#       /usr/bin/sudo /bin/rm /Library/LaunchDaemons/com.local-assistant.voice.plist
 set -euo pipefail
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 [[ "$(id -u)" != 0 ]] || { echo "run as your normal user, not root (the script calls sudo itself)" >&2; exit 1; }
+case "$(sw_vers -productVersion 2>/dev/null)" in  # FluidAudio 0.15.8's own advisory (its logger only)
+  26.4|26.4.*|26.5|26.5.*)
+    echo "warning: macOS 26.4 and 26.5 have an Apple bug that can crash English speech (Kokoro) and the voice" >&2
+    echo "service with it, in the middle of a call; update to macOS 26.6 or later" >&2 ;;
+esac
 source "$(dirname "$0")/own-user.sh"  # moved, and her commands' fixed paths ($estia, $estia_deploy)
 moved || { echo "her own user comes first: scripts/install-daemon.sh" >&2; exit 1; }
-(cd "$repo/tools/voice" && swift build -c release --force-resolved-versions)  # exactly the versions in Package.resolved
 "$sudo" "$estia_deploy" --voice "$repo"
 echo "waiting for the models (first start: download and Neural Engine compile, up to ~15 minutes)"
 state=""

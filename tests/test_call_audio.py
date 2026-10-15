@@ -543,20 +543,23 @@ def test_the_calls_end_line_counts_each_rule_in_charge_and_as_the_shadow() -> No
     barge.stopped.update(speech=1)
     barge.would.update(loudness=4)
     barge.her_own_voice(500.0)
+    barge.acknowledgement()  # a listener's "okay" over her: she carried on (calls.is_acknowledgement)
+    barge.acknowledgement()
     assert barge.summary() == (
         "calls: barge-in speech: speech stopped her 1 time, would have 0; loudness stopped her 0 times, would have 4;"
-        " her own voice 1; detector 0 chunks, slowest 0 ms, 0 failed"
+        " her own voice 1; acknowledgements 2; detector 0 chunks, slowest 0 ms, 0 failed"
     )
     assert Barge("loudness", detector).summary() == (
         "calls: barge-in loudness: loudness stopped her 0 times, would have 0; speech stopped her 0 times, would have 0;"
-        " her own voice 0; detector 0 chunks, slowest 0 ms, 0 failed"
+        " her own voice 0; acknowledgements 0; detector 0 chunks, slowest 0 ms, 0 failed"
     )
     assert Barge("speech", None).summary() == (
         "calls: barge-in speech (loudness: no speech detector): loudness stopped her 0 times, would have 0;"
-        " her own voice 0"
+        " her own voice 0; acknowledgements 0"
     )
     assert Barge("loudness", None).summary() == (
-        "calls: barge-in loudness (no speech detector): loudness stopped her 0 times, would have 0; her own voice 0"
+        "calls: barge-in loudness (no speech detector): loudness stopped her 0 times, would have 0; her own voice 0;"
+        " acknowledgements 0"
     )
 
 
@@ -603,7 +606,7 @@ async def test_the_end_line_has_the_detectors_failures_by_kind_and_its_slowest_a
     await audio.say(tone(1.2), barge=True)  # 4 chunks
     assert barge.summary() == (
         "calls: barge-in speech: speech stopped her 0 times, would have 0; loudness stopped her 0 times, would have 0;"
-        " her own voice 0; detector 4 chunks, slowest 350 ms, 2 failed (http 1, timeout 1)"
+        " her own voice 0; acknowledgements 0; detector 4 chunks, slowest 350 ms, 2 failed (http 1, timeout 1)"
     )
     pump.cancel()
 
@@ -614,7 +617,7 @@ async def test_a_fall_back_says_why_in_the_end_line() -> None:
     assert (await audio.say(tone(6.0), barge=True)).barged  # loudness, after the third failed chunk
     assert barge.summary() == (
         "calls: barge-in speech (loudness after 3 failed answers in a row): speech stopped her 0 times, would have 0;"
-        " loudness stopped her 1 time, would have 0; her own voice 0; detector 3 chunks, slowest 0 ms, 3 failed"
-        " (http 3)"
+        " loudness stopped her 1 time, would have 0; her own voice 0; acknowledgements 0; detector 3 chunks, slowest"
+        " 0 ms, 3 failed (http 3)"
     )
     pump.cancel()

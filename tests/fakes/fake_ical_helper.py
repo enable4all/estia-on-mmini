@@ -2,9 +2,11 @@
 
 Run as `fake_ical_helper.py <state.json> events --from <ISO> --to <ISO> --zone <zone> [--calendar NAME] [--words W]
 [--limit N]` (the state file comes first, as part of the command the tests configure). The state file holds
-{"calendar": name, "events": [helper-form events]} or {"error": "gone" | "not_set" | "unreachable" | "invalid"};
+{"calendar": name, "events": [helper-form events]} or {"error": "gone" | "not_set" | "unreachable" | "invalid"} (with
+"code": the helper's fixed code of an invalid CalDAV answer);
 "sleep" (seconds) delays the answer, "raw" replaces the answer with that text. With --calendar NAME the state is
-"calendars"[NAME] instead (none there: not set). Events overlapping the range are
+"calendars"[NAME] instead (none there: not set). With --caldav the account's JSON line is read from stdin and appended
+to <state>.stdin (the real helper reads it there). Events overlapping the range are
 returned in start order; --words keeps those whose title or place has every word. Every call's arguments are
 appended to <state>.calls (one JSON list per line), the names of its environment variables written to
 <state>.env and its process ID to <state>.pid.
@@ -37,6 +39,9 @@ def main() -> None:
         calls.write(json.dumps(args) + "\n")
     Path(f"{path}.env").write_text(json.dumps(sorted(os.environ)))
     Path(f"{path}.pid").write_text(str(os.getpid()))
+    if "--caldav" in args:
+        with open(f"{path}.stdin", "a") as account:
+            account.write(sys.stdin.readline().strip() + "\n")
     state: dict[str, Any] = json.loads(path.read_text())
     if "--calendar" in args:
         state = state.get("calendars", {}).get(args[args.index("--calendar") + 1], {"error": "not_set"})
@@ -45,10 +50,11 @@ def main() -> None:
         print(state["raw"])
         raise SystemExit(1)
     if "error" in state:
-        print(json.dumps({"ok": False, "error": state["error"], "detail": "fake"}))
+        fixed = {"code": state["code"]} if "code" in state else {}
+        print(json.dumps({"ok": False, "error": state["error"], "detail": "fake"} | fixed))
         raise SystemExit(1)
     options: dict[str, str] = {}
-    rest = iter(args[1:])
+    rest = iter(arg for arg in args[1:] if arg != "--caldav")
     for arg in rest:
         key, sep, value = arg.partition("=")
         options[key] = value if sep else next(rest)

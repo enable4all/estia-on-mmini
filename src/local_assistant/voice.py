@@ -2,7 +2,9 @@
 
 The voice service listens (WhisperKit) and speaks (Kokoro for English, Supertonic-3 for the other languages) on the
 Neural Engine, and on a call tells how likely the caller's last 256 ms are speech (Silero VAD through FluidAudio);
-the bridge only talks HTTP to it on 127.0.0.1, in one language at a time. Spoken answers are cleaned
+the bridge only talks HTTP to it on 127.0.0.1, in one language at a time, and only over a connection whose other end a
+program of its own account holds (`peer_is_ours`): in her own user a program of the owner's could take the port while
+her service is not bound, and get the audio and send back words that count as the user's. Spoken answers are cleaned
 deterministically (spec 3.3) and converted to AAC in M4A with macOS's own `afconvert`, so Signal shows a real
 voice-note bubble.
 """
@@ -11,21 +13,30 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import http.client
 import json
+import logging
 import os
 import re
-import urllib.error
-import urllib.request
+import subprocess
+import time
+import urllib.parse
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from local_assistant import signal_text
 from local_assistant.language import ENGLISH
 from local_assistant.part_status import PartStatus
 
+log = logging.getLogger(__name__)
+
 AFCONVERT = "/usr/bin/afconvert"
+LSOF = "/usr/sbin/lsof"
+CHECK_SECONDS = 2.0  # at most, for the check of whose program took a connection (a call's detector: its own limit)
+TAKEN_WAIT = 0.02  # between two looks while a listener of ours has not taken the connection yet
 CONVERT_TIMEOUT = 60.0
 MAX_RESPONSE = 50 * 1024 * 1024
 MIN_SPOKEN = 10
@@ -39,6 +50,40 @@ class VoiceError(Exception):
 
 class VoiceUnavailableError(VoiceError):
     """The voice service is not running or still loading its models."""
+
+
+class VoiceNotHersError(VoiceUnavailableError):
+    """The program at the voice service's address is not one of her own account's: nothing is sent to it (part_status
+    `not_hers`). One that could not be checked in time is a VoiceUnavailableError: nothing is sent either."""
+
+
+def peer_is_ours(port: int, local: int, seconds: float = CHECK_SECONDS) -> bool | None:
+    """Whether a program of this account took this account's connection from 127.0.0.1:`local` to 127.0.0.1:`port`
+    (None: lsof could not run in `seconds`). lsof lists only the processes of the account that runs it (never root
+    here), so another account's program (the owner's, in her own user) is never in its list: a connection it does not
+    show taken is not hers. The connection itself is checked, not only who listens: a program that took it and then left
+    the port to her service is still not hers. Without a listener of ours the answer is no at once; with one, the
+    taking is waited for within `seconds` (a connection waits for its accept)."""
+    taken, listening = f"n127.0.0.1:{port}->127.0.0.1:{local}", f"n127.0.0.1:{port}"
+    deadline, looked = time.monotonic() + seconds, False
+    while True:
+        try:
+            done = subprocess.run(
+                [LSOF, "-nP", f"-iTCP@127.0.0.1:{port}", "-Fn"],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=max(deadline - time.monotonic(), 0.01),
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False if looked else None  # after a look that found it not taken: not taken in time
+        looked = True
+        names = set(done.stdout.decode("ascii", "replace").splitlines())
+        if taken in names:
+            return True
+        if listening not in names or time.monotonic() + TAKEN_WAIT >= deadline:
+            return False
+        time.sleep(TAKEN_WAIT)
 
 
 class VoiceTooLongError(VoiceError):
@@ -71,7 +116,8 @@ def sniff(data: bytes) -> str | None:
 
 
 class VoiceClient:
-    """HTTP to voice-service on 127.0.0.1 (no proxies). Every request carries the language; English requests carry
+    """HTTP to voice-service on 127.0.0.1 (no proxies), only once the connection is made and `peer` finds a program of
+    this account at its other end: else nothing is sent. Every request carries the language; English requests carry
     none (exactly as before the languages), so an older voice service keeps working in English."""
 
     def __init__(
@@ -83,8 +129,14 @@ class VoiceClient:
         timeout: float = 120.0,
         status: PartStatus | None = None,
         language: str = ENGLISH,
+        peer: Callable[[int, int, float], bool | None] = peer_is_ours,
     ) -> None:
-        self._base = base_url.rstrip("/")
+        parts = urllib.parse.urlsplit(base_url)
+        # her voice service listens on 127.0.0.1 only: "localhost" is reached there, never at another address
+        self._host = "127.0.0.1" if parts.hostname in (None, "localhost") else parts.hostname
+        self._port = parts.port or 80
+        self._peer = peer
+        self._not_hers: bool | None = False  # the last check's verdict when it was not "hers" (logged once a change)
         self._voice = voice
         self._speed = speed
         self._timeout = timeout
@@ -191,6 +243,9 @@ class VoiceClient:
         """A transcription or speech request: a service that does not answer is recorded (part_status)."""
         try:
             return await self._request(method, path, body, content_type)
+        except VoiceNotHersError:  # another account's program at her address: doctor and /status name it
+            self._status.failed("voice", "not_hers")
+            raise
         except VoiceUnavailableError:
             self._status.failed("voice", "no_answer")
             raise
@@ -208,18 +263,43 @@ class VoiceClient:
         self, method: str, path: str, body: bytes | None, content_type: str | None, *, seconds: float | None = None
     ) -> tuple[int, bytes]:
         def call() -> tuple[int, bytes]:
-            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             headers = {"Content-Type": content_type} if content_type else {}
-            request = urllib.request.Request(self._base + path, data=body, headers=headers, method=method)
+            limit = seconds or self._timeout
+            started = time.monotonic()
+            connection = http.client.HTTPConnection(self._host, self._port, timeout=limit)
             try:
-                with opener.open(request, timeout=seconds or self._timeout) as response:
-                    return response.status, response.read(MAX_RESPONSE)
-            except urllib.error.HTTPError as exc:
-                return exc.code, exc.read(64 * 1024)
-            except (urllib.error.URLError, OSError) as exc:
+                connection.connect()  # first the connection, then whose program took it: then the request
+                assert connection.sock is not None
+                verdict = self._peer(self._port, connection.sock.getsockname()[1], min(limit, CHECK_SECONDS))
+                self._say(verdict)
+                if verdict is False:
+                    raise VoiceNotHersError("the program at the voice service's address is not hers: nothing sent")
+                if verdict is None:
+                    raise VoiceUnavailableError("whose program is at the voice service's address: not checked in time")
+                # the check counts within the request's own time (a call's detector: VAD_TIMEOUT in all)
+                connection.sock.settimeout(max(limit - (time.monotonic() - started), 0.01))
+                connection.request(method, path, body=body, headers=headers)
+                response = connection.getresponse()
+                return response.status, response.read(MAX_RESPONSE)
+            except (OSError, http.client.HTTPException) as exc:
                 raise VoiceUnavailableError(f"the voice service is not answering ({type(exc).__name__})") from exc
+            finally:
+                connection.close()
 
         return await asyncio.to_thread(call)
+
+    def _say(self, verdict: bool | None) -> None:
+        """The log line when the program at the port is not hers or could not be checked, once while it lasts, and
+        when her own service holds it again (the port only: no address, no text)."""
+        now = None if verdict is None else not verdict
+        if now != self._not_hers:
+            if now is None:
+                log.warning("voice: whose program is at port %d could not be checked: nothing sent", self._port)
+            elif now:
+                log.warning("voice: the program at port %d is not hers (not her account's): nothing sent", self._port)
+            else:
+                log.info("voice: her own voice service holds port %d again", self._port)
+        self._not_hers = now
 
 
 DETECTOR_STATES = ("ready", "loading", "unavailable")  # what the voice service's health says as "vad"
@@ -240,10 +320,7 @@ def detector_state(health: Mapping[str, object] | None) -> str:
 
 def _timed_out(exc: BaseException) -> bool:
     """Whether a request failed for lack of an answer in time (a read or a connect that timed out)."""
-    cause = exc.__cause__
-    if isinstance(cause, urllib.error.URLError):
-        cause = cause.reason if isinstance(cause.reason, BaseException) else None
-    return isinstance(cause, TimeoutError)
+    return isinstance(exc.__cause__, TimeoutError)
 
 
 def _refusal(status: int) -> VoiceError:
@@ -261,6 +338,31 @@ _LINK = re.compile(r"\[([^\]\n]*)\]\([^)\s]*\)")
 _INLINE = re.compile(r"`([^`\n]*)`")
 _URL = re.compile(r"(?:https?://|www\.)[^\s)\]>]*[^\s)\]>.,;:!?]")
 _PATH = re.compile(r"(?<![\w/])(?:~|\.{1,2})?/(?:[\w.-]+/)*[\w.-]*[\w-]")
+# the user's commands (commands.py; /help names them): said as "slash reminders", never left out as a path ("/reminders"
+# alone looks like one); a command with more path after it ("/new/x", "/help.txt") is a path
+COMMANDS = (
+    "new",
+    "profile",
+    "forget",
+    "fix",
+    "status",
+    "learn",
+    "voice",
+    "voices",
+    "soul",
+    "docs",
+    "language",
+    "babble",
+    "remind",
+    "reminders",
+    "quiet",
+    "initiative",
+    "devices",
+    "lock",
+    "unlock",
+    "help",
+)
+_COMMAND = re.compile(rf"(?<![\w/~.])/({'|'.join(COMMANDS)})(?![\w-]|/|\.\w)", re.IGNORECASE)
 _EMOJI = re.compile("[\U0001f000-\U0001faff☀-➿⬀-⯿️‍]")
 _EMPHASIS = re.compile(r"\*\*|__|~~")
 _TABLE_RULE = re.compile(r"^\|?\s*:?-{2,}")
@@ -278,8 +380,9 @@ def spoken_text(answer: str, max_chars: int = 1500, *, min_chars: int = MIN_SPOK
         return ""
     text = _FENCE.sub("\n", answer)
     text = _INLINE.sub(r"\1", _LINK.sub(r"\1", text))
-    text = _EMOJI.sub("", _PATH.sub("", _URL.sub("", text)))
-    text = _EMPHASIS.sub("", text)
+    text = _COMMAND.sub(lambda found: f"slash {found.group(1).lower()}", _URL.sub("", text))  # before paths
+    text = _EMOJI.sub("", _PATH.sub("", text))
+    text = _EMPHASIS.sub("", signal_text.spoken(text))  # the text styles' reading; then any unpaired ** __ ~~
     blocks: list[str] = []
     current: list[str] = []
     for raw in text.splitlines():

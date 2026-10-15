@@ -1,21 +1,26 @@
 #!/bin/bash
-# Her owner commands, installed root-owned as /usr/local/estia/bin/estia. Run them with sudo, by that full path:
-#   sudo /usr/local/estia/bin/estia doctor                          the read-only check (exit 1 on ✗)
-#   sudo /usr/local/estia/bin/estia logs [bridge|voice|launchd] [-n N]
-#   sudo /usr/local/estia/bin/estia check                           the service, signal-cli, the last messages
-#   sudo /usr/local/estia/bin/estia restart                         the bridge, after a change to her config
-#   sudo /usr/local/estia/bin/estia mail-login <address> [--mail-only]
-#   sudo /usr/local/estia/bin/estia spotify-login
-#   sudo /usr/local/estia/bin/estia secret set <file> <KEY>         the value from a hidden prompt or stdin, never argv
-#   sudo /usr/local/estia/bin/estia tapo-discover
-#   sudo /usr/local/estia/bin/estia signal listIdentities|trust|listDevices|removeDevice [options]
-#                                                                   her signal-cli, the bridge stopped meanwhile
-#   sudo /usr/local/estia/bin/estia unlock                          ends /lock from the Mac (the bridge restarts)
-#   sudo /usr/local/estia/bin/estia rollback                        back to your user, within 7 days of the move
-#   sudo /usr/local/estia/bin/estia remove-old                      delete her old folders held since the move
-#   sudo /usr/local/estia/bin/estia account                         her account again: no shell, hidden, no password
+# Her owner commands, installed root-owned as /usr/local/estia/bin/estia. Run them with /usr/bin/sudo, by that full path:
+#   /usr/bin/sudo /usr/local/estia/bin/estia doctor                   the read-only check (exit 1 on ✗)
+#   /usr/bin/sudo /usr/local/estia/bin/estia logs [bridge|voice|launchd] [-n N]
+#   /usr/bin/sudo /usr/local/estia/bin/estia check                    the service, signal-cli, the last messages
+#   /usr/bin/sudo /usr/local/estia/bin/estia restart                  the bridge, after a change to her config
+#   /usr/bin/sudo /usr/local/estia/bin/estia config [soul]            her config (or style file) in nano, as her
+#   /usr/bin/sudo /usr/local/estia/bin/estia stop [voice]             the bridge (or the voice service) until start or a reboot
+#   /usr/bin/sudo /usr/local/estia/bin/estia start [voice]            it again
+#   /usr/bin/sudo /usr/local/estia/bin/estia mail-login <address> [--mail-only]
+#   /usr/bin/sudo /usr/local/estia/bin/estia spotify-login
+#   /usr/bin/sudo /usr/local/estia/bin/estia secret set <file> <KEY>  the value from a hidden prompt or stdin, never argv
+#   /usr/bin/sudo /usr/local/estia/bin/estia tapo-discover
+#   /usr/bin/sudo /usr/local/estia/bin/estia hue-pair [address]       pair the Hue Bridge: press its button when asked
+#   /usr/bin/sudo /usr/local/estia/bin/estia signal listIdentities|trust|listDevices|removeDevice [options]
+#                                                                     her signal-cli, the bridge stopped meanwhile
+#   /usr/bin/sudo /usr/local/estia/bin/estia unlock                   ends /lock from the Mac (the bridge restarts)
+#   /usr/bin/sudo /usr/local/estia/bin/estia rollback                 back to your user, within 7 days of the move
+#   /usr/bin/sudo /usr/local/estia/bin/estia remove-old               delete her old folders held since the move
+#   /usr/bin/sudo /usr/local/estia/bin/estia account                  her account again: no shell, hidden, no password
 # Each runs as her own user _estia (env -i, a PATH of root-owned folders, the release's Python in isolated mode),
-# except launchctl and the last three, which run as root from the root-owned tools, never from a release.
+# except launchctl (restart, stop, start) and the last three, which run as root from the root-owned tools, never from
+# a release. Every program after sudo is named by its full path: sudo looks a bare name up in your PATH.
 # A value typed on a command line lands in sudo's log: if that happened, change the key.
 # --dry-run (first) prints the command instead of running it, and needs no root.
 set -euo pipefail
@@ -35,7 +40,7 @@ plist="$root/Library/LaunchDaemons/$bridge.plist"
 as_her=(/usr/bin/sudo -u "$user" -H -- /usr/bin/env -i "HOME=$home" "PATH=/usr/local/estia/current/.venv/bin:/usr/bin:/bin:/usr/sbin:/sbin" LANG=en_US.UTF-8)
 as_root=("$tools/python3" -I -c 'import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); runpy.run_module(sys.argv.pop(1), run_name="__main__", alter_sys=True)' "$tools/src")
 
-usage() { sed -n '2,17p' "$0" | sed -E 's/^# ?//' >&2; exit 2; }
+usage() { /usr/bin/awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0" >&2; exit 2; }
 show() { printf 'would run:'; printf ' %s' "$@"; printf '\n'; }
 run() {
   if [[ -n "$dry" ]]; then show "${as_her[@]}" "$@"; exit 0; fi
@@ -71,10 +76,32 @@ fi
 case "$command" in
   doctor)
     [[ $# -eq 0 ]] || usage
-    run "$python" -I -m local_assistant.doctor ;;
+    owner="${SUDO_USER:-}"  # who ran sudo: their sudo rules, listed by root (her user cannot read them)
+    if [[ ! "$owner" =~ ^[A-Za-z_][A-Za-z0-9_.-]*$ || "$owner" == root ]]; then run "$python" -I -m local_assistant.doctor; fi
+    if [[ -n "$dry" ]]; then
+      show "${as_her[@]}" ESTIA_OWNER_SUDO=stdin "$python" -I -m local_assistant.doctor
+      echo "would run: /usr/bin/sudo -n -l -U $owner (as root: your sudo rules, read by her doctor)"
+      exit 0
+    fi
+    rules="$(/usr/bin/sudo -n -l -U "$owner" 2>&1 || true)"
+    # handed over on stdin, told by the environment: a release's doctor from before ignores both
+    printf '%s\n' "$rules" | "${as_her[@]}" ESTIA_OWNER_SUDO=stdin "$python" -I -m local_assistant.doctor ;;
   check)
     [[ $# -eq 0 ]] || usage
     run /bin/bash "$code/scripts/check.sh" ;;
+  config)  # nano as her, by its full path: sudoedit would put a copy of hers in your account, its editor run as you
+    case "${1:-}" in "") file="$home/.config/local-assistant/config.toml" ;; soul) file="$home/.config/local-assistant/soul.md" ;; *) usage ;; esac
+    [[ $# -le 1 ]] || usage
+    term="${TERM:-}"  # sudo keeps your TERM; anything odd is never passed on (bash says dumb for none)
+    [[ "$term" =~ ^[A-Za-z0-9._+-]{1,64}$ && "$term" != dumb ]] || term=xterm-256color
+    if [[ "${1:-}" == soul ]]; then  # her style file, private from the start: the example, copied as her
+      if [[ -n "$dry" ]]; then
+        printf 'would run:'; printf ' %s' "${as_her[@]}" /usr/bin/install -m 600 /usr/local/estia/current/soul.example.md "$file"; printf ' (only when she has none)\n'
+      elif ! "${as_her[@]}" /bin/test -e "$file"; then
+        "${as_her[@]}" /usr/bin/install -m 600 /usr/local/estia/current/soul.example.md "$file"
+      fi
+    fi
+    run "TERM=$term" /usr/bin/nano "$file" ;;
   account)  # as root from the tools: fixed dscl commands, never her code
     [[ $# -eq 0 ]] || usage
     if [[ -n "$dry" ]]; then show "${as_root[@]}" local_assistant.ownuser account; exit 0; fi
@@ -83,6 +110,13 @@ case "$command" in
     [[ $# -eq 0 ]] || usage
     if [[ -n "$dry" ]]; then show /bin/launchctl kickstart -k "system/$bridge"; exit 0; fi
     exec /bin/launchctl kickstart -k "system/$bridge" ;;
+  stop|start)  # as root, launchctl by its full path (her compromise steps, the voice service's undo)
+    [[ $# -le 1 ]] || usage
+    case "${1:-}" in "") label="$bridge" ;; voice) label=com.local-assistant.voice ;; *) usage ;; esac
+    if [[ "$command" == stop ]]; then action=(/bin/launchctl bootout "system/$label")
+    else action=(/bin/launchctl bootstrap system "/Library/LaunchDaemons/$label.plist"); fi
+    if [[ -n "$dry" ]]; then show "${action[@]}"; exit 0; fi
+    exec "${action[@]}" ;;
   logs)
     which=bridge
     lines=50
@@ -93,7 +127,13 @@ case "$command" in
         *) usage ;;
       esac
     done
-    run /usr/bin/tail -n "$lines" "$home/Library/Logs/local-assistant/$which.log" ;;
+    file="$home/Library/Logs/local-assistant/$which.log"
+    if [[ "$which" != bridge ]]; then  # her services' output: /var/log/estia, or her folder in an install from before
+      label="$bridge"; [[ "$which" == voice ]] && label=com.local-assistant.voice
+      shown="$(/usr/libexec/PlistBuddy -c 'Print :StandardOutPath' "$root/Library/LaunchDaemons/$label.plist" 2>/dev/null || true)"
+      [[ "$shown" == "$file" ]] || file="/var/log/estia/$which.log"
+    fi
+    run /usr/bin/tail -n "$lines" "$file" ;;
   mail-login)
     if [[ $# -eq 1 || ( $# -eq 2 && "${2:-}" == --mail-only ) ]]; then
       run "$code/.venv/bin/local-assistant" --mail-login "$@"
@@ -118,6 +158,10 @@ case "$command" in
   tapo-discover)
     [[ $# -eq 0 ]] || usage
     run /bin/bash "$code/scripts/tapo-discover.sh" ;;
+  hue-pair)  # as her: the key the bridge gives goes into her hue.env, never through you
+    [[ $# -le 1 ]] || usage
+    [[ $# -eq 0 || "$1" =~ ^[0-9A-Fa-f][0-9A-Fa-f.:]{1,44}$ ]] || usage
+    run /bin/bash "$code/scripts/hue-pair.sh" "$@" ;;
   signal)
     case "${1:-}" in listIdentities|trust|listDevices|removeDevice) ;; *) usage ;; esac
     stopped "$python" -I -m local_assistant.admin signal "$@" ;;
