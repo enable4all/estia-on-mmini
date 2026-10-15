@@ -15,9 +15,9 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from local_assistant import prompts
-from local_assistant.config import DEFAULT_NAME
+from local_assistant.config import DEFAULT_NAME, DEFAULT_STYLE
 from local_assistant.profile import Profile
-from local_assistant.soul import Soul, load_soul
+from local_assistant.soul import Soul, load_soul, soul_part
 from local_assistant.store import Conversation, Message, Store, ToolCallRecord
 from local_assistant.timefmt import local_stamp
 
@@ -87,12 +87,21 @@ class ContextBuilder:
         rules: str | None = None,
         soul_path: Path | None = None,
         name: str = DEFAULT_NAME,
+        style: str = DEFAULT_STYLE,
+        calm_on_worry: bool = True,
     ) -> None:
+        """`style`: her built-in style while there is no usable soul.md ([personality] style; KeyError for a name
+        prompts.BUILT_IN_STYLES does not have). `calm_on_worry`: code's line right after a usable soul.md
+        ([personality] calm_on_worry)."""
         self._store = store
         self.name = name  # hers (the config's `name`): the style's header, the summary's transcript
         self._rules = prompts.rules(name=name) if rules is None else rules
         self._soul_path = soul_path
-        self._soul_problem = ""  # logged once per change, not once per answer
+        self._built_in = prompts.BUILT_IN_STYLES[style]
+        self._built_in_call = prompts.BUILT_IN_CALL_STYLES[style]  # its short call version
+        self.built_in_style = style  # its name, for /soul
+        self.calm_on_worry = calm_on_worry
+        self._soul_logged: tuple[str, int, int] | None = None  # logged once per change (and at the first read)
         self._profile = profile
         self._tz = tz
         self._window_tokens = window_tokens
@@ -152,30 +161,41 @@ class ContextBuilder:
         if self._soul_path is None:
             return Soul("", "no style file is set up")
         soul = load_soul(self._soul_path)
-        if soul.problem != self._soul_problem:
+        texts, calls = len(soul_part(soul.text, call=False)), len(soul_part(soul.text, call=True))
+        seen = (soul.problem, texts, calls)
+        if seen != self._soul_logged:
             if soul.problem:
                 log.warning("soul.md not used: %s", soul.problem)
-            else:
-                log.info("soul.md in use (%d characters)", len(soul.text))
-        self._soul_problem = soul.problem
+            else:  # what texts and calls each get (a part with nothing for a kind leaves it the built-in style)
+                zero = " (0: the built-in style)" if 0 in (texts, calls) else ""
+                log.info("soul.md in use: %d characters for texts%s, %d for calls", texts, zero, calls)
+        self._soul_logged = seen
         return soul
 
-    def style(self) -> str:
-        """Her style, placed below the rules: the user's soul.md, or without a usable one her own built-in style (also
-        below the rules of a message she starts herself)."""
+    def style(self, *, call: bool = False) -> str:
+        """Her style, placed below the rules: the user's soul.md with code's calm-on-worry line right after it (unless
+        turned off), or without a usable one her built-in style, hearth or playful, which carries that line itself
+        (also below the rules of a message she starts herself). `call`: a call's turn, which gets soul.md's "[call]"
+        part instead of its "[chat]" part (soul.soul_part: the text before them goes to both, and a soul.md without
+        them goes whole to both), or the built-in style's short call version in place of the style; a soul.md with
+        nothing for this kind leaves it the built-in one."""
         soul = self.soul()
-        if soul.text:
-            return f"{prompts.SOUL_HEADER.format(name=self.name)}\n{soul.text}"
-        return f"{prompts.DEFAULT_STYLE_HEADER.format(name=self.name)}\n{prompts.DEFAULT_STYLE}"
+        text = soul_part(soul.text, call=call) if soul.text else ""
+        if text:
+            calm = f"\n\n{prompts.SOUL_CALM}" if self.calm_on_worry else ""
+            return f"{prompts.SOUL_HEADER.format(name=self.name)}\n{text}{calm}"
+        built_in = self._built_in_call if call else self._built_in
+        return f"{prompts.BUILT_IN_STYLE_HEADER.format(name=self.name)}\n{built_in}"
 
     def system_prompt(
         self, conversation: Conversation, rules: str | None = None, glance: str = "", *, call: bool = False
     ) -> str:
         """The rules (or `rules`, for one answer: a practice turn), then the style (below the rules); then the profile
         and the summary; on a call, last, the call's glance (code's counts at its start: `glance`). `call`: a call's
-        turn, whose rules leave out the list of what she can do (prompts.without_capabilities)."""
+        turn, whose rules leave out the list of what she can do (prompts.without_capabilities) and whose style is the
+        call's (`style(call=True)`)."""
         chosen = self._rules if rules is None else rules
-        parts = [prompts.without_capabilities(chosen) if call else chosen, self.style(), self.snapshot()]
+        parts = [prompts.without_capabilities(chosen) if call else chosen, self.style(call=call), self.snapshot()]
         if conversation.summary:
             parts.append(f"EARLIER IN THIS CONVERSATION (summary)\n{conversation.summary}")
         if glance:  # last: the same for the whole call, so the prompt cache keeps everything above it

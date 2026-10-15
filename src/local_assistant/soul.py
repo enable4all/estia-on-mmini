@@ -17,6 +17,8 @@ from local_assistant.fetcher import strip_control_tokens
 SOUL_MAX_CHARS = 2_000
 _MAX_FILE_BYTES = 64 * 1024  # comments included; a bigger file is not read at all
 _HIDDEN = frozenset({"Cc", "Cf", "Co", "Cs"})  # control, format (bidi, zero-width), private use, surrogates
+# a line that is exactly one of these starts that part of soul.md (True: call turns; owner, D5)
+PARTS = {"[chat]": False, "[call]": True}
 
 
 @dataclass(frozen=True)
@@ -49,3 +51,26 @@ def load_soul(path: Path) -> Soul:
     if hidden or strip_control_tokens(text) != text:
         return Soul("", "soul.md has hidden characters or chat tokens")
     return Soul(text)
+
+
+def has_parts(text: str) -> bool:
+    """Whether soul.md has a "[chat]" or "[call]" line: then texts and calls each get their own text (soul_part)."""
+    return any(line in PARTS for line in text.split("\n"))
+
+
+def soul_part(text: str, *, call: bool) -> str:
+    """The soul for a call turn (`call`) or for every other answer and the messages she starts herself: a line that is
+    exactly "[chat]" or "[call]" starts that part, and the text before the first of them goes to both. The part lines
+    are left out, and so is a blank line after another. Without either line, the whole text, byte for byte. "" when
+    nothing is for this kind."""
+    if not has_parts(text):
+        return text
+    lines = text.split("\n")
+    kept: list[str] = []
+    part: bool | None = None  # before the first part line: both
+    for line in lines:
+        if line in PARTS:
+            part = PARTS[line]
+        elif (part is None or part == call) and (line or (kept and kept[-1])):
+            kept.append(line)
+    return "\n".join(kept).strip()

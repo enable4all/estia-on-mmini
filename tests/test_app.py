@@ -2786,7 +2786,7 @@ async def test_a_voice_note_is_heard_and_answered_in_the_language(
             deliver(harness.folder, None, T0, attachments=[voice("v1.m4a", M4A)])
             await until(lambda: len(voice_notes(harness.folder)) == 1)
             assert "/v1/audio/transcriptions?language=nl" in service.paths()
-            assert ("nl", {"input": "De lamp is uit.", "voice": "af_heart", "speed": 1.1, "language": "nl"}) in (
+            assert ("nl", {"input": "De lamp is uit.", "voice": "af_heart", "speed": 1.05, "language": "nl"}) in (
                 speech_requests(service)
             )
         finally:
@@ -2801,7 +2801,7 @@ async def test_the_voice_warms_up_at_the_start_and_after_a_switch(
         harness = await start(tmp_path, monkeypatch, FakeGemma(), voice_url=service.url, language="nl")
         try:
             line = prompts.spoken("nl", name=NAME).now_speaking
-            warm_up = ("nl", {"input": line, "voice": "af_heart", "speed": 1.1, "language": "nl"})
+            warm_up = ("nl", {"input": line, "voice": "af_heart", "speed": 1.05, "language": "nl"})
             await until(lambda: speech_requests(service) == [warm_up])
             deliver(harness.folder, "/language de", T0)
             await until(lambda: len(speech_requests(service)) == 2)
@@ -2855,6 +2855,39 @@ async def test_a_spoken_language_command_is_not_a_command(tmp_path: Path, monkey
             assert harness.app.language == "en" and harness.app.store.get_state("language") is None
         finally:
             await stop(harness)
+
+
+async def test_her_built_in_style_is_the_configs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """[personality] style reaches her rules' style block: hearth when left out, playful when chosen."""
+    left_out = await start(tmp_path / "hearth", monkeypatch, FakeGemma())
+    try:
+        prompt = left_out.app.context.system_prompt(left_out.app.store.current_conversation())
+        assert prompts.HEARTH_STYLE in prompt and prompt.count("STYLE (built in") == 1
+    finally:
+        await stop(left_out)
+    chosen = await start(tmp_path / "playful", monkeypatch, FakeGemma(), personality_style="playful")
+    try:
+        prompt = chosen.app.context.system_prompt(chosen.app.store.current_conversation())
+        assert prompts.PLAYFUL_STYLE in prompt and prompts.HEARTH_STYLE not in prompt
+    finally:
+        await stop(chosen)
+
+
+async def test_the_calm_on_worry_line_follows_the_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """[personality] calm_on_worry: code's line after a usable soul.md, on when left out, off on the user's word."""
+    soul = tmp_path / "soul.md"
+    soul.write_text("Vibe: a pun in every answer.\n", encoding="utf-8")
+    soul.chmod(0o600)
+    left_out = await start(tmp_path / "on", monkeypatch, FakeGemma(), soul_path=soul)
+    try:
+        assert left_out.app.context.style().endswith("Vibe: a pun in every answer.\n\n" + prompts.SOUL_CALM)
+    finally:
+        await stop(left_out)
+    off = await start(tmp_path / "off", monkeypatch, FakeGemma(), soul_path=soul, personality_calm_on_worry=False)
+    try:
+        assert off.app.context.style().endswith("Vibe: a pun in every answer.")
+    finally:
+        await stop(off)
 
 
 async def test_the_owners_tiffany_is_tiffany_everywhere(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

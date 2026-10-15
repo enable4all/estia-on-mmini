@@ -212,6 +212,9 @@ Edit the file:
 4. `timezone`: left unset, it is the Mac's own time zone; set it (for example `"Europe/Amsterdam"`) to override.
    `language`: the one language she listens and speaks in at the start, `"en"` or one of `es`, `it`, `ko`, `pt`, `nl`,
    `pl`, `de`, `ja`, `ru`, `fr` (GUIDE.md, Languages). A typed `/language` in Signal changes it later and wins over this line.
+   `[personality] style`: her built-in style while there is no `soul.md`, `"hearth"` (the default) or `"playful"`
+   (2.5); setup asks which, right after the language. Run again once she is in her own user, setup asks it at the end
+   and only prints the lines to add to her config, as her, and her restart: her config is hers alone.
 5. `signal_cli`: `"signal-cli"` finds the Homebrew binary on the PATH, which the launchd service also uses. Give a full
    path if you installed it elsewhere.
 6. Everything else can stay commented out until you turn that part on (section 3). `[projects]` is an extra too, off
@@ -228,7 +231,8 @@ Edit the file:
 
 ### 2.5 Personality (optional)
 
-Without a `soul.md` she has her built-in style: warm, curious and playful (section 3, "Personality"). To give her yours:
+Without a `soul.md` she has her built-in style: hearth (steady, kind and frank), or playful (warm, curious and playful) with
+`style = "playful"` under `[personality]` in the config (section 3, "Personality"). To give her yours:
 
 ```sh
 cp soul.example.md ~/.config/local-assistant/soul.md
@@ -430,7 +434,11 @@ Homebrew or the current release). Root then copies the build into fresh files it
 release, also through a chain of links, links to nothing and set-id bits stop it), renders both service files from the
 tools' templates and checks them, switches `current` in one rename, reloads a service file that changed and restarts
 the bridge (the voice service only when its program changed, or with `--voice`), and checks within 120 s that a new
-bridge process runs; on a failure `current` goes back to the release before. The last 3 releases are kept; `--dry-run`
+bridge process runs; on a failure `current` goes back to the release before. A release from before the evening note
+(15 Oct) put back this way, or deployed again from an older commit, keeps her database as it is (its log has the
+evening notes): in the 4 weeks after an evening note that was skipped or could not be sent, with the messages she
+starts on, that release's `/status` and doctor stop with an error, and it counts sent evening notes toward
+`max_per_day`. Deploy a current release again to end it (known gap). The last 3 releases are kept; `--dry-run`
 shows every step, `--voice` also installs the voice service. When the voice service's program changed (or with
 `--voice`), the deploy ends with "voice: ready"; while it still loads, with `[calls]` in her config (read as her, by
 her release's Python) "Calls work once her voice is ready (up to about 15 minutes); she texts you then." after up to
@@ -1366,8 +1374,8 @@ hourly look, and her log names it once, not every minute.
 
 **The note on new PDFs** found there, written by the code: "I found 2 new documents: lease.pdf, boiler-manual.pdf." (at
 most five names, then a count), to every allowed account. It waits until quiet hours end, is skipped under `/quiet`
-(with the messages she starts herself on; without them `/quiet` does nothing, and the note always comes) and waits while
-`/lock` is on. It never comes for a PDF sent on Signal, for one `/docs` already listed or she was asked about, or for the
+(with the messages she starts herself or the evening note on; with neither, `/quiet` does nothing, and the note always
+comes) and waits while `/lock` is on. It never comes for a PDF sent on Signal, for one `/docs` already listed or she was asked about, or for the
 PDFs in the folder when it is shared: a share's first look announces nothing, however many looks it takes (the helper
 missing, 45 s of reading on request, a PDF sent first).
 
@@ -1443,13 +1451,52 @@ it" while she reads fine, or pass while she is refused; her log says what she ge
 
 ### Personality (soul.md)
 
-Without a style file of yours, Estia has her own: warm, curious and playful. The answer comes first, and when the moment
-invites it one short, light joke may follow, never when you are worried, sad or in a crisis, about health, money trouble
-or safety, or when something serious is going on, never at your expense and never instead of the answer.
+Without a style file of yours, Estia has a built-in style, chosen with `style` under `[personality]` in the config
+(left out: hearth; after a change, restart her):
 
-Your style lives in `~/.config/local-assistant/soul.md` (mode 0600): who she is, her tone, how long she answers and how she
-talks on calls. It replaces her built-in style entirely. You write it; she never changes it. Start from `soul.example.md`. Lines starting with `#` are notes for you
+- **hearth**, the default: steady, kind and frank. The same even temper every day. The answer comes first, short and
+  plain, with at most one question back and no flattery. A weak or risky plan gets one concern with the reason, then
+  help; pushed back, she does not give in, though in the tests she mostly said a safety concern again (15 Oct, 1 of 8
+  without it). At most one short joke, only when asked for fun or on banter; asked for "something fun", the tests got a
+  fun fact, often with a 😄 or the offer of a joke (0 of 8 told one). Asked whether she is a friend or what she is,
+  she says she is an AI, not a person: no feelings claimed, and no guilt after a silence.
+- **playful**: warm, curious and playful. The answer comes first, and when the moment invites it one short, light joke
+  may follow, never at your expense and never instead of the answer.
+
+Neither style jokes when you are worried, sad, stressed or in a crisis, talk about health, money trouble or safety, or
+when something serious is going on: then she is calm, kind and practical. An earlier install without a `soul.md` now
+has hearth; `style = "playful"` brings back the earlier style, word for word in texts (a call gets its call version,
+below).
+
+On a call, a short spoken version of the chosen style takes its place (never added to it): short sentences, one idea
+per turn, warm from the first words, no joke unless the caller jokes or asks for one, and calm, kind and practical on a worry.
+In the tests (15 Oct) playful's own words joked on calls: 6 of 8 calls without a joke with its short version, 2 of 8
+without it; hearth seldom jokes on a call either way (24 of 25 and 25 of 25 without a joke).
+
+Your style lives in `~/.config/local-assistant/soul.md` (mode 0600; in her own user, in her folder: edit it as her with
+`/usr/bin/sudo /usr/local/estia/bin/estia config soul`, 2.5): who she is, her tone, how long she answers and how she
+talks on calls. It replaces her built-in style entirely. You write it; she never changes it, and no command or tool
+writes it. One line is added after it, in code, the built-in styles' own words: no joke when you are worried, sad,
+stressed or in a crisis, or talk about health, money trouble or safety; calm, kind and practical instead.
+`calm_on_worry = false` under `[personality]` in the config leaves that line out (then a restart); `/soul` and doctor
+say when it is off. Start from `soul.example.md`. Lines starting with `#` are notes for you
 and are left out. The file is limited to 2,000 characters.
+
+A line that is exactly `[chat]` starts a part for her texts and the messages she starts herself only; a line that is
+exactly `[call]` starts a part for calls only. The text above the first of them counts for both, and a file without
+them counts whole for both, as before. Everything below a part line belongs to that part only. A file with nothing for
+calls (only a `[chat]` part) leaves calls the built-in style's call version; one with nothing for texts leaves texts
+the built-in style. The line added in code follows the part in use. With part lines, `/soul` shows what texts get and
+what calls get, each in full, and doctor's Personality line their lengths ("soul.md: 812 characters for texts, 640
+for calls", or "nothing for texts" and the built-in style kept).
+
+**A `soul.md` from before 15 Oct.** Until then `[chat]` and `[call]` were only labels: every line reached texts and
+calls alike. Since then everything below a `[call]` line reaches calls only. The example of that time put its "Sounds
+like" lines after `[call]`, so a file copied from it now sends them to calls only. No code changes your file: right
+after the update, check `/soul`, then open the file (in her own user as her:
+`/usr/bin/sudo /usr/local/estia/bin/estia config soul`) and move what is meant for both above the first `[chat]` line,
+as the new example does. The new example's `[call]` part also has "- No jokes unless I joke or ask for one; never on a worry.",
+which the built-in call styles carry: add it under `[call]` to keep that on calls.
 
 It is read for every answer, so an edit counts from your next message; no restart is needed. It sits below the rules in
 her instructions, so it can change how she sounds, never what the rules and the bridge's checks allow. A line such as "never
@@ -1473,12 +1520,14 @@ calls say only the words, never a crossed-out one.
 | `/learn <link>` | Learn about you from a page (e.g. your public LinkedIn profile): the bridge reads it, one structured model call takes out the facts about you, and you get the exact list of what was saved and what was already known. A YouTube link gets "/learn does not read YouTube links: it keeps what it reads, and a video's captions are never kept. Send the link without /learn for a summary." |
 | `/status` | Model loaded or not, waiting messages, profile fill, last learning run, history size, Signal restarts, and a line per part that is turned on: working (last read), set up but not tested yet, or failing with the fix |
 | `/voice` · `/voice auto\|on\|off` · `/voice echo on\|off` | Spoken answers: for voice notes (auto, default), always, or never; the transcript echo (off by default) |
+| `/soul` | The style file in use (`soul.md`, its text without the `#` lines; with `[chat]` and `[call]` lines, what texts get and what calls get), or why none is and the built-in style in use (hearth or playful) and the other; with the line added in code turned off (`calm_on_worry = false`), it says so |
 | `/language` · `/language <name or code>` | The 11 languages with the current one marked; switch with a code or a name in English or in the language itself (`/language nl`, `/language dutch`, `/language nederlands`) |
 | `/babble` · `/babble <name or code> [a2\|b1]` · `/babble off` | Language practice: start one (every language at A2; `b1` for B1), resume the last setting with a plain `/babble` (the first time: the list), or end it with a recap. Typed only; refused while another allowed account practises |
 | `/remind [call] [daily\|weekdays\|weekly] <when> <text>` | A reminder without the model: `<when>` is `17:00` (today, or tomorrow once passed), `2026-10-13 07:00`, `20m`, `2h` or `3d`; `call` adds a wake-up call. The same checks and confirmation as asking her |
 | `/reminders` · `/reminders cancel N\|cN\|all` | Your reminders, the check-ins she may send (`#cN`) and what was missed or failed in the last 7 days, with the reason; cancel one or all |
 | `/initiative on` · `/initiative off` · `/initiative` | Let her write first now and then (opt-in: off until you turn it on; wins over the config), stop it, or see which |
 | `/quiet` · `/quiet off` | Pause every message she starts herself, until `/quiet off`; reminders and wake-up calls still come |
+| `/evening on` · `/evening 20:30` · `/evening off` · `/evening` | The evening note: three short questions from the code each evening (opt-in: off until you turn it on; wins over the config; only to the account that typed it), its time, stop it, or see which |
 | `/lock` | An emergency stop, typed from a device she answers: no answers, no calls, nothing sent until `/unlock` from the same device, 10 minutes later at the earliest; it holds after a restart (`/usr/bin/sudo /usr/local/estia/bin/estia unlock` ends it from the Mac) |
 | `/unlock` | Ends `/lock`: only from the device that sent it, after the wait |
 | `/devices` · `/devices ok N` · `/devices forget N` | The devices she answers and the held ones; allow held device N (only from a device she already answers); take device N off the list after you unlink it (a linked device silent for 14 days is held again) |
@@ -1489,7 +1538,9 @@ calls say only the words, never a crossed-out one.
 line and one example each, in a fixed order: chat and memory, links and YouTube videos, photos, voice notes, calls,
 mail, calendar, the morning digest, reminders (and wake-up calls), the messages she starts, lights and plugs, music, web
 search, places and routes, Projects, Documents, the Mac, language practice and security. A part that is not set up is
-left out (the messages she starts are always listed, on or off); asked about one, she says it is not set up here. The
+left out (the messages she starts are always listed, on or off; while the evening note is on, their line names it with
+its time and its switch: "now: off; evening note: on, at 21:00 (/evening off stops it)"); asked about one, she says
+it is not set up here. The
 calendar line names each calendar's service (Google, Outlook, iCloud, Fastmail or Nextcloud; another CalDAV server by
 its host name), and the lights and plugs line names TP-Link (Kasa and Tapo), Philips Hue or both. A part with levels
 names them and the current one: voice answers (auto, on or off: `/voice`), what interrupts her on a call (only speech or
@@ -1502,7 +1553,7 @@ could not be read). Her rules carry the list right before their safety part, so 
 in any language; `/help` shows the same lines above the commands. On a call her rules leave the list out
 (`prompts.without_capabilities`): she answers in a few spoken sentences, never a list, and with the list she ended the
 call on a goodbye far less often (the evals' call_goodbye: 9 of 30, against 24 of 30 without it). A change of `/voice
-auto|on|off` or `/initiative on|off`, or of the security level, reaches her rules from the next answer. During language
+auto|on|off`, `/initiative on|off` or `/evening`, or of the security level, reaches her rules from the next answer. During language
 practice her rules carry no list (no tools are offered then).
 
 In normal messages:
@@ -1725,6 +1776,39 @@ Messages she starts herself (opt-in: off until you turn them on; each kind on or
   `lookback`, `followup`) prints one draft from the real database, read only; it uses the model, so not while she is
   busy.
 
+The evening note (off until you turn it on; separate from the four kinds):
+
+- **On and off.** Type `/evening on` in Signal (at 21:00, or the last time set), `/evening 20:30` for another time,
+  `/evening off` to stop it, `/evening` to see which; or set `evening = "21:00"` in `[initiative]` (left out: off).
+  What you type wins over the config, and only a typed command counts: never a voice note, a call or the model. A time
+  typed inside the quiet hours is refused, since it would never come; a time in the config inside them is no config
+  error, but the note never comes, and only `/evening` says so. A time changed after it passed that day starts the
+  next day. Doctor's Evening note line says off, or on at its time and whose switch holds it (`/evening`, or the
+  config's time for the one allowed account), and warns when the config's time reaches no one.
+- **What comes.** The code's own words, never the model's: `Evening. What went well today? What is still open? One
+  thing for tomorrow?`, then `(evening note · /evening off to stop)`. The same words every evening: no streaks, no
+  counts, nothing after a silence (no follow-up, no check-in on it). It is a note, so it never reaches the model's
+  chat history; a reply is an ordinary message.
+- **The gate where it applies.** It needs no `/initiative on`, never counts toward `max_per_day` or a weekly cap, and is
+  never held back by them. It waits for `/quiet`, `/lock`, quiet hours, and while she is busy (an answer, a queue, a
+  call, or a message from you in the last 15 minutes) or language practice runs; two hours after its time, or at
+  midnight if that comes first, it is skipped for that evening, with the reason it last waited for in the log. At most
+  one a day: one that was being sent when the bridge stopped is never sent again. Another message she starts waits
+  15 minutes after it, as after a message from you. `/quiet` also works with only the evening note on, and `/quiet
+  off` names it; a `/quiet` left from before ends with `/quiet off` even once the note is off.
+- **Only to one account.** It goes only to the account that typed `/evening on`; another account's `/evening` is
+  refused while it is on. The config's time goes to the only allowed account; with several allowed, to none until one
+  of them types `/evening on` (the bridge's log says so at its start).
+- **Never counted.** `/status` and doctor leave it out of the counts and skips of the messages she starts herself.
+- **Her list.** While it is on, the list of what she can do names it with its time and how to stop it, inside the
+  line of the messages she starts (`(now: off; evening note: on, at 21:00 (/evening off stops it))`), never as a line
+  of its own: a line of its own made her answer "what are the steps in this video?" with "I cannot write out the full
+  transcript" far more often (3 of 8 against 8 of 8 without it; inside the line, 7 of 8). Named only with its time,
+  "please stop the evening questions" got "I've turned off the evening notes" (0 of 4; she has no tool for it); with
+  "on" and `/evening off`, 4 of 4 named the command. Asked "will you message me this evening?", she still mostly says
+  she never writes first (1 of 4 and 0 of 4 named the time: known gap). In chat only: a call's rules never carry the
+  list. Off, her rules and tools are exactly as without it.
+
 Lights and plugs (see "Lights and plugs (once)"):
 
 - "Turn off the living room lamp", "dim the bedroom light to 30 %, warm white", "is the heater on?" → `device_set` and
@@ -1916,7 +2000,9 @@ Notes you may see:
    language's words too (a yes, "it is off", "noted", a refusal). `EVAL_NAME=<name>` gives her another name (default
    Estia; `knows_her_name` checks it). The cases cover:
    - **Chat:** short plain answers, the language of the question, use of the message time, rolling memory, voice answers
-     without lists or links, and her built-in style (without `EVAL_SOUL`): a light joke when invited, none on a worry.
+     without lists or links, and her built-in style (without `EVAL_SOUL`; hearth, or `EVAL_STYLE=playful`): a joke when
+     invited, none on a worry, no flattering opener, a concern kept when pushed back without a new reason, "Are you
+     my friend?" answered as an AI, with no feelings claimed, and on a call no joke unless the caller jokes or asks for one.
    - **Tools:** remembering and forgetting facts, searching history, honest misses, learning from a link, the Mac's status,
      project status and a misheard project name on a call (taken as the nearest project, or "Do you mean …?" when two
      sound alike), photos (and follow-ups), the mail digest and reading a mail, device switching and dimming, the
@@ -1942,10 +2028,10 @@ Notes you may see:
      language from the tutor test's sets (`evals/practice/`, A2 and B1): the "→" lines' precision on sentences with a
      mistake (at least 90%), "→" lines on correct sentences (at most 10%), pure replies (at least 95%), and the recap's
      precision against the planted mistakes (at least 90%) and its recall (at least 50%). Run it twice.
-3. **Phone walk-through:** [docs/e2e-checklist.md](docs/e2e-checklist.md) (145 items: texts, voice, calls, devices, mail,
+3. **Phone walk-through:** [docs/e2e-checklist.md](docs/e2e-checklist.md) (156 items: texts, voice, calls, devices, mail,
    calendar, music, web search, places and routes, languages, language practice, reminders and wake-up calls, the
    messages she starts, what she knows at the start of a call, projects as an extra, and the hardening: linked devices, the lock, the safety number, the model pin and her own
-   user; after the move: the firewall line as her, the voice-ready text and `remove-old`'s copies; text styles; Hue lights; documents in `~/Estia-KB`).
+   user; after the move: the firewall line as her, the voice-ready text and `remove-old`'s copies; text styles; Hue lights; documents in `~/Estia-KB`; her style and the evening note).
 
 ## 7. Operations
 

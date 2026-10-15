@@ -357,6 +357,7 @@ COMMANDS = (
     "reminders",
     "quiet",
     "initiative",
+    "evening",
     "devices",
     "lock",
     "unlock",

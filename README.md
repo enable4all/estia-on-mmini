@@ -32,6 +32,7 @@ One line and one example each. Every detail and limit: [What she can do](GUIDE.m
 - **Reminders.** A text at that time: once, every day, every weekday or every week. A reminder is set only when a note from the code, not from the AI, says so. Example: "Remind me at 17:00 to call the dentist".
 - **Wake-up calls.** A text, then a Signal call at that time (once calls are set up). Example: "Call me at 7:00 to wake me up".
 - **Messages she starts.** Now and then: a check-in, a calendar change or an early start, a Sunday look back, a spontaneous note. At most one a day, never between 22:00 and 08:00. Example: `/initiative on` (off until you do).
+- **Evening note.** Three short questions at 21:00, or the time you pick: what went well, what is still open, one thing for tomorrow. The same words each evening, written by the code, never by the AI. Example: `/evening on` (off until you do).
 - **Language practice.** A short conversation in Dutch (or one of seven other languages) at level A2 or B1, then a recap of at most three mistakes as a text. Example: `/babble nl`.
 - **Music.** Spotify on your speakers (once set up). Music is text only. Example: "Play some jazz".
 - **Saved lists.** Ideas from a list you saved (songs, books, recipes). Example: "What should we play next?"

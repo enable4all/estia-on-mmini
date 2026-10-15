@@ -16,7 +16,7 @@ from local_assistant.initiative import Initiative
 from local_assistant.language import ENGLISH, LANGUAGE_KEY, LANGUAGES, find
 from local_assistant.profile import Profile, by_category, category_of
 from local_assistant.reminders import ReminderError, Reminders, parse_when
-from local_assistant.soul import SOUL_MAX_CHARS
+from local_assistant.soul import SOUL_MAX_CHARS, has_parts, soul_part
 from local_assistant.store import Fact, Message, Store
 from local_assistant.timefmt import local_date, local_datetime
 
@@ -289,8 +289,8 @@ class Commands:
         docs: Docs | None = None,
     ) -> None:
         """`capabilities`: code's list of what she can do here, which /help shows above the commands (the lines her
-        rules carry); `changed`: told when a level that list shows changes (/voice auto|on|off, /initiative on|off),
-        so her rules follow."""
+        rules carry); `changed`: told when a level that list shows changes (/voice auto|on|off, /initiative on|off,
+        /evening), so her rules follow."""
         self._store = store
         self._profile = profile
         self._context = context
@@ -347,6 +347,8 @@ class Commands:
                 return await self._docs(args, message) if self._docs is not None else prompts.DOCS_OFF
             case "/initiative":
                 return self._initiative_switch(args.lower())
+            case "/evening":
+                return self._evening_switch(args.lower(), message)
             case "/devices" if self._guard is not None:
                 if not args:
                     return self._guard.listing(message.peer_aci)
@@ -416,8 +418,15 @@ class Commands:
         return prompts.REMINDERS_USAGE
 
     def _quiet(self, args: str) -> str:
-        """/quiet pauses every message she starts herself until /quiet off; reminders the user set still come."""
-        if self._initiative is None or not self._initiative.enabled:
+        """/quiet pauses every message she starts herself (the evening note too) until /quiet off; reminders the user
+        set still come. With none of them on there is nothing to pause, but /quiet off still ends a /quiet left from
+        before (the evening note turned off since): the documents' note reads it too."""
+        if self._initiative is None:
+            return prompts.QUIET_DISABLED
+        if not (self._initiative.enabled or self._initiative.evening() is not None):
+            if args == "off" and self._initiative.quiet:
+                self._initiative.set_quiet(False)
+                return prompts.QUIET_OFF_NOTHING_ON
             return prompts.QUIET_DISABLED
         if args in ("", "on"):
             return self._initiative.set_quiet(True)
@@ -438,11 +447,45 @@ class Commands:
             return reply
         return prompts.INITIATIVE_USAGE
 
+    def _evening_switch(self, args: str, message: Message) -> str:
+        """/evening, /evening on|off|20:30: the evening note, code's three questions at that time (off until turned on).
+        Only a typed command reaches it, never a voice note, a call or Gemma; it wins over the config and goes only to
+        the account that typed it."""
+        if self._initiative is None:
+            return prompts.EVENING_NONE
+        reply = self._initiative.set_evening(message.peer_aci, args)
+        if args:
+            self._changed()  # the list in her rules names its time while it is on
+        return reply
+
     def _soul(self) -> str:
+        """The style in use: soul.md (with [chat] and [call] lines, what texts and calls each get), or why none is and
+        the built-in style."""
         soul = self._context.soul()
+        style = self._context.built_in_style
         if soul.text:
-            return f"My style file (soul.md, {len(soul.text):,} of {SOUL_MAX_CHARS:,} characters):\n{soul.text}"
-        return prompts.SOUL_NONE.format(problem=soul.problem)
+            off = "" if self._context.calm_on_worry else f"\n\n{prompts.SOUL_CALM_OFF}"
+            sizes = {"chars": f"{len(soul.text):,}", "limit": f"{SOUL_MAX_CHARS:,}"}
+            if not has_parts(soul.text):
+                return prompts.SOUL_IN_USE.format(text=soul.text, **sizes) + off
+            texts, calls = soul_part(soul.text, call=False), soul_part(soul.text, call=True)
+            shown = {
+                "texts": prompts.SOUL_FOR_TEXTS.format(chars=f"{len(texts):,}", text=texts)
+                if texts
+                else prompts.SOUL_TEXTS_BUILT_IN.format(style=style),
+                "calls": prompts.SOUL_FOR_CALLS.format(chars=f"{len(calls):,}", text=calls)
+                if calls
+                else prompts.SOUL_CALLS_BUILT_IN.format(style=style),
+            }
+            return prompts.SOUL_IN_PARTS.format(**sizes, **shown) + off
+        other = next(name for name in prompts.BUILT_IN_STYLES if name != style)
+        return prompts.SOUL_NONE.format(
+            problem=soul.problem,
+            style=style,
+            words=prompts.STYLE_WORDS[style],
+            other=other,
+            other_words=prompts.STYLE_WORDS[other],
+        )
 
     async def _learn_link(self, args: str, message: Message) -> str:
         url = args.split()[0] if args else ""

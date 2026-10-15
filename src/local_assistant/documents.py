@@ -42,7 +42,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from local_assistant import prompts
-from local_assistant.config import OWNER_HOME
+from local_assistant.config import OWNER_HOME, is_estia_kb
 from local_assistant.part_status import PartStatus
 from local_assistant.store import DocFile, DocPage, Store
 
@@ -137,10 +137,20 @@ class Look:
     skipped: bool = False
 
 
+def not_estia_kb(folder: Path) -> bool:
+    """A folder in an owner's home that is not their ~/Estia-KB, the only folder the share opens to her (live, 15 Oct:
+    her config still named the first share's folder in Documents): her config is the fix, not the share. A folder
+    outside a home (a test's, a checkout's) keeps the share's words."""
+    return OWNER_HOME.match(str(folder)) is not None and not is_estia_kb(folder)
+
+
 def helper_env() -> dict[str, str]:
-    """A clean environment: no API keys, proxy settings or other secrets of the bridge's."""
+    """A clean environment: no API keys, proxy settings or other secrets of the bridge's. HOME is also Foundation's
+    home (CFFIXED_USER_HOME): her account's record keeps /var/empty (AGENTS.md, Gotchas), and with that home Vision's
+    text recognition fails at once (live, 15 Oct: scanned pages and the warm-up failed; text pages still read)."""
     env = {key: os.environ[key] for key in ("HOME", "USER", "LOGNAME", "TMPDIR", "LANG") if key in os.environ}
-    return env | {"PATH": "/usr/bin:/bin"}
+    home = {"CFFIXED_USER_HOME": env["HOME"]} if "HOME" in env else {}
+    return env | home | {"PATH": "/usr/bin:/bin"}
 
 
 class Helper:

@@ -21,7 +21,7 @@ def test_deleted_rows_are_overwritten_in_the_file(store: Store) -> None:
 
 
 def test_the_schema_has_the_device_table_and_the_messages_device(store: Store) -> None:
-    assert SCHEMA_VERSION == 10  # v10: the documents index (tests/test_store_documents.py)
+    assert SCHEMA_VERSION == 11  # v10: the documents index, v11: the evening note in the log (tests/test_evening.py)
     assert store._conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     columns = {row[1] for row in store._conn.execute("PRAGMA table_info(known_devices)")}
     assert {"aci", "device", "first_seen", "last_seen", "source", "created_at", "updated_at"} <= columns

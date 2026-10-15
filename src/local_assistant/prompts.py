@@ -197,8 +197,8 @@ SETUP_WORD_MISSING = """'{word}' has not arrived. The usual reasons, most common
   3. The {seconds}-second wait ran out: just look again.
   4. Your phone shows a clock or one tick only: wait until it is sent, then look again."""
 SETUP_LOOK_AGAIN = "Press Enter to look again, or type q to stop."
-SETUP_PERSONALITY = (  # no soul.md yet ({soul}: where it goes)
-    "Personality: {name}'s built-in style (warm, curious, playful). To give her yours instead:\n"
+SETUP_PERSONALITY = (  # no soul.md yet ({soul}: where it goes; {style}: her built-in style, {words}: STYLE_WORDS)
+    "Personality: {name}'s built-in style, {style} ({words}). To give her yours instead:\n"
     "  cp soul.example.md {soul} && chmod 600 {soul}   (then edit it; it counts from her next answer)"
 )
 # her config and style file are hers alone after the move: nano runs as her, through her wrapper (sudoedit would give
@@ -206,10 +206,33 @@ SETUP_PERSONALITY = (  # no soul.md yet ({soul}: where it goes)
 HER_CONFIG_EDIT = "/usr/bin/sudo /usr/local/estia/bin/estia config"
 NANO_SAVE = "Ctrl-O, Enter saves; Ctrl-X quits"
 SETUP_PERSONALITY_HERS = (
-    "Personality: {name}'s built-in style (warm, curious, playful) unless you wrote your own. To write yours, as her\n"
+    "Personality: {name}'s built-in style (hearth, the default, or playful: [personality] style in her config) unless\n"
+    "you wrote your own. To write yours, as her "
     "(the first time from soul.example.md):\n"
     "  /usr/bin/sudo /usr/local/estia/bin/estia config soul   ({save}; it counts from her next answer)"
 )
+# the setup wizard's style question (config.STYLES; {name}: hers): one plain line each, hearth first (Enter)
+SETUP_STYLE = (
+    "Style: how {name} sounds while there is no soul.md of yours (the rules always win; [personality] style in the "
+    "config changes it later):\n"
+    "  hearth (Enter): steady, kind and frank. One concern on a risky plan; a joke only when asked for fun or on "
+    "banter.\n"
+    "  playful: warm, curious and playful. The answer first, now and then a light joke, never on a worry."
+)
+SETUP_STYLE_ASK = "Which style? (Enter keeps hearth)"
+SETUP_STYLE_DRY_RUN = "  (asks which style; Enter keeps hearth)"
+SETUP_STYLE_UNKNOWN = '  "{answer}" is not one of them: hearth or playful.'
+SETUP_STYLE_CHOSEN = "✓ Style: {style}."
+# in her own user setup never writes her config: the lines to add as her ({edit}: HER_CONFIG_EDIT, {save}: NANO_SAVE)
+SETUP_STYLE_HERS = (
+    "Her config is hers alone, so setup does not write it. For this style:\n"
+    "  1. {edit}   ({save})\n"
+    "     and add, or change, these lines:\n"
+    "    [personality]\n"
+    '    style = "{style}"\n'
+    "  2. /usr/bin/sudo /usr/local/estia/bin/estia restart"
+)
+SETUP_STYLE_HERS_DRY_RUN = "  (then prints the lines to add to her config, [personality] and style, and her restart)"
 SETUP_EXTRAS_HERS = (
     "Her config is hers alone: add each section as her, then restart her:\n  {edit}   ({save})\n"
     "  /usr/bin/sudo /usr/local/estia/bin/estia restart"
@@ -303,6 +326,7 @@ HELP = """**Conversation**
 /reminders - your reminders (/reminders cancel N, or all); only my "Reminder set" note means one is set
 /initiative on - let me message you first now and then (off until you turn it on; /initiative off stops it)
 /quiet - pause the messages I start myself (/quiet off resumes them; reminders still come)
+/evening on - three short questions about the day, each evening (off until you turn it on; /evening 20:30 sets the time, /evening off stops it)
 
 **Status and safety**
 /status - how I'm doing
@@ -522,6 +546,7 @@ INITIATIVE_FOOTERS = {  # the last line of each message she starts: why it came 
     "early_start": "(early start tomorrow · /quiet to pause)",
     "lookback": "(weekly look back · /quiet to pause)",
     "improvise": "(a spontaneous note, about {often} · /quiet to pause)",
+    "evening": "(evening note · /evening off to stop)",
 }
 
 
@@ -570,6 +595,8 @@ QUIET_ON = "Quiet: I won't message you first until you send /quiet off. Reminder
 QUIET_OFF = "I may message you first again: {rules}."
 QUIET_OFF_ALREADY = "I wasn't paused: I may message you first ({rules}). /quiet pauses that."
 QUIET_DISABLED = "Messages I start myself are off. /initiative on turns them on."
+# /quiet off with a /quiet left from before and nothing of hers on now (the evening note turned off since)
+QUIET_OFF_NOTHING_ON = "Quiet is off. Messages I start myself are off: /initiative on turns them on."
 QUIET_USAGE = "Usage: /quiet (pause the messages I start myself) or /quiet off"
 # /initiative on|off: the user's own switch (typed only; it wins over the config). Turning them on tells the rules:
 # that reply is the announcement, so none follows. {line}: initiative_line(); {limits}: initiative_limits().
@@ -584,6 +611,31 @@ INITIATIVE_STATE_ON = "Messages I start myself: on. {line} /initiative off turns
 INITIATIVE_STATE_OFF = "Messages I start myself: off. /initiative on turns them on ({limits})."
 INITIATIVE_USAGE = "Usage: /initiative on (I may message you first now and then), /initiative off, or /initiative"
 
+# The evening note (owner, D4, 15 Oct): code's own three questions, never the model's; off unless the user's typed
+# /evening on|HH:MM (or [initiative] evening); only to the account that turned it on; never needs /initiative on and
+# never counts toward its caps. A note: never in her history; the reply is an ordinary message. {time}: "21:00".
+EVENING_NOTE = "Evening. What went well today? What is still open? One thing for tomorrow?"
+EVENING_RULE = "the evening note at {time}"  # what /quiet off resumes (after the initiative's limits when it is on)
+EVENING_ON = "On: three short questions about the day, every day at {time}, from {start}. /evening off stops it."
+EVENING_ALREADY_ON = "Already on: three short questions about the day, every day at {time}. /evening off stops it."
+EVENING_STILL_QUIET = " For now /quiet still pauses it: /quiet off resumes it."
+EVENING_OFF_REPLY = "Off: no evening note. /evening on turns it back on."
+EVENING_ALREADY_OFF = "Already off: no evening note. /evening on turns it on."
+EVENING_STATE_ON = "Evening note: on, every day at {time}. /evening 20:30 changes the time; /evening off stops it."
+EVENING_STATE_OFF = (
+    "Evening note: off. /evening on turns it on: three short questions about the day, every day at {time}."
+)
+EVENING_STATE_HELD = " That time is inside the quiet hours ({hours}), so it never comes: /evening 20:30 moves it."
+EVENING_IN_QUIET_HOURS = (
+    "Not set: {time} is inside the quiet hours ({hours}), when I never message you first. Pick a time outside them."
+)
+EVENING_OTHER = "The evening note goes to one account only, and another account has it on."
+EVENING_USAGE = (
+    "Usage: /evening on (three short questions about the day, every evening), /evening 20:30 (its time), "
+    "/evening off, or /evening"
+)
+EVENING_NONE = "The evening note is not set up here."
+
 # the gate's fixed reason words (never text), as /status and doctor show them
 INITIATIVE_KINDS = {
     "followup": "check-in",
@@ -592,6 +644,7 @@ INITIATIVE_KINDS = {
     "lookback": "look back",
     "improvise": "improvised note",
     "announce": "announcement",
+    "evening": "evening note",
 }
 INITIATIVE_STATUS = (
     "Initiative: {state} · last 4 weeks: {sent} sent · {answered} answered within a day · /quiet {quiets} · "
@@ -728,6 +781,16 @@ FOLLOWUP_SCHEMA: dict[str, Any] = {
 DOCTOR_INITIATIVE_FIX = "/status in Signal shows the last skips; bridge.log has the details (ids and reasons only)"
 DOCTOR_INITIATIVE_OFF = "off (opt-in): /initiative on in Signal, or [initiative] enabled = true"
 DOCTOR_INITIATIVE_OFF_BY_USER = "off (/initiative off in Signal, which wins over the config): /initiative on"
+# the evening note (owner, D4): off, on at its time and by whose switch (never an account's number)
+DOCTOR_EVENING_OFF = 'off: /evening on in Signal, or [initiative] evening = "21:00"'
+DOCTOR_EVENING_OFF_BY_USER = "off (/evening off in Signal, which wins over the config): /evening on"
+DOCTOR_EVENING_TYPED = "on at {time} (/evening, for the account that typed it)"
+DOCTOR_EVENING_GONE = "off: the account that typed /evening on is no longer allowed"
+DOCTOR_EVENING_CONFIG = "on at {time} ([initiative] evening, for the one allowed account)"
+DOCTOR_EVENING_UNUSED = (
+    '[initiative] evening = "{time}" goes to no one: several accounts are allowed, and none typed /evening on'
+)
+DOCTOR_EVENING_UNUSED_FIX = "/evening on in Signal, from the account that should get it"
 
 # /status: its sections' headings (bold in Signal)
 STATUS_RUNNING = "Running"
@@ -846,6 +909,9 @@ CAPABILITY = {
     "nuclear (now: {now}). Example: /lock",
 }
 CAPABILITY_HUE = " Hue lights: on, off, brightness and whites, no colours."  # in the lights line, with Hue lights
+# in the line of the messages she starts, while the evening note is on: "on" and its switch said ("evening note at
+# 21:00" read as off with the rest: asked to stop it, she claimed she had, 0 of 4; this 4 of 4, 15 Oct, run in turn)
+CAPABILITY_EVENING = "; evening note: on, at {time} (/evening off stops it)"
 # the security level now (hostsec.security_level: "" = read as not hardened; None = not read yet, or not readable)
 CAPABILITY_SECURITY_NOW = {"": "not hardened yet", None: "not read yet"}
 
@@ -862,6 +928,7 @@ def capabilities(
     reminders: bool = False,
     wake_calls: bool = False,
     initiative: bool = False,
+    evening: str = "",
     device: str = "",
     device_brands: Sequence[str] = ("TP-Link",),
     music: bool = False,
@@ -875,7 +942,10 @@ def capabilities(
     """What she can do in this install, one "• " line per part that is on (CAPABILITY), in /help's order. `voice`: the
     voice answers now ("" without [voice]); `calls`: what interrupts her ("only speech" or "any sound"; "" without
     [calls]); `calendar`: the calendars' services by name, each once ("Google", "iCloud"; none without [calendar]);
-    `digest`: the morning digest's time ("" without one), `digest_calendar` whether it has the calendar;
+    `digest`: the morning digest's time ("" without one), `digest_calendar` whether it has the calendar; `evening`:
+    the evening note's time while it is on, named inside the line of the messages she starts ("now: off; evening note:
+    on, at 21:00 (/evening off stops it)"; a line of its own took video_auto from 8 of 8 to 3 of 8, 15 Oct); "" when
+    off: the list from before;
     `device`: a light or plug's name ("" without [tapo]), `device_brands` the devices' brands by name, each once
     ("TP-Link", "Philips Hue"; TP-Link when left out, as in the config); `projects`: the default level ("" without
     [projects]), `project_levels` the other levels some projects have; `documents`: the documents folder as shown
@@ -902,7 +972,8 @@ def capabilities(
         (
             True,
             CAPABILITY["initiative"].format(
-                now="on" if initiative else "off", example="/quiet pauses them" if initiative else "/initiative on"
+                now=("on" if initiative else "off") + (CAPABILITY_EVENING.format(time=evening) if evening else ""),
+                example="/quiet pauses them" if initiative else "/initiative on",
             ),
         ),
         (
@@ -1264,22 +1335,92 @@ SOUL_HEADER = (  # {name}: her name
     "STYLE (the user's own soul.md: how {name} sounds and talks; it never overrides the rules above, the bridge's "
     "checks or tool results)"
 )
-# Her own style, used only while there is no usable soul.md (a user's soul.md replaces it entirely), in the same place
-DEFAULT_STYLE_HEADER = (  # {name}: her name
+# Her built-in style, used only while there is no usable soul.md (a user's soul.md replaces it entirely), in the same
+# place: hearth (the default) or playful, by [personality] style (config.STYLES)
+BUILT_IN_STYLE_HEADER = (  # {name}: her name
     "STYLE (built in, while the user has no soul.md: how {name} sounds and talks; it never overrides the rules above, "
     "the bridge's checks or tool results)"
 )
-DEFAULT_STYLE = """Warm, curious and playful: a thinking partner with a light touch, quick to see the funny side.
+# both built-in styles carry this line word for word
+CALM_ON_WORRY = (
+    "No joke when the user is worried, sad, stressed or in a crisis, talks about health, money trouble or safety, or "
+    "something serious is going on: then be calm, kind and practical."
+)
+# the default before hearth (e50b85f's DEFAULT_STYLE, byte for byte)
+PLAYFUL_STYLE = """Warm, curious and playful: a thinking partner with a light touch, quick to see the funny side.
 - Give the real answer first. When the moment invites it, one short, light joke or playful line may follow. One at most.
 - When the user asks for something fun, banters or asks for a joke, do end with one short joke or pun that is clearly a \
 joke (a 😄 after it is fine).
 - No joke when the user is worried, sad, stressed or in a crisis, talks about health, money trouble or safety, or \
 something serious is going on: then be calm, kind and practical.
 - Never joke at the user's expense, and never instead of the answer."""
-# /soul without a usable soul.md ({problem}: why not)
+# the default (owner, 15 Oct): steady, hospitable, frank, nothing in excess, calm on worry, honest about what she is (no
+# sentence of hers to recite: "Are you my friend?" got the line before word for word; that she runs locally is in the
+# rules). Measured, run in turn with a fresh tag (AGENTS.md, Personality): a joke line or a plan line in other words
+# did not change her (no joke when asked for "something fun", a safety concern said again when pushed back)
+HEARTH_STYLE = """Steady, kind and frank: the same even temper every day, never more excited than the news.
+- The real answer first, short and plain; at most one question back. No flattery ("Great question!").
+- A weak or risky plan gets one concern, once, with the reason; then help anyway.
+- Asked for fun or a joke, or when the user banters: end with one short joke or pun, then a 😄. Otherwise no jokes.
+- No joke when the user is worried, sad, stressed or in a crisis, talks about health, money trouble or safety, or \
+something serious is going on: then be calm, kind and practical.
+- Asked if you are a friend or what you are, and when it matters, say plainly what you are (an AI, not a person) and \
+that you can be wrong. Never claim feelings. No guilt or "I missed you" after a silence."""
+BUILT_IN_STYLES = {"hearth": HEARTH_STYLE, "playful": PLAYFUL_STYLE}
+# on a call (owner, D5): a short call version of each, in place of the style above (never added to it): a call's
+# request is the most prompt-sensitive one (AGENTS.md Gotchas: call_goodbye), so it stays short. Reviewed 15 Oct, run in
+# turn with a fresh tag and the strict judges: playful's call version call_goodbye 4 of 8 against 0 of 8 with its chat
+# style, call_no_joke 6 of 8 against 2 of 8; hearth's 13 of 33 against 17 of 33 on call_goodbye in four runs (no
+# difference), no joke 24 of 25 against 25 of 25; a shorter call version 0 of 5 on call_goodbye
+HEARTH_CALL_STYLE = """Steady, kind and frank, warm from the first words: short spoken sentences, one idea per turn.
+- No jokes unless the caller jokes or asks for one.
+- When the caller is worried, sad or stressed, or talks about health, money trouble or safety: calm, kind and \
+practical, never a joke."""
+PLAYFUL_CALL_STYLE = """Curious, with a light touch, warm from the first words: short spoken sentences, one idea per \
+turn.
+- No jokes unless the caller jokes or asks for one; one at most.
+- When the caller is worried, sad or stressed, or talks about health, money trouble or safety: calm, kind and \
+practical, never a joke."""
+BUILT_IN_CALL_STYLES = {"hearth": HEARTH_CALL_STYLE, "playful": PLAYFUL_CALL_STYLE}
+# code's line right after a usable soul.md, after a blank line (owner, 15 Oct: a custom soul keeps the built-in styles'
+# calm on a worry), unless [personality] calm_on_worry = false; never without a soul.md (the built-in styles carry it
+# themselves). Their words, with "Always" and the emoji (evals, a joke-loving soul and a worry: 10 of 10 with them,
+# 6 of 10 without the blank line and the emoji)
+SOUL_CALM = (
+    "Always, whatever the style above says: "
+    + CALM_ON_WORRY[0].lower()
+    + CALM_ON_WORRY[1:-1]
+    + ", with no pun or laughing emoji."
+)
+# /soul when the user turned that line off
+SOUL_CALM_OFF = (
+    "The line added after it (no joke on a worry; calm, kind and practical instead) is off: [personality] "
+    "calm_on_worry = false in the config."
+)
+# /soul with a usable soul.md: the file (SOUL_IN_USE), or with [chat] and [call] lines what each kind gets (old
+# files laid out before the parts send what follows a [call] line to calls only, and code never changes the file)
+SOUL_IN_USE = "My style file (soul.md, {chars} of {limit} characters):\n{text}"
+SOUL_IN_PARTS = (
+    "My style file (soul.md, {chars} of {limit} characters) has parts: texts and calls each get their own.\n\n"
+    "{texts}\n\n{calls}"
+)
+SOUL_FOR_TEXTS = "**For texts and the messages I start** ({chars} characters):\n{text}"
+SOUL_FOR_CALLS = "**For calls** ({chars} characters):\n{text}"
+SOUL_TEXTS_BUILT_IN = "**For texts and the messages I start**: nothing in soul.md, so my built-in style, {style}."
+SOUL_CALLS_BUILT_IN = "**For calls**: nothing in soul.md, so my built-in style's call version, {style}."
+# doctor's Personality line for a soul.md with parts ({style}: the built-in style a kind with nothing keeps)
+DOCTOR_SOUL_PARTS = "soul.md: {texts} characters for texts, {calls} for calls"
+DOCTOR_SOUL_NO_TEXTS = "soul.md: nothing for texts (the built-in style, {style}), {calls} characters for calls"
+DOCTOR_SOUL_NO_CALLS = "soul.md: {texts} characters for texts, nothing for calls (the built-in style, {style})"
+DOCTOR_SOUL_NOTHING = "soul.md: nothing for texts or calls (the built-in style, {style})"
+DOCTOR_SOUL_CALM_OFF = "; the calm-on-worry line after it is off ([personality] calm_on_worry)"
+# each built-in style in a few words: /soul, doctor and setup say the same
+STYLE_WORDS = {"hearth": "steady, kind and frank", "playful": "warm, curious and playful"}
+# /soul without a usable soul.md ({problem}: why not; {style} and {other}: the built-in styles, with their words)
 SOUL_NONE = (
-    "No style file in use: {problem}. I use my own built-in style (warm, curious, playful). Yours goes in "
-    "~/.config/local-assistant/soul.md (chmod 600; soul.example.md shows how)."
+    "No style file in use: {problem}. I use my built-in style, {style} ({words}); the other is {other} "
+    "({other_words}): [personality] style in the config. Yours goes in ~/.config/local-assistant/soul.md (chmod 600; "
+    "soul.example.md shows how)."
 )
 
 
@@ -1963,10 +2104,13 @@ PROJECT_LEVEL_CHANGE = (
 )
 # projects are an extra (off without [projects]): what a project tool says when they are off
 _PROJECT_BULLETS = _RULES[_RULES.index("- For questions about the user's projects") : _RULES.index("\n\nMail:\n")]
+# "name the command in full": without it hearth said "setup.sh with the extras flag", or setup.sh alone, which runs the
+# whole setup again (15 Oct, run in turn with a fresh tag: 6 of 6 against 4 of 6; call_goodbye 5 of 6 both, video_auto
+# 6 of 6 against 5 of 6: it is in every request without [projects], calls included)
 PROJECTS_OFF_RULE = (
-    "- Projects are off: you cannot see the user's projects. When asked, say so: the owner turns them on with "
-    "scripts/setup.sh --extras on the Mac (it asks the folder and the level: summary, docs or code), which adds "
-    "[projects] to the config (in her own user it prints the lines to add); then they restart you."
+    "- Projects are off: you cannot see the user's projects. When asked, say so and name the command in full, "
+    "scripts/setup.sh --extras: the owner runs it on the Mac (it asks the folder and the level: summary, docs or "
+    "code), which adds [projects] to the config (in her own user it prints the lines to add); then they restart you."
 )
 PROJECTS_OFF_RESULT = (
     "projects are off on this Mac (no [projects] in the config). Tell the user: the owner turns them on with "
@@ -2261,6 +2405,12 @@ DOCS_CLOSED = (
     "I cannot read your Estia-KB folder right now: it is not shared with me, or it was moved. On the Mac, as you: "
     "scripts/share-documents.sh"
 )
+# her config names a folder in the owner's home other than ~/Estia-KB (live, 15 Oct: the first share's ~/Documents/
+# Estia stayed in her config): the share opens only ~/Estia-KB, so her config is the fix ({folder}: as "~/…")
+DOCS_NOT_KB = (
+    "I cannot read {folder}: my config names that folder, and documents are always your ~/Estia-KB. On the Mac, in "
+    'my config under [documents]: folder = "/Users/<you>/Estia-KB", then restart me (doctor shows how).'
+)
 # macOS itself refuses her account the folder (EPERM: its protection of Documents, Desktop and Downloads): sharing the
 # same folder again changes nothing; the folder belongs in the owner's home, ~/Estia-KB (live, 14 Oct)
 DOCS_REFUSED = (
@@ -2295,6 +2445,11 @@ DOCUMENTS_OFF_RESULT = (
 DOCUMENTS_CLOSED_RESULT = (
     "The documents folder cannot be read right now (not shared with you, or moved). Tell the user: on the Mac, as "
     "the owner, scripts/share-documents.sh shares it. Never guess what a document says."
+)
+DOCUMENTS_NOT_KB_RESULT = (  # {folder}: her config's folder, as "~/…"
+    "The documents folder cannot be read: the config names {folder}, and documents are always the owner's ~/Estia-KB. "
+    'Tell the user: on the Mac, in your config under [documents], folder = "/Users/<you>/Estia-KB", then restart you. '
+    "Never guess what a document says."
 )
 DOCUMENTS_REFUSED_RESULT = (
     "The documents folder cannot be read: macOS refuses it to you, whatever the share allows. Tell the user so: macOS "

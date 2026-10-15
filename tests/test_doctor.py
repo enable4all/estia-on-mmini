@@ -269,7 +269,7 @@ def test_doctor_says_her_configured_name(home: Path) -> None:
     probe.system = ("linux", "x86_64")
     named = by_part(run(write_config(home, MINIMAL + 'name = "Tiffany"\n'), probe))
     assert named["Mac"].fix == "Tiffany needs a Mac with Apple silicon (M1 or later)"
-    assert named["Personality"].text == "no soul.md: Tiffany's built-in playful style (soul.example.md: your own)"
+    assert named["Personality"].text == "no soul.md: Tiffany's built-in style, hearth (soul.example.md: your own)"
     assert named["Personality"].status == "ok"  # the default, nothing to fix
     plain = by_part(run(write_config(home, MINIMAL), probe))
     assert (
@@ -278,6 +278,44 @@ def test_doctor_says_her_configured_name(home: Path) -> None:
     )
     broken = by_part(run(write_config(home, MINIMAL + 'name = "R2-D2"\n'), probe))
     assert broken["Mac"].fix.startswith("Estia needs") and "name must be 1-20 letters" in broken["Config"].text
+
+
+def test_doctor_names_the_built_in_style_chosen(home: Path) -> None:
+    chosen = by_part(run(write_config(home, MINIMAL + '[personality]\nstyle = "playful"\n'), FakeProbe(home)))
+    assert chosen["Personality"].text == "no soul.md: Estia's built-in style, playful (soul.example.md: your own)"
+
+
+def test_doctor_says_when_the_calm_on_worry_line_is_off(home: Path) -> None:
+    soul = home / ".config/local-assistant/soul.md"
+    soul.parent.mkdir(parents=True, exist_ok=True)
+    soul.write_text("Be silly.")
+    soul.chmod(0o600)
+    on = by_part(run(write_config(home, MINIMAL), FakeProbe(home)))["Personality"]
+    assert (on.status, on.text) == ("ok", "soul.md")
+    off = by_part(run(write_config(home, MINIMAL + "[personality]\ncalm_on_worry = false\n"), FakeProbe(home)))
+    assert off["Personality"].status == "ok"  # the user's choice: nothing to fix
+    assert off["Personality"].text == "soul.md; the calm-on-worry line after it is off ([personality] calm_on_worry)"
+
+
+def test_doctor_says_what_texts_and_calls_each_get_from_a_soul_with_parts(home: Path) -> None:
+    """A soul.md with [chat] and [call] lines: doctor names each kind's characters, or the built-in style a kind with
+    nothing in the file keeps (a markers-only file is in use, yet changes nothing)."""
+    soul = home / ".config/local-assistant/soul.md"
+    soul.parent.mkdir(parents=True, exist_ok=True)
+    soul.write_text("Who: a warm sidekick.\n[chat]\n- Short.\n[call]\n- Spoken.")
+    soul.chmod(0o600)
+    found = by_part(run(write_config(home, MINIMAL), FakeProbe(home)))["Personality"]
+    assert (found.status, found.text) == ("ok", "soul.md: 30 characters for texts, 31 for calls")
+    soul.write_text("[call]\n- Spoken.")
+    found = by_part(run(write_config(home, MINIMAL), FakeProbe(home)))["Personality"]
+    assert found.text == "soul.md: nothing for texts (the built-in style, hearth), 9 characters for calls"
+    soul.write_text("[chat]\n[call]")
+    calm_off = MINIMAL + "[personality]\ncalm_on_worry = false\n"
+    found = by_part(run(write_config(home, calm_off), FakeProbe(home)))["Personality"]
+    assert found.text == (
+        "soul.md: nothing for texts or calls (the built-in style, hearth); the calm-on-worry line after it is off "
+        "([personality] calm_on_worry)"
+    )
 
 
 def test_a_soul_with_a_problem_is_a_warning(home: Path) -> None:
@@ -895,6 +933,58 @@ def test_doctor_shows_her_own_messages_as_counts_and_reason_words(home: Path) ->
         "· last 4 weeks: 1 sent, 1 answered within a day · paused (/quiet) · last skipped: look back busy"
     )
     assert "dentist" not in render(run(path, probe))
+
+
+def test_doctor_never_counts_the_evening_note_in_her_own_messages(home: Path) -> None:
+    """The evening note (owner, D4) is never counted: not in the counts, the skips or the warning."""
+    path = write_config(home, MINIMAL + "[initiative]\nenabled = true\n")
+    database = load_config(path).db_path
+    database.parent.mkdir(parents=True)
+    store = Store.open(database)
+    day_ago = datetime.fromtimestamp(NOW - 86_400, UTC).isoformat(timespec="seconds")
+    note = store.add_outgoing(store.current_conversation().id, ACI, "note", "Evening.", None)
+    entry = store.log_initiative("evening", "2026-10-07", "sent", message_id=note, at=day_ago)
+    store.set_initiative_replied(entry, NOW - 80_000, at=day_ago)
+    store.log_initiative("evening", "2026-10-08", "skipped", reason="busy", at=day_ago)
+    store.log_initiative("evening", "2026-10-09", "failed", reason="send_failed", at=day_ago)
+    store.close()
+    found = by_part(run(path, FakeProbe(home)))["Initiative"]
+    assert found.status == "ok" and found.text.endswith("· last 4 weeks: 0 sent, 0 answered within a day"), found
+
+
+def test_doctor_names_the_evening_note_its_time_and_whose_switch_holds_it(home: Path) -> None:
+    """The evening note (owner, D4): off, on at its time by the user's /evening or by the config for the one allowed
+    account, and a warning when the config's time reaches no one (several accounts, none typed /evening on)."""
+    probe = FakeProbe(home)
+    path = write_config(home, MINIMAL)
+    assert by_part(run(path, probe))["Evening note"] == Finding("ok", "Evening note", prompts.DOCTOR_EVENING_OFF)
+    path = write_config(home, MINIMAL + '[initiative]\nevening = "21:00"\n')
+    found = by_part(run(path, probe))["Evening note"]
+    assert found == Finding("ok", "Evening note", "on at 21:00 ([initiative] evening, for the one allowed account)")
+    second = "22222222-3333-4444-8555-666666666666"
+    two = f'bot_number = "{NUMBER}"\nallowed_acis = ["{ACI}", "{second}"]\n[initiative]\nevening = "21:00"\n'
+    path = write_config(home, two)
+    found = by_part(run(path, probe))["Evening note"]
+    assert (found.status, found.text) == ("warn", prompts.DOCTOR_EVENING_UNUSED.format(time="21:00"))
+    assert found.fix == prompts.DOCTOR_EVENING_UNUSED_FIX
+    database = load_config(path).db_path
+    database.parent.mkdir(parents=True)
+    store = Store.open(database)
+    store.set_state("initiative:evening", json.dumps({"on": True, "at": "20:30", "aci": second, "since": 0}))
+    store.close()
+    found = by_part(run(path, probe))["Evening note"]
+    assert found == Finding("ok", "Evening note", "on at 20:30 (/evening, for the account that typed it)")
+    store = Store.open(database)
+    store.set_state("initiative:evening", json.dumps({"on": False, "at": "20:30", "aci": second, "since": 0}))
+    store.close()
+    found = by_part(run(path, probe))["Evening note"]
+    assert found == Finding("ok", "Evening note", prompts.DOCTOR_EVENING_OFF_BY_USER)
+    assert second not in render(run(path, probe)) and ACI not in render(run(path, probe))  # never an account
+    path = write_config(home, MINIMAL)  # the account that turned it on is no longer allowed
+    store = Store.open(database)
+    store.set_state("initiative:evening", json.dumps({"on": True, "at": "20:30", "aci": second, "since": 0}))
+    store.close()
+    assert by_part(run(path, probe))["Evening note"].text == prompts.DOCTOR_EVENING_GONE
 
 
 def test_doctor_warns_when_one_of_her_messages_could_not_be_sent(home: Path) -> None:

@@ -169,6 +169,7 @@ def test_a_dry_run_asks_nothing_runs_nothing_and_writes_nothing(
     assert "ollama pull" in out and "register" in out and "verify" in out and "one-time word" in out
     assert "Extras" in out and "(asks which ones" in out
     assert "or type any name" in out and "Enter keeps Estia" in out  # the name question, shown, not asked
+    assert prompts.SETUP_STYLE_DRY_RUN in out and "hearth (Enter): steady, kind and frank." in out
     assert f"(dry run) would write config {config}" in out and "✓ Config" not in out
     assert not (tmp_path / "cfg").exists() and not (tmp_path / "home").exists()
 
@@ -395,7 +396,7 @@ def test_q_or_no_terminal_stops_the_sms_code_step(
 def test_the_config_step_leaves_soul_md_to_the_user(
     dry: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """No soul.md is written: her built-in playful style is the default until the user writes their own."""
+    """No soul.md is written: her built-in style is the default until the user writes their own."""
     monkeypatch.setattr("builtins.input", lambda prompt="": "")  # the language question: Enter keeps English
     path = tmp_path / "config.toml"
     Wizard(path, dry_run=dry).config(BOT, ACI)
@@ -516,6 +517,114 @@ def test_the_wizard_asks_for_the_language_once(
     assert "Nederlands, Dutch (nl)" in out and "日本語, Japanese (ja)" in out and "/language" in out
 
 
+def test_the_config_gets_the_chosen_style() -> None:
+    """[personality] style: the example's hearth line, or playful when chosen (the rest of the example as it is)."""
+    assert parse_config(tomllib.loads(render_config(EXAMPLE, BOT, ACI))).personality_style == "hearth"
+    text = render_config(EXAMPLE, BOT, ACI, style="playful")
+    assert parse_config(tomllib.loads(text)).personality_style == "playful" and 'style = "hearth"' not in text
+    assert text.replace('style = "playful"', 'style = "hearth"') == render_config(EXAMPLE, BOT, ACI)
+    with pytest.raises(ValueError, match="style"):
+        render_config(EXAMPLE, BOT, ACI, style="warm")
+    with pytest.raises(ValueError, match="style"):
+        render_config(EXAMPLE.replace('style = "hearth"', ""), BOT, ACI, style="playful")
+
+
+@pytest.mark.parametrize(
+    ("answers", "style"),
+    [([""], "hearth"), (["playful"], "playful"), (["Playful "], "playful"), (["p"], "playful"), (["x", "h"], "hearth")],
+)
+def test_the_wizard_asks_her_style_once_after_the_language(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], answers: list[str], style: str
+) -> None:
+    given = iter(["", *answers])  # the language first: Enter keeps English; then Enter: no projects
+    asked: list[str] = []
+
+    def type_answer(prompt: str = "") -> str:
+        asked.append(prompt)
+        return next(given, "")
+
+    monkeypatch.setattr("builtins.input", type_answer)
+    path = tmp_path / "config" / "config.toml"
+    wizard = Wizard(path, dry_run=False)
+    wizard.config(BOT, ACI)
+    assert parse_config(tomllib.loads(path.read_text(encoding="utf-8"))).personality_style == style == wizard.style
+    out = capsys.readouterr().out
+    assert "  hearth (Enter): steady, kind and frank." in out and "  playful: warm, curious and playful." in out
+    assert out.index("Language:") < out.index("Style:") < out.index("Projects (extra")
+    assert f"✓ Style: {style}." in out and sum("Enter keeps hearth" in prompt for prompt in asked) == len(answers)
+    assert not (tmp_path / "config" / "soul.md").exists()  # owner's D2: her style file stays the user's to write
+
+
+def test_each_style_is_one_plain_line() -> None:
+    lines = prompts.SETUP_STYLE.format(name="Estia").splitlines()[1:]
+    assert [line.split(":")[0].strip() for line in lines] == ["hearth (Enter)", "playful"]
+    for line in lines:
+        assert len(line) <= 120 and "you" not in line.lower().split() and "&" not in line, line
+    assert (
+        "hearth (Enter): steady, kind and frank." in lines[0]
+        and "a joke only when asked for fun or on banter" in lines[0]
+    )
+    assert "playful: warm, curious and playful." in lines[1] and "never on a worry" in lines[1]
+
+
+def test_a_dry_run_shows_the_style_question_and_asks_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("builtins.input", refuse)
+    wizard = Wizard(tmp_path / "config.toml", dry_run=True)
+    assert wizard.her_style() == "hearth"
+    out = capsys.readouterr().out
+    assert "Style:" in out and prompts.SETUP_STYLE_DRY_RUN in out and "✓ Style" not in out
+
+
+def test_in_her_own_user_setup_asks_her_style_and_prints_the_line_to_add(
+    no_system_paths: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Her config is hers alone: a re-run in her own user asks the style, then prints the lines to add as her and the
+    restart; it writes nothing."""
+    her_own_user(no_system_paths)
+    config = tmp_path / "config.toml"
+    rerun(monkeypatch, config, typed="playful")
+    out = capsys.readouterr().out
+    lines = prompts.SETUP_STYLE_HERS.format(style="playful", edit=prompts.HER_CONFIG_EDIT, save=prompts.NANO_SAVE)
+    assert lines in out and '    [personality]\n    style = "playful"\n' in out
+    assert "/usr/bin/sudo /usr/local/estia/bin/estia restart" in lines and prompts.HER_CONFIG_EDIT in lines
+    assert out.index("Style:") < out.index("Personality:") < out.index("Checking everything:")
+    assert not config.exists() and not (tmp_path / "soul.md").exists()
+
+
+def test_in_her_own_user_a_dry_run_shows_the_style_question_and_the_lines_it_would_print(
+    no_system_paths: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    her_own_user(no_system_paths)
+    monkeypatch.setattr("builtins.input", refuse)
+    Wizard(tmp_path / "config.toml", dry_run=True).personality()
+    out = capsys.readouterr().out
+    assert prompts.SETUP_STYLE_DRY_RUN in out and prompts.SETUP_STYLE_HERS_DRY_RUN in out
+
+
+def test_a_first_setup_asks_her_style_once_even_after_the_move(
+    no_system_paths: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The config step asked it and wrote it, and the move took that config with her: the end asks nothing again."""
+    monkeypatch.setattr("builtins.input", lambda prompt="": "")
+    wizard = Wizard(tmp_path / "config.toml", dry_run=False)
+    wizard.config(BOT, ACI)
+    her_own_user(no_system_paths)  # always on: the move
+    monkeypatch.setattr("builtins.input", refuse)
+    wizard.personality()
+    out = capsys.readouterr().out
+    assert out.count("Style: how") == 1 and 'style = "' not in out
+
+
+def test_the_ai_briefing_names_the_style_question() -> None:
+    briefing = (Path(__file__).resolve().parents[1] / "SETUP-WITH-YOUR-AI.md").read_text(encoding="utf-8")
+    briefing = briefing.split("## 3. The briefing", 1)[1].split("\n## ", 1)[0]
+    assert briefing.index("**The language**") < briefing.index("**Her style**") < briefing.index("projects on this Mac")
+    style = briefing.split("**Her style**", 1)[1].split("\n", 1)[0]
+    assert "hearth" in style and "playful" in style and "Enter" in style
+
+
 def named_wizard(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answers: list[str], *, dry: bool = False
 ) -> tuple[Wizard, list[str]]:
@@ -543,8 +652,8 @@ def test_enter_keeps_estia_with_a_female_voice(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """One question with the suggestions; Enter keeps Estia (and af_heart), written into the config."""
-    # the name, the language, then whether she sees projects: Enter for each
-    wizard, asked = named_wizard(tmp_path, monkeypatch, ["", "", ""])
+    # the name, the language, her style, then whether she sees projects: Enter for each
+    wizard, asked = named_wizard(tmp_path, monkeypatch, ["", "", "", ""])
     wizard.her_name()
     assert (wizard.name, wizard.voice) == ("Estia", "af_heart")
     wizard.config(BOT, ACI)
@@ -554,7 +663,7 @@ def test_enter_keeps_estia_with_a_female_voice(
     out = capsys.readouterr().out
     assert "1. Estia (default)" in out and "female: Tiffany · Maya · Melina" in out
     assert "male: Socrates · Perikles · Plato" in out and "or type any name" in out
-    assert "Female or male" not in " ".join(asked) and len(asked) == 3
+    assert "Female or male" not in " ".join(asked) and len(asked) == 4
 
 
 @pytest.mark.parametrize(
@@ -757,6 +866,7 @@ def test_a_rerun_in_her_own_user_never_registers_or_writes_the_config(
     monkeypatch.setattr(Wizard, "extras", lambda self: None)
     monkeypatch.setattr(Wizard, "run", recorder(ran))
     monkeypatch.setattr("time.sleep", lambda seconds: None)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "")  # her style: Enter keeps hearth (the lines printed)
     config = tmp_path / "config.toml"
     assert setup.main(["--config", str(config)]) == 0
     assert ran == [["/usr/bin/sudo", "/usr/local/estia/bin/estia", "doctor"]]  # the fixed path, never ESTIA_ROOT's
@@ -764,10 +874,11 @@ def test_a_rerun_in_her_own_user_never_registers_or_writes_the_config(
     assert "her own user _estia" in capsys.readouterr().out
 
 
-def rerun(monkeypatch: pytest.MonkeyPatch, config: Path) -> None:
-    """setup.main again in her own user, every step but the end stubbed."""
+def rerun(monkeypatch: pytest.MonkeyPatch, config: Path, typed: str = "") -> None:
+    """setup.main again in her own user, every step but the end stubbed; `typed` answers her style question."""
     from local_assistant import setup
 
+    monkeypatch.setattr("builtins.input", lambda prompt="": typed)
     for name in ("signal_number", "owner", "config", "her_name"):
         monkeypatch.setattr(Wizard, name, refuse)
     for name in ("model", "security", "extras"):
@@ -891,8 +1002,8 @@ def test_the_config_gets_the_projects_folder_and_level(level: str) -> None:
 
 
 def projects_wizard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answers: list[str]) -> tuple[Wizard, list[str]]:
-    """The config step with a person who types `answers` after the language question (then Enter)."""
-    typed = iter(["", *answers])  # the language question first: Enter keeps English
+    """The config step with a person who types `answers` after the language and style questions (then Enter)."""
+    typed = iter(["", "", *answers])  # the language and her style first: Enter keeps English and hearth
     asked: list[str] = []
 
     def type_answer(prompt: str = "") -> str:
@@ -1408,16 +1519,22 @@ def test_the_calls_extra_deploys_the_builds_before_calls_are_on() -> None:
 
 
 def test_the_personality_hint_names_her_folder_once_she_has_her_own_user(
-    no_system_paths: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    no_system_paths: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    monkeypatch.setattr("builtins.input", lambda prompt="": "")  # her style, in her own user: Enter keeps hearth
     wizard = Wizard(tmp_path / "config.toml", dry_run=False)
     wizard.personality()
     out = capsys.readouterr().out
     assert f"cp soul.example.md {tmp_path / 'soul.md'} && chmod 600 {tmp_path / 'soul.md'}" in out
+    assert "Personality: Estia's built-in style, hearth (steady, kind and frank). To give her yours instead:" in out
+    wizard.style = "playful"  # a config that chose it
+    wizard.personality()
+    assert "built-in style, playful (warm, curious and playful)." in capsys.readouterr().out
     her_own_user(no_system_paths)
     wizard.personality()
     out = capsys.readouterr().out
     assert "/usr/bin/sudo /usr/local/estia/bin/estia config soul" in out  # nano as her; the example the first time
+    assert "built-in style (hearth, the default, or playful: [personality] style in her config)" in out
     assert "sudo -u _estia -e" not in out
     assert "cp soul.example.md" not in out
 

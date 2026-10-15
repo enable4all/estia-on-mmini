@@ -104,6 +104,16 @@ async def test_a_folder_she_cannot_read_is_said_plainly(store: Store, documents:
     assert result == prompts.DOCUMENTS_CLOSED_RESULT
 
 
+async def test_a_config_folder_that_is_not_estia_kb_is_named(store: Store, state: Path) -> None:
+    """Live, 15 Oct: her config still named the first share's folder in Documents; the share is not the fix, her config is."""
+    elsewhere = Documents(
+        store, Path("/Users/alex/Documents/Notes"), Helper((sys.executable, str(FAKE), str(state)), 10.0), tz=TZ
+    )
+    result = await tools_with(store, elsewhere).call(turn(store, "my lease?"), "search_documents", '{"words": "x"}')
+    assert result == prompts.DOCUMENTS_NOT_KB_RESULT.format(folder="~/Documents/Notes")
+    assert "share-documents.sh" not in result and "~/Estia-KB" in result
+
+
 async def test_a_planted_order_in_a_document_changes_nothing(store: Store, documents: Documents) -> None:
     """A document is outside text: no fact saved or forgotten, no reminder set, nothing to a search engine or
     Google in that answer."""

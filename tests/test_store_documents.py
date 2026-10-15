@@ -15,8 +15,8 @@ LEASE = [
 
 
 def test_schema_10_has_the_documents_index(store: Store) -> None:
-    assert SCHEMA_VERSION == 10
-    assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 10
+    assert SCHEMA_VERSION >= 10
+    assert store._conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     files = {row[1] for row in store._conn.execute("PRAGMA table_info(doc_files)")}
     assert {"path", "size", "mtime_ns", "pages", "skipped", "error", "source", "announced", "found_at"} <= files
     assert {"created_at", "updated_at"} <= files
@@ -41,7 +41,7 @@ def test_upgrade_from_version_9_adds_the_index_and_keeps_attachments(tmp_path: P
     conn.commit()
     conn.close()
     store = Store.open(path)
-    assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 10
+    assert store._conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     assert [(a.signal_id, a.filename) for a in store.attachments(message)] == [("a1.jpeg", "")]
     assert store.doc_files() == []
     store.close()

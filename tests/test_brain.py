@@ -265,6 +265,36 @@ async def test_end_call_written_as_text_ends_the_call_and_is_not_said(store: Sto
     assert reply.text == spoken and reply.end_call
 
 
+@pytest.mark.parametrize(
+    ("written", "spoken"),
+    [
+        ("thought\n<channel|>Goodbye!", "Goodbye!"),
+        (
+            "thought\n<channel|>You're very welcome! Glad I could help. Have a great day!",
+            "You're very welcome! Glad I could help. Have a great day!",
+        ),
+        ("<|channel>thought\nThe user is done.<channel|>Bye, take care!", "Bye, take care!"),
+        ("thought\nGoodbye! Have a lovely day.", "Goodbye! Have a lovely day."),  # the label alone, no end marker
+        ("Thought\n\nBye, take care!", "Bye, take care!"),
+    ],
+)
+async def test_her_thinking_channel_leaked_into_an_answer_is_never_said(
+    store: Store, written: str, spoken: str
+) -> None:
+    # evals, 15 Oct: an end_call turn's answer began "thought\n<channel|>" (the model's thinking channel), which the
+    # caller would hear: everything up to its end marker is left out
+    profile = Profile(store)
+    brain = Brain(
+        FakeGemma(tool("end_call"), text(written)),
+        ContextBuilder(store, profile, TZ),
+        Tools(store, profile, TZ, no_fetch, calls=True),
+    )
+    conversation = store.current_conversation()
+    said = store.add_call_turn(conversation.id, ME, "[call] okay, that's everything for today")
+    reply = await brain.answer(conversation, store.message(said))
+    assert reply.text == spoken and reply.end_call
+
+
 async def test_end_call_named_inside_her_answer_is_left_out_but_ends_nothing(store: Store) -> None:
     # only an end_call written at the end of her answer stands for the tool; a mention in the middle is talk
     profile = Profile(store)
@@ -1056,7 +1086,7 @@ async def test_without_a_youtube_link_her_request_is_the_one_from_before(store: 
         message_id = store.add_incoming(conv.id, ME, T0 + number, "text", words)
         assert message_id is not None
         await brain.answer(conv, store.message(message_id))
-        before = context.build(store.current_conversation())
+        before = context.build(store.current_conversation(), call=words.startswith(prompts.CALL_MARK))
         assert json.dumps(gemma.calls[-1]["messages"]) == json.dumps(before)
         assert gemma.calls[-1]["tools"] == tools.schemas
 
@@ -1183,6 +1213,35 @@ async def test_a_practice_call_can_still_end_with_a_written_end_call(store: Stor
     said = store.add_call_turn(conversation.id, ME, "[call] Dat was het, doei!")
     reply = await brain.answer(conversation, store.message(said), practice=practice_turn(spoken=True))
     assert reply.text == "Tot ziens!" and reply.end_call
+
+
+async def test_a_call_turn_gets_the_call_style_in_practice_too_and_a_typed_one_the_chat_style(store: Store) -> None:
+    """Owner's D5: every call turn, a practice call's included, gets the call's style block in place of the chat
+    style; a typed message (practice or not) keeps the chat style."""
+    gemma = FakeGemma(text("Hoi!"), text("Leuk!"), text("Hi!"), text("Hello."))
+    profile = Profile(store)
+    context = ContextBuilder(store, profile, TZ)
+    brain = Brain(gemma, context, Tools(store, profile, TZ, no_fetch, calls=True))
+    conversation = store.current_conversation()
+    on_call = store.add_call_turn(conversation.id, ME, "[call] Zaterdag ik ben gegaan.")
+    await brain.answer(conversation, store.message(on_call), practice=practice_turn(spoken=True))
+    typed = store.add_incoming(conversation.id, ME, T0 + 1, "text", "Zaterdag ik ben gegaan.")
+    assert typed is not None
+    await brain.answer(conversation, store.message(typed), practice=practice_turn())
+    await brain.answer(conversation, store.message(store.add_call_turn(conversation.id, ME, "[call] hi")))
+    plain = store.add_incoming(conversation.id, ME, T0 + 2, "text", "hi")
+    assert plain is not None
+    await brain.answer(conversation, store.message(plain))
+    systems = [call["messages"][0]["content"] for call in gemma.calls]
+    chat, call = context.style(), context.style(call=True)
+    assert chat != call
+    assert [(call in system, chat in system) for system in systems] == [
+        (True, False),
+        (False, True),
+        (True, False),
+        (False, True),
+    ]
+    assert systems[0].startswith(practice_turn().rules) and systems[1].startswith(practice_turn().rules)
 
 
 async def test_a_reminder_asked_for_and_claimed_in_practice_gets_the_practice_note(store: Store) -> None:

@@ -1457,6 +1457,23 @@ def test_an_acknowledgement_is_only_the_calls_acknowledgement_words(said: str, c
 
 @pytest.mark.parametrize(
     ("said", "code"),
+    [("Klar.", "de"), ("Richtig.", "de"), ("Ja, klar.", "de"), ("Très bien.", "fr"), ("Bien sûr.", "fr"),
+     ("Tá.", "pt"), ("Entendi.", "pt"), ("Ya.", "es"), ("Угу.", "ru"), ("No tak.", "pl"), ("Dobra.", "pl"),
+     ("맞아요.", "ko"), ("Ok.", "nl"), ("Okay.", "nl"), ("Ok.", "it"), ("Okay, va bene.", "it")],
+)  # fmt: skip
+def test_more_listener_words_carry_on(said: str, code: str) -> None:
+    """Owner, 15 Oct: the common acknowledgements of each language, so a German "klar" or a French "bien sûr" over
+    her answer lets her carry on, as an English "okay" does; asked back, the same words still take over."""
+    from local_assistant.calls import is_acknowledgement, is_interruption
+
+    assert is_acknowledgement(said, code)
+    assert not is_interruption(said, name=NAME, language=code)
+    assert is_interruption(said.rstrip(".") + "?", name=NAME, language=code)  # "Richtig?": asked back
+    assert is_interruption(f"{said.rstrip('.')}, aber morgen?", name=NAME, language=code)  # anything more
+
+
+@pytest.mark.parametrize(
+    ("said", "code"),
     [("네?", "ko"), ("はい？", "ja"), ("Right?", "en"), ("Yes?", "en"), ("Really?", "en"), ("Klopt?", "nl"),
      ("Stimmt?", "de"), ("Да?", "ru"), ("Sì?", "it")],
 )  # fmt: skip

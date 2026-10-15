@@ -29,6 +29,17 @@ signal_cli = "signal-cli"       # on PATH (Homebrew's default), or a full path
 digest_time = "09:15"           # the morning digest (calendar, then mail), every day; before 12:00
 #host_label = "the Mac"          # top level, not under [health]: how status messages name this machine, e.g. "the study Mac"
 
+# Her style while there is no soul.md of yours (the rules always win). hearth: steady, kind and frank; the answer first,
+# one concern when a plan looks risky, a joke only when asked for fun or on banter. playful: warm, curious and playful;
+# now and then a light joke, never on a worry. On a call, a short spoken version of either: no joke unless the caller
+# jokes first. Left out: hearth. A soul.md next to this file replaces either one (soul.example.md shows how; /soul in
+# Signal shows the style in use). After a change: restart her.
+[personality]
+style = "hearth"                # or "playful"
+#calm_on_worry = true           # with a soul.md, one line is added after it: no joke when you are worried, sad,
+#                               # stressed or in a crisis, or talk about health, money trouble or safety; calm, kind
+#                               # and practical instead. false: your soul.md alone (/soul and doctor then say so)
+
 # History: messages, pages read and tool calls are kept until you delete them. With keep_days, older ones are deleted
 # each night and overwritten in the database file; a message an open reminder or check-in points to stays.
 #[privacy]
@@ -105,7 +116,7 @@ disk_free_min_percent = 10
 #[voice]
 #url = "http://127.0.0.1:8150"
 #voice = "af_heart"
-#speed = 1.1
+#speed = 1.05
 #max_spoken_chars = 1500     # longer answers are cut at a sentence: "The rest is in the text."
 #max_audio_bytes = 10000000  # voice notes up to 10 MB / 3 minutes
 
@@ -210,6 +221,12 @@ disk_free_min_percent = 10
 #                             # still wait 22:00-08:00 then)
 #lookback_time = "Sun 19:00"
 #early_check = "20:00"        # the early-start note, when tomorrow starts before digest_time
+#evening = "21:00"            # the evening note: three short questions from the code at this time, the same each
+#                             # evening; left out: off. Separate from the kinds above: it needs no enabled = true and
+#                             # never counts toward max_per_day. Quiet hours, /quiet, /lock and a busy moment hold it,
+#                             # for two hours at most that evening; a time inside quiet_hours never comes (/evening
+#                             # says so). With several allowed accounts it goes to none until one types /evening on.
+#                             # /evening on, off or 20:30 in Signal wins over this line
 
 # Web search: Ollama's free web search first, Brave's web search as the backup. Keys only in web.env (0600), written by
 # scripts/set-web-keys.sh from the login keychain. Off without [web].

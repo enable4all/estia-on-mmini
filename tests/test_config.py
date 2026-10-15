@@ -285,7 +285,7 @@ def test_invalid_mail_values(change: dict[str, object], message: str) -> None:
 def test_voice_section_with_defaults() -> None:
     cfg = parse_config({"bot_number": "+306900000000", "allowed_acis": [ACI], "voice": {}})
     assert cfg.voice_enabled
-    assert (cfg.voice_url, cfg.voice_name, cfg.voice_speed) == ("http://127.0.0.1:8150", "af_heart", 1.1)
+    assert (cfg.voice_url, cfg.voice_name, cfg.voice_speed) == ("http://127.0.0.1:8150", "af_heart", 1.05)
     assert (cfg.voice_max_spoken_chars, cfg.voice_max_audio_bytes) == (1500, 10_000_000)
     assert cfg.voice_dir == cfg.data_dir / "voice"
 
@@ -1451,3 +1451,49 @@ def test_the_example_configs_caldav_calendar_parses() -> None:
         "Home",
         "CALDAV_PASSWORD_HOME",
     )
+
+
+def test_her_built_in_style_is_hearth_unless_playful_is_chosen() -> None:
+    """[personality] style: hearth when left out (an install from before moves to it: intended), playful on request."""
+    assert (
+        parse_config(BASE).personality_style == "hearth" == Config("+306900000000", frozenset({ACI})).personality_style
+    )
+    assert parse_config(BASE | {"personality": {}}).personality_style == "hearth"
+    assert parse_config(BASE | {"personality": {"style": "playful"}}).personality_style == "playful"
+    assert parse_config(BASE | {"personality": {"style": "hearth"}}).personality_style == "hearth"
+    with pytest.raises(ConfigError, match=r"\[personality\] must be a table"):
+        parse_config(BASE | {"personality": "playful"})
+
+
+@pytest.mark.parametrize("style", ["Playful", "warm", "", 1, True, ["hearth"]])
+def test_an_unknown_style_is_a_config_error_naming_the_two(style: object) -> None:
+    with pytest.raises(ConfigError, match=r'personality\.style must be "hearth" or "playful" \(default: hearth\)'):
+        parse_config(BASE | {"personality": {"style": style}})
+
+
+def test_the_example_config_names_both_styles_with_hearth_on() -> None:
+    example = (Path(__file__).resolve().parents[1] / "config.example.toml").read_text(encoding="utf-8")
+    assert parse_config(tomllib.loads(example)).personality_style == "hearth"
+    lines = example.splitlines()
+    assert lines[lines.index("[personality]") + 1].startswith('style = "hearth"')
+    assert "playful" in example
+
+
+def test_the_calm_on_worry_line_is_on_unless_turned_off() -> None:
+    """[personality] calm_on_worry: the line code adds after a usable soul.md; on unless the user turns it off."""
+    assert parse_config(BASE).personality_calm_on_worry is True
+    assert Config("+306900000000", frozenset({ACI})).personality_calm_on_worry is True
+    assert parse_config(BASE | {"personality": {"calm_on_worry": False}}).personality_calm_on_worry is False
+    assert parse_config(BASE | {"personality": {"calm_on_worry": True}}).personality_calm_on_worry is True
+    with pytest.raises(ConfigError, match=r"personality\.calm_on_worry must be true or false"):
+        parse_config(BASE | {"personality": {"calm_on_worry": "no"}})
+
+
+def test_the_example_config_shows_the_calm_on_worry_line_on() -> None:
+    example = (Path(__file__).resolve().parents[1] / "config.example.toml").read_text(encoding="utf-8")
+    lines = example.splitlines()
+    switch = lines[lines.index("[personality]") + 2]
+    assert switch.startswith("#calm_on_worry = true")
+    off = tomllib.loads("[personality]\n" + switch.lstrip("#").split("  #")[0].replace("true", "false"))
+    assert parse_config(BASE | off).personality_calm_on_worry is False
+    assert "soul.md" in example[example.index("calm_on_worry") :].split("\n[")[0]

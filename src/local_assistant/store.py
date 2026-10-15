@@ -27,13 +27,13 @@ ReminderRepeat = Literal["none", "daily", "weekdays", "weekly"]
 ReminderStatus = Literal["open", "firing", "done", "cancelled", "failed"]
 ReminderSource = Literal["chat", "command"]
 FollowUpStatus = Literal["open", "sent", "done", "cancelled", "expired"]
-InitiativeKind = Literal["followup", "calendar", "early_start", "lookback", "improvise", "announce"]
+InitiativeKind = Literal["followup", "calendar", "early_start", "lookback", "improvise", "announce", "evening"]
 InitiativeOutcome = Literal["sending", "sent", "unknown", "skipped", "failed"]
 ConversationKind = Literal["chat", "practice"]
 DocSource = Literal["folder", "signal"]  # found in the documents folder, or saved there from a Signal message
 COUNTED: tuple[InitiativeOutcome, ...] = ("sending", "sent", "unknown")  # what counts toward the caps
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 SCHEMA_V1 = """
 CREATE TABLE conversations (
@@ -361,6 +361,34 @@ CREATE TRIGGER doc_pages_fts_update AFTER UPDATE OF text ON doc_pages BEGIN
     INSERT INTO doc_pages_fts (rowid, text) VALUES (new.id, new.text);
 END;
 ALTER TABLE attachments ADD COLUMN filename TEXT NOT NULL DEFAULT '';
+"""
+
+# v11: the evening note (/evening) in the initiative log, as kind 'evening'. SQLite cannot change a CHECK, so the table
+# is made again with it: every row and its id kept, its indexes too. Nothing refers to the log, so nothing else moves.
+MIGRATION_V11 = """
+CREATE TABLE initiative_log_v11 (
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (
+        kind IN ('followup', 'calendar', 'early_start', 'lookback', 'improvise', 'announce', 'evening')
+    ),
+    local_day TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('sending', 'sent', 'unknown', 'skipped', 'failed')),
+    reason TEXT,
+    message_id INTEGER REFERENCES messages (id),
+    replied_at REAL,
+    quieted_at REAL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+INSERT INTO initiative_log_v11 (
+    id, kind, local_day, outcome, reason, message_id, replied_at, quieted_at, created_at, updated_at
+)
+SELECT id, kind, local_day, outcome, reason, message_id, replied_at, quieted_at, created_at, updated_at
+FROM initiative_log;
+DROP TABLE initiative_log;
+ALTER TABLE initiative_log_v11 RENAME TO initiative_log;
+CREATE INDEX initiative_log_day ON initiative_log (local_day);
+CREATE INDEX initiative_log_message ON initiative_log (message_id);
 """
 
 MIGRATION_V4 = """
@@ -892,6 +920,8 @@ class Store:
             self._conn.executescript(f"BEGIN;\n{MIGRATION_V9}\nPRAGMA user_version = 9;\nCOMMIT;")
         if version < 10:
             self._conn.executescript(f"BEGIN;\n{MIGRATION_V10}\nPRAGMA user_version = 10;\nCOMMIT;")
+        if version < 11:
+            self._conn.executescript(f"BEGIN;\n{MIGRATION_V11}\nPRAGMA user_version = 11;\nCOMMIT;")
 
     def close(self) -> None:
         self._conn.close()
@@ -2059,14 +2089,22 @@ class Store:
         rows = self._conn.execute(sql + " ORDER BY id", args).fetchall()
         return [_entry(row) for row in rows]
 
-    def count_initiative(self, first_day: str, last_day: str, *, kind: InitiativeKind | None = None) -> int:
-        """Messages she started (sent, being sent or maybe sent) on the local days first_day..last_day."""
-        marks = ", ".join("?" for _ in COUNTED)
+    def count_initiative(
+        self,
+        first_day: str,
+        last_day: str,
+        *,
+        kind: InitiativeKind | None = None,
+        outcomes: tuple[InitiativeOutcome, ...] = COUNTED,
+    ) -> int:
+        """Messages she started (sent, being sent or maybe sent; or with `outcomes`, rows with those outcomes) on the
+        local days first_day..last_day."""
+        marks = ", ".join("?" for _ in outcomes)
         return int(
             self._conn.execute(
                 f"SELECT COUNT(*) FROM initiative_log WHERE local_day BETWEEN ? AND ? AND outcome IN ({marks})"
                 " AND (? IS NULL OR kind = ?)",
-                (first_day, last_day, *COUNTED, kind, kind),
+                (first_day, last_day, *outcomes, kind, kind),
             ).fetchone()[0]
         )
 

@@ -5,6 +5,7 @@ them. The folder and the database are temporary ones. Skipped when the helper is
 scripts/verify.sh (DOCUMENTS_HELPER_REQUIRED). A new build's first scan waits for macOS to prepare Vision's model
 (50-70 s, tools/documents/README.md): the warm-up at the start, as in the bridge, takes that wait."""
 
+import json
 import os
 import subprocess
 from collections.abc import Sequence
@@ -15,7 +16,7 @@ import pytest
 
 from local_assistant import prompts
 from local_assistant.config import CODE_ROOT, Config
-from local_assistant.documents import Documents, Helper
+from local_assistant.documents import Documents, Helper, helper_env
 from local_assistant.store import Store
 from tests.conftest import TZ
 from tests.fakes.fake_gemma import FakeGemma, text, tool
@@ -183,3 +184,25 @@ async def test_a_pdf_sent_on_signal_is_read_by_the_real_helper_and_her_search_to
         assert len(results) == 1 and f'[1] "{saved_as}", page 2: The deductible is 250 euros per claim.' in results[0]
     finally:
         await stop(harness)
+
+
+def test_text_recognition_needs_foundations_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Live, 15 Oct: as her, Foundation's home was her account record's /var/empty (helper_env passed HOME alone), and
+    every Vision scan failed in under 0.3 s: scanned pages and the warm-up failed, text pages still read. The real
+    helper fails with that home and works with helper_env's, whatever the bridge's own CFFIXED_USER_HOME says."""
+    helper = helper_command()[0]
+
+    def warm(env: dict[str, str]) -> object:
+        done = subprocess.run(
+            [helper, "warm", "--max-seconds", str(int(COLD))],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=COLD + 30,
+            check=False,
+        )
+        return json.loads(done.stdout.strip().splitlines()[-1]).get("ok")
+
+    assert warm({"PATH": "/usr/bin:/bin", "HOME": "/var/empty", "CFFIXED_USER_HOME": "/var/empty"}) is False
+    monkeypatch.setenv("CFFIXED_USER_HOME", "/var/empty")
+    assert warm(helper_env()) is True

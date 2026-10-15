@@ -40,11 +40,14 @@ def amsterdam_time(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest
 @pytest.fixture(autouse=True)
 def no_live_system(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
     """Tests never read the owner's Mac: system paths (/Library/LaunchDaemons, /usr/local/estia, /var/estia) resolve
-    under an empty root of their own (ESTIA_ROOT), and the live voice service is never asked. A test that needs "/"
+    under an empty root of their own (ESTIA_ROOT), the live voice service is never asked, and the evals' EVAL_
+    settings of the shell are dropped (EVAL_SOUL may name the live soul.md). A test that needs "/"
     says so (monkeypatch.delenv("ESTIA_ROOT")) and reads nothing there."""
     from local_assistant import ownuser
 
     monkeypatch.setenv("ESTIA_ROOT", str(tmp_path_factory.mktemp("estia-root")))
+    for key in ("EVAL_SOUL", "EVAL_STYLE", "EVAL_LANGUAGE", "EVAL_NAME", "EVAL_MODEL", "EVAL_BASE_URL"):
+        monkeypatch.delenv(key, raising=False)  # a developer's exported EVAL_SOUL may name the live soul.md
     real = ownuser.voice_health
 
     def voice_health(live: bool) -> object:

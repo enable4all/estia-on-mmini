@@ -1,11 +1,15 @@
+import hashlib
 import os
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from local_assistant import prompts
-from local_assistant.config import DEFAULT_NAME
+from local_assistant.config import DEFAULT_NAME, DEFAULT_STYLE, STYLES
 from local_assistant.context import ContextBuilder
 from local_assistant.profile import Profile
+from local_assistant.soul import load_soul, soul_part
 from local_assistant.store import Conversation, Message, Store
 from tests.conftest import ME, T0, TZ
 
@@ -318,49 +322,364 @@ def test_the_soul_comes_after_the_rules_and_before_the_profile(store: Store, tmp
     assert "Vibe: playful." in context.system_prompt(store.current_conversation())
 
 
-def test_without_a_usable_soul_her_built_in_playful_style_is_used(store: Store, tmp_path: Path) -> None:
-    """No soul.md (or one that is not used): her own style, warm, curious and playful, below the rules."""
+def test_the_log_names_what_texts_and_calls_each_get_from_soul_md(
+    store: Store, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The log says, once per change, how much of soul.md texts and calls each get (0: the built-in style there), so a
+    file whose parts send a kind nothing shows; counts only, never the text."""
+    path = tmp_path / "soul.md"
+    path.write_text("[call]\n- Spoken.", encoding="utf-8")
+    os.chmod(path, 0o600)
+    context = ContextBuilder(store, Profile(store), TZ, soul_path=path)
+    with caplog.at_level("INFO", logger="local_assistant.context"):
+        context.style()
+        context.style(call=True)
+    lines = [record.getMessage() for record in caplog.records if "soul.md" in record.getMessage()]
+    assert lines == ["soul.md in use: 0 characters for texts (0: the built-in style), 9 for calls"]
+
+
+def test_without_a_usable_soul_her_built_in_style_is_used(store: Store, tmp_path: Path) -> None:
+    """No soul.md (or one that is not used): her built-in style, hearth unless playful is chosen, below the rules."""
     profile = Profile(store)
     profile.add("About: The user lives in Amsterdam.", source_kind="remember")
     plain = ContextBuilder(store, profile, TZ).system_prompt(store.current_conversation())
     path = tmp_path / "soul.md"
     missing = ContextBuilder(store, profile, TZ, soul_path=path)
     assert missing.system_prompt(store.current_conversation()) == plain
-    style = f"{prompts.DEFAULT_STYLE_HEADER.format(name=NAME)}\n{prompts.DEFAULT_STYLE}"
+    style = f"{prompts.BUILT_IN_STYLE_HEADER.format(name=NAME)}\n{prompts.HEARTH_STYLE}"
     assert plain.index("Safety:") < plain.index(style) < plain.index("PROFILE: facts about the user")
     assert "STYLE (built in" in plain and "how Estia sounds and talks" in plain and "never overrides" in plain
     path.write_text("Vibe: dry.\n", encoding="utf-8")
     os.chmod(path, 0o644)  # readable by others: not used, so her own style stays
     assert missing.system_prompt(store.current_conversation()) == plain
+    playful = ContextBuilder(store, profile, TZ, soul_path=path, style="playful")
+    assert f"{prompts.BUILT_IN_STYLE_HEADER.format(name=NAME)}\n{prompts.PLAYFUL_STYLE}" in playful.system_prompt(
+        store.current_conversation()
+    )
+
+
+# the style block (header and text) of the built-in playful style at e50b85f, the default before hearth
+PLAYFUL_BLOCK_E50B85F_SHA256 = "361fd1672f8f379f238abb67a256b99627e5f5a63286838a0deb01b2acc91305"
+
+
+def test_with_playful_and_no_soul_her_system_prompt_is_the_one_from_e50b85f(store: Store, tmp_path: Path) -> None:
+    """style = "playful" and no soul.md: her request is byte for byte the one before hearth (e50b85f), in chat, under
+    practice rules and in a message she starts herself (the same style block); on a call only the style block
+    differs: playful's call version takes its place (owner, D5)."""
+    profile = Profile(store)
+    profile.add("About: The user lives in Amsterdam.", source_kind="remember")
+    conv = store.current_conversation()
+    for rules in (None, prompts.rules(name=NAME, practice=("nl", "A2"))):
+        context = ContextBuilder(store, profile, TZ, rules=rules, soul_path=tmp_path / "soul.md", style="playful")
+        block = context.style()
+        assert hashlib.sha256(block.encode()).hexdigest() == PLAYFUL_BLOCK_E50B85F_SHA256
+        chosen = prompts.rules(name=NAME) if rules is None else rules
+        snapshot = context.snapshot()
+        assert context.system_prompt(conv) == f"{chosen}\n\n{block}\n\n{snapshot}"
+        on_call = f"{prompts.BUILT_IN_STYLE_HEADER.format(name=NAME)}\n{prompts.PLAYFUL_CALL_STYLE}"
+        assert context.style(call=True) == on_call
+        assert context.system_prompt(conv, call=True) == (
+            f"{prompts.without_capabilities(chosen)}\n\n{on_call}\n\n{snapshot}"
+        )
+
+
+def test_hearth_replaces_playful_only_in_the_style_block(store: Store, tmp_path: Path) -> None:
+    """The default (hearth) and playful differ only in the built-in style's text, in chat and on a call: the header,
+    the rules, the profile and the summary are the same."""
+    profile = Profile(store)
+    profile.add("About: The user lives in Amsterdam.", source_kind="remember")
+    conv = store.current_conversation()
+    for rules in (None, prompts.rules(name=NAME, calendar=True, web=True, practice=("nl", "A2"))):
+        hearth = ContextBuilder(store, profile, TZ, rules=rules, soul_path=tmp_path / "soul.md")
+        playful = ContextBuilder(store, profile, TZ, rules=rules, soul_path=tmp_path / "soul.md", style="playful")
+        for call, ours_style, other in (
+            (False, prompts.HEARTH_STYLE, prompts.PLAYFUL_STYLE),
+            (True, prompts.HEARTH_CALL_STYLE, prompts.PLAYFUL_CALL_STYLE),
+        ):
+            ours = hearth.system_prompt(conv, call=call)
+            before = playful.system_prompt(conv, call=call)
+            assert ours.count(ours_style) == 1 and other not in ours
+            assert ours == before.replace(other, ours_style)
+        assert hearth.style() == playful.style().replace(prompts.PLAYFUL_STYLE, prompts.HEARTH_STYLE)
+
+
+def test_a_calls_system_prompt_differs_only_in_its_style_block(store: Store, tmp_path: Path) -> None:
+    """Owner's D5: on a call her built-in style's call version replaces the chat style (never added to it); the rules
+    (without the list of what she can do, as before), the profile, the summary and the call's glance are as before."""
+    profile = Profile(store)
+    profile.add("About: The user lives in Amsterdam.", source_kind="remember")
+    conv = store.current_conversation()
+    store.set_summary(conv.id, "They talked about tea.", 0)
+    conv = store.conversation(conv.id)
+    glance = prompts.call_glance(["Mail digest: 2 to answer."], at="13:10", calendar=False, mail=True)
+    listed = prompts.rules(name=NAME, calendar=True, calls=True, web=True, capabilities=["• Mail: on."])
+    header = prompts.BUILT_IN_STYLE_HEADER.format(name=NAME)
+    for style in STYLES:
+        for rules in (None, listed, prompts.rules(name=NAME, practice=("nl", "A2"))):
+            context = ContextBuilder(store, profile, TZ, rules=rules, soul_path=tmp_path / "soul.md", style=style)
+            chat, call = context.style(), context.style(call=True)
+            assert chat == f"{header}\n{prompts.BUILT_IN_STYLES[style]}"
+            assert call == f"{header}\n{prompts.BUILT_IN_CALL_STYLES[style]}"
+            chosen = prompts.rules(name=NAME) if rules is None else rules
+            summary = f"EARLIER IN THIS CONVERSATION (summary)\n{conv.summary}"
+            before = (
+                f"{prompts.without_capabilities(chosen)}\n\n{chat}\n\n{context.snapshot()}\n\n{summary}\n\n{glance}"
+            )
+            assert before.count(chat) == 1
+            assert context.system_prompt(conv, glance=glance, call=True) == before.replace(chat, call)
+            assert prompts.BUILT_IN_STYLES[style] not in context.system_prompt(conv, glance=glance, call=True)
+            assert prompts.BUILT_IN_CALL_STYLES[style] not in context.system_prompt(conv)
+            system = context.build(conv, glance=glance, call=True)[0]["content"]
+            assert system == context.system_prompt(conv, glance=glance, call=True)
+
+
+def test_each_call_style_is_short_and_spoken_and_jokes_only_after_the_caller() -> None:
+    """Owner's D5: a short call version of each built-in style (about 300 characters at most): short spoken
+    sentences, one idea per turn, warm from the first words; no jokes unless the caller jokes first; calm on a
+    worry. No emoji (a call speaks), no Greek words or myth (D3)."""
+    assert set(prompts.BUILT_IN_CALL_STYLES) == set(prompts.BUILT_IN_STYLES) == set(STYLES)
+    for name, style in prompts.BUILT_IN_CALL_STYLES.items():
+        assert len(style) <= 300 and "{" not in style, name
+        for said in (
+            "short spoken sentences",
+            "one idea per turn",
+            "warm from the first words",
+            "No jokes unless the caller jokes or asks for one",
+            "worried",
+            "health, money trouble or safety",
+            "calm, kind and practical",
+        ):
+            assert said in style, (name, said)
+        assert all(ord(ch) < 0x2000 for ch in style), name  # no emoji
+        lowered = style.casefold()
+        assert not any(word in lowered for word in ("hestia", "hearth", "greek", "myth", "fire")), name
+    assert prompts.HEARTH_CALL_STYLE.startswith("Steady, kind and frank")
+    assert "light touch" in prompts.PLAYFUL_CALL_STYLE
+
+
+# a soul.md without a "[chat]" or "[call]" line, and e50b85f's style block for it (header and text)
+UNPARTED_SOUL = "# a note for me\nWho: a warm sidekick.\n\nVibe: dry; one idea at a time.\n[Call] me Alex.\n"
+UNPARTED_BLOCK_E50B85F_SHA256 = "ffb76ce961c0ca26a9a5c2dfb4551636e229f38b5a010ba6aa02f6d899be71f5"
+
+
+def test_with_a_soul_without_parts_the_call_request_is_the_one_from_e50b85f(store: Store, tmp_path: Path) -> None:
+    """A soul.md without a part line goes whole to chat and calls: with calm_on_worry = false a call's request is byte
+    for byte e50b85f's, and with the default D6's line follows the soul as before; whichever built-in style is
+    chosen."""
+    path = tmp_path / "soul.md"
+    path.write_text(UNPARTED_SOUL, encoding="utf-8")
+    os.chmod(path, 0o600)
+    profile = Profile(store)
+    profile.add("About: The user lives in Amsterdam.", source_kind="remember")
+    conv = store.current_conversation()
+    listed = prompts.rules(name=NAME, calendar=True, calls=True, capabilities=["• Mail: on."])
+    for style in STYLES:
+        for rules in (None, listed):
+            chosen = prompts.rules(name=NAME) if rules is None else rules
+            off = ContextBuilder(store, profile, TZ, rules=rules, soul_path=path, style=style, calm_on_worry=False)
+            block = off.style(call=True)
+            assert hashlib.sha256(block.encode()).hexdigest() == UNPARTED_BLOCK_E50B85F_SHA256
+            assert block == off.style()
+            before = f"{prompts.without_capabilities(chosen)}\n\n{block}\n\n{off.snapshot()}"
+            assert off.system_prompt(conv, call=True) == before
+            assert off.build(conv, call=True)[0]["content"] == before
+            on = ContextBuilder(store, profile, TZ, rules=rules, soul_path=path, style=style)
+            assert on.system_prompt(conv, call=True) == before.replace(block, f"{block}\n\n{prompts.SOUL_CALM}")
+
+
+def test_a_souls_chat_part_goes_to_chat_and_her_own_messages_and_its_call_part_to_calls(
+    store: Store, tmp_path: Path
+) -> None:
+    """Owner's D5: soul.md's text before its first part line goes to both; "[chat]" to every answer that is not on a
+    call and to the messages she starts herself (`style()`), "[call]" to call turns only. D6's line follows each."""
+    path = tmp_path / "soul.md"
+    path.write_text(
+        "# mine\nWho: a warm sidekick.\n\n[chat]\n- One to three sentences.\n\n[call]\n- Spoken: one idea per turn.\n",
+        encoding="utf-8",
+    )
+    os.chmod(path, 0o600)
+    context = ContextBuilder(store, Profile(store), TZ, soul_path=path)
+    header = prompts.SOUL_HEADER.format(name=NAME)
+    assert context.style() == f"{header}\nWho: a warm sidekick.\n\n- One to three sentences.\n\n{prompts.SOUL_CALM}"
+    assert context.style(call=True) == (
+        f"{header}\nWho: a warm sidekick.\n\n- Spoken: one idea per turn.\n\n{prompts.SOUL_CALM}"
+    )
+    conv = store.current_conversation()
+    chat, call = context.system_prompt(conv), context.system_prompt(conv, call=True)
+    assert "One to three" in chat and "Spoken:" not in chat and "[chat]" not in chat
+    assert "Spoken:" in call and "One to three" not in call and "[call]" not in call
+    assert call == prompts.without_capabilities(chat).replace(context.style(), context.style(call=True))
+    off = ContextBuilder(store, Profile(store), TZ, soul_path=path, calm_on_worry=False)
+    assert off.style(call=True) == f"{header}\nWho: a warm sidekick.\n\n- Spoken: one idea per turn."
+
+
+def test_a_soul_with_nothing_for_one_kind_leaves_it_the_built_in_style(store: Store, tmp_path: Path) -> None:
+    """A soul.md with only a "[chat]" part has nothing for calls: a call gets the built-in style's call version (and
+    only a "[call]" part: chat gets the built-in style)."""
+    path = tmp_path / "soul.md"
+    os.chmod(path.parent, 0o700)
+    for text, chat_built_in, call_built_in in (
+        ("[chat]\n- One to three sentences.", False, True),
+        ("[call]\n- Spoken: one idea per turn.", True, False),
+    ):
+        path.write_text(text, encoding="utf-8")
+        os.chmod(path, 0o600)
+        for style in STYLES:
+            context = ContextBuilder(store, Profile(store), TZ, soul_path=path, style=style)
+            header = prompts.BUILT_IN_STYLE_HEADER.format(name=NAME)
+            assert (context.style() == f"{header}\n{prompts.BUILT_IN_STYLES[style]}") is chat_built_in
+            assert (context.style(call=True) == f"{header}\n{prompts.BUILT_IN_CALL_STYLES[style]}") is call_built_in
+            assert context.style().startswith(prompts.SOUL_HEADER.format(name=NAME)) is not chat_built_in
+
+
+def test_an_unknown_built_in_style_is_refused(store: Store) -> None:
+    with pytest.raises(KeyError):
+        ContextBuilder(store, Profile(store), TZ, style="warm")
+    assert set(prompts.BUILT_IN_STYLES) == set(STYLES) and DEFAULT_STYLE == "hearth"
 
 
 def test_a_usable_soul_replaces_the_built_in_style_entirely(store: Store, tmp_path: Path) -> None:
     path = tmp_path / "soul.md"
     path.write_text("Vibe: dry and calm.\n", encoding="utf-8")
     os.chmod(path, 0o600)
-    prompt = ContextBuilder(store, Profile(store), TZ, soul_path=path, name="Tiffany").system_prompt(
-        store.current_conversation()
+    for style in STYLES:
+        prompt = ContextBuilder(store, Profile(store), TZ, soul_path=path, name="Tiffany", style=style).system_prompt(
+            store.current_conversation()
+        )
+        assert "Vibe: dry and calm." in prompt and "STYLE (the user's own soul.md: how Tiffany sounds" in prompt
+        assert prompts.HEARTH_STYLE not in prompt and prompts.PLAYFUL_STYLE not in prompt
+        assert "STYLE (built in" not in prompt
+
+
+def test_a_usable_soul_gets_codes_calm_on_worry_line_right_after_it(store: Store, tmp_path: Path) -> None:
+    """Owner's D6: with a usable soul.md, code adds one line right after the soul text, the built-in styles' own words:
+    no joke on a worry; calm, kind and practical. In chat, on a call and in a message she starts (the same block)."""
+    path = tmp_path / "soul.md"
+    path.write_text("# a note\nVibe: silly, a pun in every answer.\n", encoding="utf-8")
+    os.chmod(path, 0o600)
+    context = ContextBuilder(store, Profile(store), TZ, soul_path=path)
+    header = prompts.SOUL_HEADER.format(name=NAME)
+    assert context.style() == f"{header}\nVibe: silly, a pun in every answer.\n\n{prompts.SOUL_CALM}"
+    assert prompts.SOUL_CALM == (
+        "Always, whatever the style above says: no joke when the user is worried, sad, stressed or in a crisis, talks "
+        "about health, money trouble or safety, or something serious is going on: then be calm, kind and practical, "
+        "with no pun or laughing emoji."
     )
-    assert "Vibe: dry and calm." in prompt and "STYLE (the user's own soul.md: how Tiffany sounds" in prompt
-    assert prompts.DEFAULT_STYLE not in prompt and "STYLE (built in" not in prompt
+    assert prompts.CALM_ON_WORRY[1:-1] in prompts.SOUL_CALM  # the built-in styles' own words
+    conv = store.current_conversation()
+    for call in (False, True):
+        prompt = context.system_prompt(conv, call=call)
+        assert prompt.count(prompts.SOUL_CALM) == 1
+        assert prompt.index("Vibe: silly") < prompt.index(prompts.SOUL_CALM) < prompt.index("PROFILE: facts about")
 
 
-def test_the_built_in_style_jokes_lightly_and_never_when_it_hurts() -> None:
-    style = prompts.DEFAULT_STYLE
+def test_the_calm_on_worry_line_never_appears_without_a_soul_or_when_turned_off(store: Store, tmp_path: Path) -> None:
+    """The built-in styles carry the line themselves; calm_on_worry = false (the user's choice) leaves code's line
+    out, and the soul.md reaches her exactly as written."""
+    path = tmp_path / "soul.md"
+    for style in STYLES:
+        built_in = ContextBuilder(store, Profile(store), TZ, soul_path=path, style=style).style()
+        assert prompts.SOUL_CALM not in built_in and prompts.CALM_ON_WORRY in built_in
+    path.write_text("Vibe: silly.\n", encoding="utf-8")
+    os.chmod(path, 0o600)
+    off = ContextBuilder(store, Profile(store), TZ, soul_path=path, calm_on_worry=False)
+    assert off.style() == f"{prompts.SOUL_HEADER.format(name=NAME)}\nVibe: silly." and not off.calm_on_worry
+    assert prompts.CALM_ON_WORRY not in off.system_prompt(store.current_conversation())
+    os.chmod(path, 0o644)  # a soul.md that is not used: the built-in style, with its own line
+    assert prompts.SOUL_CALM not in ContextBuilder(store, Profile(store), TZ, soul_path=path).style()
+
+
+def test_the_example_soul_says_codes_line_is_added_and_how_to_turn_it_off(tmp_path: Path) -> None:
+    """soul.example.md tells the user, in a comment (left out of the soul), that code adds the calm-on-worry line."""
+    example = (Path(__file__).resolve().parents[1] / "soul.example.md").read_text(encoding="utf-8")
+    notes = " ".join(line.lstrip("# ") for line in example.splitlines() if line.startswith("#"))
+    assert "calm_on_worry = false" in notes and "[personality]" in notes and "added after this file" in notes
+    path = tmp_path / "soul.md"
+    path.write_text(example, encoding="utf-8")
+    os.chmod(path, 0o600)
+    assert "calm_on_worry" not in load_soul(path).text  # a comment costs nothing
+
+
+def test_the_example_souls_parts_reach_chat_and_calls_and_its_comment_says_so(tmp_path: Path) -> None:
+    """soul.example.md has a [chat] and a [call] part: its shared lines (who she is, how she sounds) reach both, each
+    part only its own kind; a comment (left out of the soul) says how the parts work."""
+    example = (Path(__file__).resolve().parents[1] / "soul.example.md").read_text(encoding="utf-8")
+    notes = " ".join(line.lstrip("# ") for line in example.splitlines() if line.startswith("#"))
+    for said in ("[chat] for her texts and the messages she starts herself", "[call] for calls only", "counts whole"):
+        assert said in notes, said
+    path = tmp_path / "soul.md"
+    path.write_text(example, encoding="utf-8")
+    os.chmod(path, 0o600)
+    text = load_soul(path).text
+    chat, call = soul_part(text, call=False), soul_part(text, call=True)
+    for both in ("Who: a warm, sharp sidekick", "Dislikes:", "Sounds like (tone only; never reuse the wording):"):
+        assert both in chat and both in call, both
+    assert "One to three sentences by default" in chat and "One to three sentences by default" not in call
+    assert "Spoken: short sentences" in call and "Spoken: short sentences" not in chat
+    assert "[chat]" not in chat + call and "[call]" not in chat + call
+    # owner, D5 (no jokes on a call unless the caller jokes first): the example's call part says it, as the built-in
+    # call styles do; a comment says that what follows a part line is that part's only
+    assert "No jokes unless I joke or ask for one; never on a worry." in call  # owner, 15 Oct: asking counts
+    assert "No jokes unless I joke first" not in chat
+    assert "keep what is meant for both above the first one" in notes and "/soul shows what texts" in notes
+
+
+def test_the_playful_style_jokes_lightly_and_never_when_it_hurts() -> None:
+    style = prompts.PLAYFUL_STYLE
     assert len(style) < 700 and "playful" in style and "one short, light joke" in style
     for never in ("worried", "sad", "crisis", "health", "money trouble", "safety", "expense", "instead of the answer"):
         assert never in style, never
     assert "{" not in style  # no template: the same text for every name
 
 
-def test_the_built_in_style_answers_first_and_a_joke_may_follow() -> None:
+def test_the_playful_style_answers_first_and_a_joke_may_follow() -> None:
     """The answer comes first; a short light joke may follow when the moment invites it, never before or instead."""
-    style = prompts.DEFAULT_STYLE
+    style = prompts.PLAYFUL_STYLE
     answer_first = style.index("Give the real answer first.")
     assert answer_first < style.index("joke")
     assert "When the moment invites it, one short, light joke or playful line may follow." in style
     assert "then give the real answer" not in style  # the old order: the joke first
     assert "something serious is going on" in style
+
+
+def test_both_built_in_styles_carry_the_calm_on_worry_line_word_for_word() -> None:
+    for style in prompts.BUILT_IN_STYLES.values():
+        assert f"\n- {prompts.CALM_ON_WORRY}" in style
+    assert prompts.CALM_ON_WORRY == (
+        "No joke when the user is worried, sad, stressed or in a crisis, talks about health, money trouble or "
+        "safety, or something serious is going on: then be calm, kind and practical."
+    )
+
+
+def test_hearth_is_steady_frank_and_short_with_one_joke_only_when_asked() -> None:
+    """Owner's D1: steady, hospitable, frank, nothing in excess, calm on worry, honest that she is a local model that
+    can be wrong, no flattery; about playful's length (the evals asked for the AI line and the 😄); no Greek words, no
+    mythology, nothing about its name."""
+    style = prompts.HEARTH_STYLE
+    assert len(style) < 800 and len(style) < 1.3 * len(prompts.PLAYFUL_STYLE) and "{" not in style
+    assert style.index("answer first") < style.index("joke")
+    for said in (
+        "same even temper every day",
+        "never more excited than the news",
+        "at most one question back",
+        'No flattery ("Great question!")',
+        "one concern, once, with the reason; then help anyway",
+        "Asked for fun or a joke, or when the user banters: end with one short joke or pun",
+        "Otherwise no jokes.",
+        "Asked if you are a friend or what you are, and when it matters, say plainly what you are (an AI, not a "
+        "person) and that you can be wrong.",
+        "Never claim feelings.",
+        'No guilt or "I missed you" after a silence.',
+    ):
+        assert said in style, said
+    # no sentence to recite (15 Oct: "Are you my friend?" got hearth's line word for word, 3 of 5; with this line,
+    # not_a_human_friend 3 of 5 against 1 of 5, no_flattery_opener 5 of 5 against 1 of 5, video_auto 4 of 5 against
+    # 3 of 5, run in turn with a fresh tag; "in your own words" took video_auto to 2 of 5); she runs locally: the rules
+    assert "a local model that can be wrong" not in style and "in your own words" not in style
+    lowered = style.casefold()
+    for never in ("hestia", "hearth", "greek", "god", "myth", "fire", "flame", "🔥", "xenia", "delphi"):
+        assert never not in lowered, never
+    assert not any("\u0370" <= ch <= "\u03ff" for ch in style)  # no Greek letters
 
 
 def test_the_rules_explain_audio_files() -> None:
@@ -388,6 +707,9 @@ def test_the_project_rules_come_only_with_projects() -> None:
         assert word not in off, word
     assert prompts.PROJECTS_OFF_RULE in off and "[projects]" in off
     assert "scripts/setup.sh --extras" in prompts.PROJECTS_OFF_RULE  # the way that asks the folder and the level
+    # said in full (15 Oct, run in turn, a fresh tag: hearth said "setup.sh with the extras flag" or setup.sh alone,
+    # which runs the whole setup again; "name the command in full" 6 of 6 against 4 of 6, call_goodbye 5 of 6 both)
+    assert "name the command in full, scripts/setup.sh --extras:" in prompts.PROJECTS_OFF_RULE
     assert "scripts/setup.sh --extras" in prompts.PROJECTS_OFF_RESULT
     for off_text in (prompts.PROJECTS_OFF_RULE, prompts.PROJECTS_OFF_RESULT):  # her config is hers: setup prints lines
         assert "adds [projects] to the config (in her own user it prints the lines to add)" in off_text
@@ -453,8 +775,8 @@ def test_rules_for_one_answer_keep_the_style_and_profile_below_them(store: Store
     practice = prompts.rules(name=NAME, practice=("nl", "A2"))
     system = context.build(conv, rules=practice)[0]["content"]
     assert system.startswith(practice)
-    assert prompts.DEFAULT_STYLE in system and "#1 The user likes tea." in system
-    assert system.index(prompts.DEFAULT_STYLE) > len(practice)
+    assert prompts.HEARTH_STYLE in system and "#1 The user likes tea." in system
+    assert system.index(prompts.HEARTH_STYLE) > len(practice)
     assert context.system_prompt(conv).startswith(prompts.rules(name=NAME))  # the next answer: her own rules again
     assert context.system_prompt(conv, rules=practice).startswith(practice)
 

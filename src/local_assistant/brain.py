@@ -126,6 +126,21 @@ def defang_links(text: str, allowed: str) -> str:
 _WRITTEN_END_CALL = re.compile(r"[ \t]*[(\[`*]*\bend_call\b(?:\(\))?[)\]`*]*", re.IGNORECASE)
 
 
+THINKING_END = "<channel|>"  # the end of the model's thinking channel ("<|channel>thought\n…<channel|>")
+
+
+_THINKING_LABEL = re.compile(r"\A\s*thought[ \t]*\n", re.IGNORECASE)  # the channel's label alone on her first line
+
+
+def without_thinking(text: str) -> str:
+    """Her answer without a thinking channel that leaked into it (evals, 15 Oct, end_call turns: "thought\n<channel|>
+    Goodbye!", or the label alone, "thought\nGoodbye!"; a caller would hear "thought"): everything up to its last end
+    marker is left out, else a first line that is only the label."""
+    if THINKING_END in text:
+        return text.rsplit(THINKING_END, 1)[1].lstrip()
+    return _THINKING_LABEL.sub("", text, count=1).lstrip() if _THINKING_LABEL.match(text) else text
+
+
 def without_written_end_call(text: str) -> tuple[str, bool]:
     """Gemma sometimes writes end_call after her goodbye instead of calling it (live 2026-10-10): the name is left
     out wherever it is (never said or sent), and whether it ended her answer is returned (on a call that counts as
@@ -339,7 +354,7 @@ class Brain:
                         turn.reminder_attempts.append(ReminderAttempt(_reminder_text(call.arguments), why))
                     messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
                 continue
-            text, wrote_end_call = without_written_end_call(without_fake_notices(completion.content))
+            text, wrote_end_call = without_written_end_call(without_fake_notices(without_thinking(completion.content)))
             if wrote_end_call and self._tools.calls_on and message.text.startswith(prompts.CALL_MARK):
                 turn.end_call = True
             if not corrected and _claims_a_save(text) and not turn.saved and allow_tools:
@@ -436,7 +451,9 @@ class Brain:
         wrote that she repeats ("If I have time, I will call you": the practice evals' en-17). The injection-residue
         guards: no set_reminder can run, so the overlap rule has nothing to check; links are defanged as in a chat
         answer, after outside text in the practice conversation (an audio file or a photo) unless the user sent them."""
-        messages = self._context.build(conversation, shown or None, rules=practice.rules)
+        # a practice call's turn gets the call's style too (its rules have no list of what she can do to leave out)
+        on_call = message.text.startswith(prompts.CALL_MARK)
+        messages = self._context.build(conversation, shown or None, rules=practice.rules, call=on_call)
         completion = await self._gemma.chat(messages, max_tokens=max_tokens, tools=None)
         if not _has_images(messages):  # image tokens are counted by Ollama but not in our characters
             self._context.calibrate(messages, completion.prompt_tokens)
@@ -448,7 +465,9 @@ class Brain:
             log.warning("message %d: the practice reply stayed broken; the fallback question instead", message.id)
             text = practice.fallback
         else:
-            text = tidy(without_fake_notices(completion.content), spoken=practice.spoken, said=message.text)
+            text = tidy(
+                without_fake_notices(without_thinking(completion.content)), spoken=practice.spoken, said=message.text
+            )
         text, wrote_end_call = without_written_end_call(text)
         end_call = wrote_end_call and self._tools.calls_on and message.text.startswith(prompts.CALL_MARK)
         text = text or practice.fallback

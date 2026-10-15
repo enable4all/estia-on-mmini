@@ -1127,6 +1127,52 @@ def test_the_draft_never_goes_to_a_cloud_model(
     assert chats == [] and "cloud model" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(
+    ("personality", "soul", "has", "lacks"),
+    [
+        ('style = "playful"', "", prompts.PLAYFUL_STYLE, prompts.HEARTH_STYLE),
+        ("", "Vibe: silly.", prompts.SOUL_CALM, prompts.HEARTH_STYLE),
+        ("calm_on_worry = false", "Vibe: silly.", "Vibe: silly.", prompts.SOUL_CALM),
+    ],
+    ids=["playful", "soul", "calm off"],
+)
+def test_the_draft_uses_the_configs_personality(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, personality: str, soul: str, has: str, lacks: str
+) -> None:
+    """As the bridge: [personality] picks the built-in style below her rules, or with a soul.md, code's calm-on-worry
+    line after it unless calm_on_worry = false."""
+    from local_assistant import initiative as initiative_module
+    from local_assistant.config import load_config
+    from local_assistant.gemma import ModelEntry
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    config = tmp_path / "config.toml"
+    config.write_text(f'bot_number = "+306900000000"\nallowed_acis = ["{ME}"]\n[personality]\n{personality}\n')
+    config.chmod(0o600)
+    if soul:
+        (tmp_path / "soul.md").write_text(soul)
+        (tmp_path / "soul.md").chmod(0o600)
+    Store.open(load_config(config).db_path).close()
+    styles: list[str] = []
+
+    class LocalAlias:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def model_entry(self) -> ModelEntry:
+            return ModelEntry("ab" * 32)
+
+    async def drafted(*args: object, style: str, **kwargs: object) -> str:
+        styles.append(style)
+        return "A drafted note."
+
+    monkeypatch.setattr(initiative_module, "OllamaGemma", LocalAlias)
+    monkeypatch.setattr(initiative_module, "draft", drafted)
+    assert main(["--draft", "improvise", "--config", str(config)]) == 0
+    [style] = styles
+    assert has in style and lacks not in style
+
+
 # the lock (/lock): nothing is started; a check-in waits like under /quiet, and a skip says "locked"
 
 

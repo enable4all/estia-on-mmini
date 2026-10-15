@@ -82,6 +82,35 @@ async def test_a_changed_voice_or_initiative_setting_is_told_so_her_rules_follow
     assert changed == ["rules", "rules", "rules"]
 
 
+async def test_evening_is_the_senders_and_a_change_rebuilds_her_rules(store: Store) -> None:
+    """/evening on|off|HH:MM (owner, D4): the typed command of the account that sent it; a change is told, so the list
+    in her rules names the time while it is on; /evening alone only tells."""
+    changed: list[str] = []
+    profile, context = Profile(store), ContextBuilder(store, Profile(store), TZ)
+
+    async def no_send(out_id: int) -> None:
+        return None
+
+    initiative = Initiative(
+        store, Settings(), Writer(FakeGemma()), no_send, tz=TZ, acis=frozenset({ME, STRANGER}), clock=lambda: 0.0
+    )
+    commands = Commands(
+        store, profile, context, TZ, status, lambda: None, initiative=initiative,
+        changed=lambda: changed.append("rules"),
+    )  # fmt: skip
+    assert await commands.handle(command(store, "/evening")) == prompts.EVENING_STATE_OFF.format(time="21:00")
+    assert changed == []
+    reply = await commands.handle(command(store, "/evening 20:30", T0 + 1))
+    assert reply.startswith("On: three short questions about the day, every day at 20:30")
+    assert changed == ["rules"]
+    held = initiative.evening()
+    assert held is not None and (held.aci, held.time) == (ME, "20:30")
+    assert await commands.handle(command(store, "/Evening OFF", T0 + 2)) == prompts.EVENING_OFF_REPLY
+    assert changed == ["rules", "rules"] and initiative.evening() is None
+    bare = Commands(store, profile, context, TZ, status, lambda: None)
+    assert await bare.handle(command(store, "/evening on", T0 + 3)) == prompts.EVENING_NONE
+
+
 def test_help_groups_the_commands_under_bold_headings() -> None:
     """Sections with a bold heading and a blank line between; every command once, one per line."""
     sections = prompts.HELP.split("\n\n")
@@ -96,7 +125,7 @@ def test_help_groups_the_commands_under_bold_headings() -> None:
     assert commands == [
         *["/new", "/profile", "/fix", "/forget", "/learn", "/soul", "/docs"],
         *["/voice", "/language", "/babble"],
-        *["/remind", "/reminders", "/initiative", "/quiet"],
+        *["/remind", "/reminders", "/initiative", "/quiet", "/evening"],
         *["/status", "/lock", "/unlock", "/devices"],
         "/help",
     ]
@@ -267,6 +296,49 @@ async def test_voice_command_when_voice_is_not_set_up(store: Store) -> None:
     assert store.get_state("voice_mode") is None
 
 
+# a soul.md laid out as e50b85f's soul.example.md: "Sounds like" after the [call] line, which was only a label then
+OLD_LAYOUT = (
+    "Who: a warm sidekick.\n\n[chat]\n- One to three sentences.\n\n[call]\n- Spoken: one idea per turn.\n\n"
+    'Sounds like (tone only):\n- "Sure, done."'
+)
+
+
+async def test_soul_with_parts_shows_what_texts_and_calls_each_get(store: Store, tmp_path: Path) -> None:
+    """A soul.md with [chat] and [call] lines: /soul shows each kind's own text, so lines placed after [call] (as in
+    e50b85f's example) show under calls only; a kind with nothing in the file shows the built-in style it keeps."""
+    import os
+
+    path = tmp_path / "soul.md"
+    profile = Profile(store)
+    commands = Commands(store, profile, ContextBuilder(store, profile, TZ, soul_path=path), TZ, status, lambda: None)
+    conversation = store.current_conversation()
+    asked = store.add_incoming(conversation.id, ME, T0, "command", "/soul")
+    assert asked is not None
+    path.write_text(OLD_LAYOUT, encoding="utf-8")
+    os.chmod(path, 0o600)
+    reply = await commands.handle(store.message(asked))
+    assert reply == (
+        "My style file (soul.md, 134 of 2,000 characters) has parts: texts and calls each get their own.\n\n"
+        "**For texts and the messages I start** (48 characters):\nWho: a warm sidekick.\n\n- One to three sentences."
+        "\n\n**For calls** (93 characters):\nWho: a warm sidekick.\n\n- Spoken: one idea per turn.\n\n"
+        'Sounds like (tone only):\n- "Sure, done."'
+    )
+    texts, calls = reply.split("**For calls**")
+    assert "Sounds like" not in texts and "Sounds like" in calls
+    path.write_text("[call]\n- Short.", encoding="utf-8")
+    assert await commands.handle(store.message(asked)) == (
+        "My style file (soul.md, 15 of 2,000 characters) has parts: texts and calls each get their own.\n\n"
+        "**For texts and the messages I start**: nothing in soul.md, so my built-in style, hearth.\n\n"
+        "**For calls** (8 characters):\n- Short."
+    )
+    path.write_text("[chat]\n[call]", encoding="utf-8")  # markers only: usable, and nothing for either kind
+    assert await commands.handle(store.message(asked)) == (
+        "My style file (soul.md, 13 of 2,000 characters) has parts: texts and calls each get their own.\n\n"
+        "**For texts and the messages I start**: nothing in soul.md, so my built-in style, hearth.\n\n"
+        "**For calls**: nothing in soul.md, so my built-in style's call version, hearth."
+    )
+
+
 async def test_soul_shows_the_style_in_use_or_why_not(store: Store, tmp_path: Path) -> None:
     import os
 
@@ -278,8 +350,15 @@ async def test_soul_shows_the_style_in_use_or_why_not(store: Store, tmp_path: Pa
     first = store.add_incoming(conversation.id, ME, T0, "command", "/soul")
     assert first is not None
     assert await commands.handle(store.message(first)) == (
-        "No style file in use: no soul.md yet. I use my own built-in style (warm, curious, playful). Yours goes in "
+        "No style file in use: no soul.md yet. I use my built-in style, hearth (steady, kind and frank); the other "
+        "is playful (warm, curious and playful): [personality] style in the config. Yours goes in "
         "~/.config/local-assistant/soul.md (chmod 600; soul.example.md shows how)."
+    )
+    playful_context = ContextBuilder(store, profile, TZ, soul_path=path, style="playful")
+    playful = Commands(store, profile, playful_context, TZ, status, lambda: None)
+    assert (await playful.handle(store.message(first))).startswith(
+        "No style file in use: no soul.md yet. I use my built-in style, playful (warm, curious and playful); the "
+        "other is hearth (steady, kind and frank): [personality] style in the config."
     )
     path.write_text("Vibe: warm.\n", encoding="utf-8")
     os.chmod(path, 0o600)
@@ -287,6 +366,10 @@ async def test_soul_shows_the_style_in_use_or_why_not(store: Store, tmp_path: Pa
         await commands.handle(store.message(first)) == "My style file (soul.md, 11 of 2,000 characters):\nVibe: warm."
     )
     assert "/soul" in prompts.HELP
+    calm_off = ContextBuilder(store, profile, TZ, soul_path=path, calm_on_worry=False)
+    assert await Commands(store, profile, calm_off, TZ, status, lambda: None).handle(store.message(first)) == (
+        "My style file (soul.md, 11 of 2,000 characters):\nVibe: warm.\n\n" + prompts.SOUL_CALM_OFF
+    )
 
 
 async def test_voice_name_switches_the_voice_and_lists_the_choices(store: Store) -> None:
@@ -594,6 +677,27 @@ async def test_quiet_with_her_own_messages_off(store: Store) -> None:
     )
     assert await commands.handle(command(store, "/quiet", T0 + 1)) == prompts.QUIET_DISABLED
     assert not initiative.quiet
+
+
+async def test_a_quiet_left_from_the_evening_note_is_cleared_by_quiet_off_once_the_note_is_off(store: Store) -> None:
+    """/quiet set while only the evening note was on, then /evening off: /quiet off still clears it (the documents'
+    note reads it), and says that the messages she starts are off; /quiet itself needs one of them on."""
+
+    async def send(out_id: int) -> None:
+        return None
+
+    initiative = Initiative(store, Settings(), Writer(FakeGemma()), send, tz=TZ, acis=frozenset({ME}))  # opt-in
+    profile = Profile(store)
+    commands = Commands(
+        store, profile, ContextBuilder(store, profile, TZ), TZ, status, lambda: None, initiative=initiative
+    )
+    assert (await commands.handle(command(store, "/evening on", T0))).startswith("On: ")
+    assert await commands.handle(command(store, "/quiet", T0 + 1)) == prompts.QUIET_ON and initiative.quiet
+    assert (await commands.handle(command(store, "/evening off", T0 + 2))) == prompts.EVENING_OFF_REPLY
+    assert await commands.handle(command(store, "/quiet off", T0 + 3)) == prompts.QUIET_OFF_NOTHING_ON
+    assert not initiative.quiet
+    assert await commands.handle(command(store, "/quiet off", T0 + 4)) == prompts.QUIET_DISABLED  # nothing to clear
+    assert await commands.handle(command(store, "/quiet", T0 + 5)) == prompts.QUIET_DISABLED and not initiative.quiet
 
 
 async def test_initiative_on_and_off_typed_by_the_user(store: Store) -> None:

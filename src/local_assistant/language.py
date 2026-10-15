@@ -109,21 +109,23 @@ BUT_WORDS = frozenset(word for words in BUT.values() for word in words)
 # fillers) in the call's language lets her carry on, as after a cough, unless she asked something or a device question
 # waits (calls.is_acknowledgement; owner, 14 Oct: a listener's "okay" ended two of her answers on a live call). Words
 # as Whisper writes them, lower case; a hyphen or a space between the parts of one is the same ("mm-hm", "mm hm").
+# More of each language's common ones (owner, 15 Oct): de klar/richtig, fr très bien/bien sûr, pt tá/entendi, es ya,
+# ru угу, pl no tak/dobra, ko 맞아요, nl and it ok.
 ACKNOWLEDGEMENTS: dict[str, tuple[str, ...]] = {
     "en": (
         "ok", "okay", "yes", "yeah", "yep", "yup", "mm", "mhm", "mm-hm", "uh-huh", "right", "sure", "alright",
         "all right", "i see", "got it", "great", "good", "cool", "nice", "fine", "exactly", "true",
     ),
-    "es": ("sí", "vale", "claro", "bien", "exacto"),
-    "it": ("sì", "va bene", "certo", "esatto", "giusto"),
-    "ko": ("네", "응", "예", "알겠어요"),
-    "pt": ("sim", "certo", "claro", "beleza", "exato"),
-    "nl": ("ja", "oké", "okee", "prima", "goed", "mooi", "klopt", "precies"),
-    "pl": ("tak", "dobrze", "jasne", "rozumiem"),
-    "de": ("ja", "okay", "gut", "genau", "stimmt", "alles klar"),
+    "es": ("sí", "vale", "claro", "bien", "exacto", "ya"),
+    "it": ("sì", "va bene", "certo", "esatto", "giusto", "ok", "okay"),
+    "ko": ("네", "응", "예", "알겠어요", "맞아요"),
+    "pt": ("sim", "certo", "claro", "beleza", "exato", "tá", "entendi"),
+    "nl": ("ja", "oké", "okee", "ok", "okay", "prima", "goed", "mooi", "klopt", "precies"),
+    "pl": ("tak", "dobrze", "jasne", "rozumiem", "no tak", "dobra"),
+    "de": ("ja", "okay", "gut", "genau", "stimmt", "alles klar", "klar", "richtig"),
     "ja": ("はい", "うん", "ええ", "なるほど", "そうですね"),
-    "ru": ("да", "ага", "хорошо", "понятно", "ясно"),
-    "fr": ("oui", "d'accord", "bien", "exactement", "ouais"),
+    "ru": ("да", "ага", "угу", "хорошо", "понятно", "ясно"),
+    "fr": ("oui", "d'accord", "bien", "très bien", "bien sûr", "exactement", "ouais"),
 }  # fmt: skip
 # the sounds Whisper writes for a listener's hum, in any language
 ACKNOWLEDGEMENT_SOUNDS = ("mm", "mhm", "mhmm", "mm-hm", "mm-hmm", "uh-huh", "uh huh")

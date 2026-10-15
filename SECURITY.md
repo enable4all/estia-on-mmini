@@ -166,6 +166,10 @@ The full threat model is in [setup_assistant.md, section 8](setup_assistant.md#8
   words, profile facts and the moment (never mail, calendar, web or pages), and code checks its text before anything is
   sent: no link, on any ending, and no request for a code or a password, in all 11 languages. Each is sent at most
   once, only to allowed accounts; `/quiet` pauses them and `/initiative off` turns them off.
+- The evening note is opt-in too (off until the user types `/evening on` or the config sets its time) and written by
+  code alone: three fixed questions, no model. It goes only to the allowed account that turned it on, at most once an
+  evening, waits for quiet hours, `/quiet` and `/lock`, and is never in the model's chat history; `/evening off` stops
+  it.
 - Keys live in mode 0600 files or the login keychain. Logs hold only what happened and when, never message text, and so does
   `status.json` (each part's last use for doctor and `/status`: times and fixed reasons only).
 - A privacy check (`scripts/privacy_scan.py`) keeps private files, keys and personal values out of the repo. It runs in

@@ -301,6 +301,23 @@ async def test_the_hourly_look_has_a_budget_and_stops_when_a_call_begins(
         await stop(harness)
 
 
+async def test_docs_names_a_config_folder_that_is_not_estia_kb(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Live, 15 Oct: her config still named the first share's folder in Documents; /docs said to run the share, which
+    opens only ~/Estia-KB. It names her config's folder and the config fix instead."""
+    harness = await start(
+        tmp_path,
+        monkeypatch,
+        FakeGemma(),
+        **(settings(tmp_path) | {"documents_folder": Path("/Users/alex/Documents/Notes")}),
+    )
+    try:
+        deliver(harness.folder, "/docs", T0)
+        await until(lambda: shown(harness.folder) == [on_phone(prompts.DOCS_NOT_KB.format(folder="~/Documents/Notes"))])
+        assert "share-documents.sh" not in prompts.DOCS_NOT_KB and "~/Estia-KB" in prompts.DOCS_NOT_KB
+    finally:
+        await stop(harness)
+
+
 async def test_macos_refusing_the_folder_gets_its_own_words(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     harness = await start(tmp_path, monkeypatch, FakeGemma(), **settings(tmp_path))
     try:

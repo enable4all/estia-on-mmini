@@ -64,7 +64,8 @@ Your own shell may not find Homebrew's tools, and your command tool may keep not
 - **The SMS code**, then a Registration Lock PIN only if the number had one (Enter skips); both typed hidden.
 - **"Turn on Registration Lock now?"**: yes. A PIN typed hidden twice, kept in their password manager (without it and her data, the number is locked for 7 days).
 - **The one-time word** (like `estia-4821`): sent from their own Signal to her new number, then Enter. Only the account that sent it gets answers.
-- **The language**, then **"Should she see projects on this Mac? Most people: no."**
+- **The language**, then **Her style**, at "Which style? (Enter keeps hearth)": how she sounds while there is no `soul.md`. hearth: steady, kind and frank; the answer first, one concern when a plan looks risky, a joke only when asked for fun or on banter. playful: warm, curious and playful; the answer first, now and then a light joke, never on a worry. On a call either one is short and spoken, with no joke unless the caller jokes first. The rules always win; `[personality] style` in her config changes it later, and a `soul.md` replaces either one. Run again after the move, setup asks it at the end and only prints the lines to add to her config.
+- **"Should she see projects on this Mac? Most people: no."**
 - **"Install it now?"**: the move into her own hidden user `_estia`, so she starts with the Mac. The Mac password once. Her data then lives in `/var/estia`, readable only by her user.
 - **"Go through the security step now?"**: yes on a new install. Each change only on their yes; the Mac password once more; over SSH, a second SSH session open.
 - **The extras:** Enter for none (5 adds them later). **The last check:** the Mac password again once 5 minutes have passed.

@@ -56,6 +56,7 @@ from local_assistant.config import (
     DEFAULT_AVATAR,
     DEFAULT_CONFIG_PATH,
     DEFAULT_NAME,
+    DEFAULT_STYLE,
     INTERRUPT_NEW,
     OWNER_HOME,
     AvatarError,
@@ -71,7 +72,7 @@ from local_assistant.devices import helper_env
 from local_assistant.documents import SHARE_TOKEN
 from local_assistant.gemma import is_remote
 from local_assistant.hostsec import Check
-from local_assistant.initiative import ENABLED_KEY, QUIET_KEY, Settings
+from local_assistant.initiative import ENABLED_KEY, QUIET_KEY, Evening, Settings, clock_text, evening_of, saved_evening
 from local_assistant.keyfile import read_keys
 from local_assistant.language import CODES, ENGLISH, LANGUAGE_KEY
 from local_assistant.mail_auth import TokenStore
@@ -88,7 +89,7 @@ from local_assistant.part_status import (
 )
 from local_assistant.projects import Access, Projects
 from local_assistant.reminders import FAILED, PROBLEM_DAYS, STUCK_S, iso, summary
-from local_assistant.soul import load_soul
+from local_assistant.soul import has_parts, load_soul, soul_part
 from local_assistant.spotify_auth import SpotifyTokens
 from local_assistant.store import Store
 from local_assistant.timefmt import local_when
@@ -284,12 +285,15 @@ def run(config_path: Path, probe: Probe) -> list[Finding]:
         _signal_number(cfg, probe),
         *([] if (signal_cli := _signal_cli(cfg, probe)) is None else [signal_cli]),
         _picture(cfg),
-        _personality(config_path.parent, cfg.name, own=own),
+        _personality(
+            config_path.parent, cfg.name, own=own, style=cfg.personality_style, calm=cfg.personality_calm_on_worry
+        ),
         _language(cfg, probe),
     ]
     if cfg.reminders_enabled:
         findings.append(_reminders(cfg, probe.now()))
     findings.append(_initiative(cfg, probe.now()))
+    findings.append(_evening(cfg))
     findings.append(_history(cfg, probe.now()))
     if cfg.projects_enabled:  # an extra: off without [projects], nothing to read
         findings.append(_projects(cfg, probe, own))
@@ -566,15 +570,32 @@ def _picture(cfg: Config) -> Finding:
     return Finding("ok", "Profile picture", prompts.DOCTOR_PICTURE_OWN.format(file=path.name))
 
 
-def _personality(folder: Path, name: str, *, own: bool = False) -> Finding:
+def _personality(
+    folder: Path, name: str, *, own: bool = False, style: str = DEFAULT_STYLE, calm: bool = True
+) -> Finding:
     path = folder / "soul.md"
-    if not path.exists():  # the default: her built-in style
-        return Finding("ok", "Personality", f"no soul.md: {name}'s built-in playful style (soul.example.md: your own)")
+    if not path.exists():  # the default: her built-in style, hearth or playful ([personality] style)
+        return Finding("ok", "Personality", f"no soul.md: {name}'s built-in style, {style} (soul.example.md: your own)")
     soul = load_soul(path)
     if soul.problem:
         chmod = f"{hostsec.SUDO} -u {ownuser.ROLE_USER} {hostsec.CHMOD} 600 {path}" if own else f"chmod 600 {path}"
         return Finding("warn", "Personality", f"soul.md is not used: {soul.problem}", f"{chmod}, then check it")
-    return Finding("ok", "Personality", "soul.md")
+    text = "soul.md"
+    if has_parts(soul.text):  # what texts and calls each get (a kind with nothing keeps the built-in style)
+        texts, calls = len(soul_part(soul.text, call=False)), len(soul_part(soul.text, call=True))
+        template = (
+            prompts.DOCTOR_SOUL_PARTS
+            if texts and calls
+            else prompts.DOCTOR_SOUL_NO_TEXTS
+            if calls
+            else prompts.DOCTOR_SOUL_NO_CALLS
+            if texts
+            else prompts.DOCTOR_SOUL_NOTHING
+        )
+        text = template.format(texts=f"{texts:,}", calls=f"{calls:,}", style=style)
+    if not calm:  # the user's choice: said, nothing to fix
+        text += prompts.DOCTOR_SOUL_CALM_OFF
+    return Finding("ok", "Personality", text)
 
 
 def _read_only(cfg: Config) -> sqlite3.Connection:
@@ -622,6 +643,35 @@ def _reminders(cfg: Config, now: float) -> Finding:
     return Finding("ok", "Reminders", text)
 
 
+def _evening(cfg: Config) -> Finding:
+    """The evening note (owner, D4; it needs no /initiative on): off, or on at its time and by whose switch, the user's
+    /evening (which wins) or the config's time for the one allowed account; a warning when the config's time reaches
+    no one (several accounts, none typed /evening on), which the bridge only logs at its start. Never an account."""
+    acis = tuple(sorted(cfg.allowed_acis))
+    configured = Settings.of(cfg).evening  # minutes, None when left out
+    try:
+        store = Store.open_read_only(cfg.db_path)
+        try:
+            saved, held = saved_evening(store), evening_of(store, configured, acis)
+        finally:
+            store.close()
+    except sqlite3.Error:  # no database yet: the config decides
+        saved = None
+        held = Evening(acis[0], configured) if configured is not None and len(acis) == 1 else None
+    if held is not None:
+        template = prompts.DOCTOR_EVENING_TYPED if saved is not None else prompts.DOCTOR_EVENING_CONFIG
+        return Finding("ok", "Evening note", template.format(time=held.time))
+    if saved is not None:  # typed /evening off, or on by an account no longer allowed
+        gone = saved.get("on") is True
+        return Finding(
+            "ok", "Evening note", prompts.DOCTOR_EVENING_GONE if gone else prompts.DOCTOR_EVENING_OFF_BY_USER
+        )
+    if configured is not None:
+        unused = prompts.DOCTOR_EVENING_UNUSED.format(time=clock_text(configured))
+        return Finding("warn", "Evening note", unused, prompts.DOCTOR_EVENING_UNUSED_FIX)
+    return Finding("ok", "Evening note", prompts.DOCTOR_EVENING_OFF)
+
+
 def _initiative(cfg: Config, now: float) -> Finding:
     """The messages she starts (opt-in: the user's /initiative on or off wins over the config): off, or which kinds are
     on (the calendar notes need [calendar]), the quiet hours, /quiet, the last four weeks as counts and the last skip
@@ -657,7 +707,9 @@ def _initiative(cfg: Config, now: float) -> Finding:
         store = Store.open_read_only(cfg.db_path)
         try:
             quiet = bool(store.get_state(QUIET_KEY))
-            entries = store.initiative_entries(since=iso(now - 28 * 86_400))
+            entries = [  # the evening note is never counted (owner, D4)
+                entry for entry in store.initiative_entries(since=iso(now - 28 * 86_400)) if entry.kind != "evening"
+            ]
         finally:
             store.close()
     except sqlite3.Error:  # no database yet, or one from before (the bridge adds the log at its next start)

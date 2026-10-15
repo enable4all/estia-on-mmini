@@ -29,6 +29,9 @@ LOCALTIME = Path("/etc/localtime")  # on a Mac a link into the time zone databas
 JAVA_HOME_TOOL = Path("/usr/libexec/java_home")
 DEFAULT_HOST_LABEL = "the Mac"
 DEFAULT_NAME = "Estia"  # the assistant's name until the config's `name` gives her another (every home names its own)
+# her built-in styles ([personality] style), used while there is no usable soul.md; hearth when left out
+STYLES = ("hearth", "playful")
+DEFAULT_STYLE = "hearth"
 # the Signal profile picture until the config's `avatar` names another ("" for none): Estia's e., when the repo has it
 DEFAULT_AVATAR = CODE_ROOT / "docs" / "brand" / "estia-avatar.png"
 AVATAR_MAX_BYTES = 5_000_000
@@ -347,7 +350,7 @@ class Config:
     # voice notes through the local voice service (tools/voice); off without [voice]
     voice_url: str = ""
     voice_name: str = "af_heart"  # a female Kokoro voice
-    voice_speed: float = 1.1
+    voice_speed: float = 1.05
     voice_max_spoken_chars: int = 1500
     voice_max_audio_bytes: int = 10_000_000
     # lights and plugs on the home network through tools/tapo (python-kasa: Kasa and Tapo); off without [tapo]
@@ -417,6 +420,9 @@ class Config:
     initiative_quiet_hours: str = "22:00-08:00"  # none of them then; "" for none
     initiative_lookback_time: str = "Sun 19:00"
     initiative_early_check: str = "20:00"
+    # the evening note (/evening): code's three questions at this time, apart from the kinds above (it needs no
+    # `enabled`); "" (left out): off. The user's typed /evening on|off|HH:MM wins over it
+    initiative_evening: str = ""
 
     # Spotify by text message (the official Web API, the user's own app: a Client ID, PKCE); off without [spotify]
     spotify_client_id: str = ""
@@ -438,6 +444,10 @@ class Config:
 
     # her personality (the user's own soul.md, style only); None: no style file (the tests)
     soul_path: Path | None = None
+    # [personality] style: her built-in style while there is no usable soul.md (hearth or playful)
+    personality_style: str = DEFAULT_STYLE
+    # [personality] calm_on_worry: code's line after a usable soul.md (no joke on a worry); the user may turn it off
+    personality_calm_on_worry: bool = True
 
     # [privacy] keep_days: messages, pages and tool calls older than this are deleted; None = kept, as before
     keep_days: int | None = None
@@ -617,6 +627,7 @@ def parse_config(raw: dict[str, object]) -> Config:
         **_reminder_settings(raw.get("reminders")),
         **_initiative_settings(raw.get("initiative")),
         soul_path=DEFAULT_CONFIG_PATH.parent / "soul.md",
+        **_personality_settings(raw.get("personality")),
         keep_days=_keep_days(raw.get("privacy")),
     )
 
@@ -661,6 +672,29 @@ def _keep_days(privacy: object) -> int | None:
     if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= KEEP_DAYS_MAX:
         raise ConfigError(f"privacy.keep_days must be a whole number of days from 1 to {KEEP_DAYS_MAX}")
     return days
+
+
+class _PersonalitySettings(TypedDict, total=False):
+    personality_style: str
+    personality_calm_on_worry: bool
+
+
+def _personality_settings(personality: object) -> _PersonalitySettings:
+    """[personality] as Config keyword arguments: `style`, her built-in style (hearth when left out, so an install
+    from before without a soul.md moves to hearth), and `calm_on_worry`, code's line after a usable soul.md (on when
+    left out)."""
+    if personality is None:
+        return {}
+    if not isinstance(personality, dict):
+        raise ConfigError("[personality] must be a table")
+    style = personality.get("style", DEFAULT_STYLE)
+    if not isinstance(style, str) or style not in STYLES:
+        choices = " or ".join(f'"{name}"' for name in STYLES)
+        raise ConfigError(f"personality.style must be {choices} (default: {DEFAULT_STYLE})")
+    calm = personality.get("calm_on_worry", True)
+    if not isinstance(calm, bool):
+        raise ConfigError("personality.calm_on_worry must be true or false (default: true)")
+    return {"personality_style": style, "personality_calm_on_worry": calm}
 
 
 def _host_label(raw: dict[str, object]) -> str:
@@ -956,7 +990,7 @@ def _voice_settings(voice: object) -> _VoiceSettings:
     name = voice.get("voice", "af_heart")
     if not isinstance(name, str) or not _VOICE_NAME.match(name):
         raise ConfigError("voice.voice must be a Kokoro voice name like af_heart")
-    speed = voice.get("speed", 1.1)
+    speed = voice.get("speed", 1.05)
     if isinstance(speed, bool) or not isinstance(speed, int | float) or not 0.7 <= speed <= 1.5:
         raise ConfigError("voice.speed must be between 0.7 and 1.5")
     limits: dict[str, int] = {}
@@ -1486,6 +1520,7 @@ class _InitiativeSettings(TypedDict, total=False):
     initiative_quiet_hours: str
     initiative_lookback_time: str
     initiative_early_check: str
+    initiative_evening: str
 
 
 def _initiative_settings(initiative: object) -> _InitiativeSettings:
@@ -1522,6 +1557,9 @@ def _initiative_settings(initiative: object) -> _InitiativeSettings:
         except ValueError:
             raise ConfigError(f"initiative.{key} must look like {example}") from None
         texts[key] = text.strip()
+    evening = initiative.get("evening", "")  # left out or "": off
+    if not isinstance(evening, str) or (evening.strip() and not _HHMM.match(evening.strip())):
+        raise ConfigError('initiative.evening must look like "21:00" (or "" for none)')
     return {
         "initiative_enabled": switches["enabled"],
         "initiative_followups": switches["followups"],
@@ -1534,4 +1572,5 @@ def _initiative_settings(initiative: object) -> _InitiativeSettings:
         "initiative_quiet_hours": texts["quiet_hours"],
         "initiative_lookback_time": texts["lookback_time"],
         "initiative_early_check": texts["early_check"],
+        "initiative_evening": evening.strip(),
     }

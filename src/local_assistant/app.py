@@ -62,6 +62,7 @@ from local_assistant.documents import (
     DocumentError,
     Documents,
     Helper,
+    not_estia_kb,
     saved_note,
     shown_folder,
 )
@@ -71,7 +72,15 @@ from local_assistant.gate import LONG_TEXT, AttachmentRef, Decision, Kind, class
 from local_assistant.gemma import GemmaClient, GemmaError, ModelPausedError, ModelPin, OllamaGemma, PinnedGemma
 from local_assistant.graph import Graph
 from local_assistant.health import Health, HealthCheck
-from local_assistant.initiative import ANNOUNCED_KEY, Initiative, Settings, Writer, in_quiet_hours, is_enabled
+from local_assistant.initiative import (
+    ANNOUNCED_KEY,
+    Initiative,
+    Settings,
+    Writer,
+    evening_of,
+    in_quiet_hours,
+    is_enabled,
+)
 from local_assistant.language import CODES, ENGLISH, LANGUAGE_KEY, is_yes
 from local_assistant.mail_auth import AccessTokens, MailAuthError, TokenStore, device_login
 from local_assistant.mail_digest import MailDigest, MailNumbers
@@ -298,6 +307,8 @@ class App:
             rules=self._rules(self.language),
             soul_path=cfg.soul_path,
             name=cfg.name,
+            style=cfg.personality_style,
+            calm_on_worry=cfg.personality_calm_on_worry,
         )
         # what each part's last real read or call did, for /status and doctor (<data_dir>/status.json)
         self.part_status = PartStatus(cfg.data_dir / "status.json", clock=clock)
@@ -664,11 +675,12 @@ class App:
     def capability_lines(self) -> list[str]:
         """What she can do in this install (prompts.capabilities): the parts on, with each level's current value: the
         voice answers (/voice), what interrupts her on a call, the calendars' services (Google, Outlook, iCloud, …), the
-        messages she starts (/initiative), the lights' and plugs' brands (TP-Link, Philips Hue), the projects' levels,
+        messages she starts (/initiative), the evening note's time while it is on (/evening), the lights' and plugs' brands (TP-Link, Philips Hue), the projects' levels,
         the documents folder and the Mac's security level. Her rules carry these lines and /help shows them word for
         word."""
         cfg = self.cfg
         others = [level for level, names in (("docs", cfg.projects_docs), ("code", cfg.projects_code)) if names]
+        acis = sorted(cfg.allowed_acis)  # the gate's order: the config's evening goes to the only one
         return prompts.capabilities(
             host=cfg.host_label,
             voice=(self.store.get_state(VOICE_MODE_KEY) or "auto") if cfg.voice_enabled else "",
@@ -680,6 +692,7 @@ class App:
             reminders=cfg.reminders_enabled,
             wake_calls=cfg.reminders_enabled and cfg.wake_calls,
             initiative=is_enabled(self.store, cfg.initiative_enabled),
+            evening=held.time if (held := evening_of(self.store, Settings.of(cfg).evening, acis)) else "",
             device=cfg.tapo_devices[0].name if cfg.tapo_devices else "",
             device_brands=[spec.service for spec in cfg.tapo_devices],
             music=cfg.spotify_enabled,
@@ -692,8 +705,8 @@ class App:
         )
 
     def _settings_changed(self) -> None:
-        """A level her list shows changed (/voice, /initiative, the Mac's security): her rules follow from the next
-        answer."""
+        """A level her list shows changed (/voice, /initiative, /evening, the Mac's security): her rules follow from the
+        next answer."""
         self.context.set_rules(self._rules(self.language))
 
     async def _security_level_loop(self) -> None:
@@ -1505,7 +1518,11 @@ class App:
         if not words:
             look = await documents.look(budget=LOOK_ON_REQUEST_SECONDS)
             if look.problem:
-                return prompts.DOCS_REFUSED if look.problem == "refused" else prompts.DOCS_CLOSED
+                if look.problem == "refused":
+                    return prompts.DOCS_REFUSED
+                if not_estia_kb(documents.folder):  # her config's folder, not the share, is the fix (live, 15 Oct)
+                    return prompts.DOCS_NOT_KB.format(folder=shown_folder(documents.folder))
+                return prompts.DOCS_CLOSED
             documents.mark_announced([file.id for file in documents.files() if not file.announced])
             return documents.listing()
         if len(words) == 2 and words[0].lower() == "send" and words[1].lstrip("#").isdecimal():

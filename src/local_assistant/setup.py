@@ -29,7 +29,9 @@ from local_assistant import doctor, harden, hostsec, ownuser, prompts
 from local_assistant.config import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_NAME,
+    DEFAULT_STYLE,
     PROJECT_LEVELS,
+    STYLES,
     Config,
     ConfigError,
     check_name,
@@ -144,9 +146,11 @@ def render_config(
     voice: str = FEMALE_VOICE,
     model_digest: str = "",
     projects: tuple[str, str] | None = None,
+    style: str = DEFAULT_STYLE,
 ) -> str:
-    """config.example.toml with the bot's number, the owner's account ID, the language, her name and her voice filled
-    in, the model's pin when its digest is given, and [projects] with its folder and level when `projects` names them;
+    """config.example.toml with the bot's number, the owner's account ID, the language, her name, her voice and her
+    built-in style ([personality] style) filled in, the model's pin when its digest is given, and [projects] with its
+    folder and level when `projects` names them;
     everything else stays as the example has it (the extras commented out: the voice goes into the commented [voice]
     block's voice line, used once [voice] is turned on)."""
     if not _NUMBER.match(bot_number):
@@ -165,6 +169,11 @@ def render_config(
         raise ValueError(str(exc)) from exc
     if voice not in (FEMALE_VOICE, MALE_VOICE):
         raise ValueError(f"the voice must be {FEMALE_VOICE} or {MALE_VOICE}")
+    if style not in STYLES:
+        raise ValueError(f"the style must be {' or '.join(STYLES)}")
+    style_line = re.compile(rf'^style = "{DEFAULT_STYLE}"', re.MULTILINE)
+    if len(style_line.findall(example)) != 1:
+        raise ValueError(f'config.example.toml no longer has its style = "{DEFAULT_STYLE}" line')
     language_line = re.compile(r'^language = "en"', re.MULTILINE)
     if len(language_line.findall(example)) != 1:
         raise ValueError('config.example.toml no longer has its language = "en" line')
@@ -173,6 +182,7 @@ def render_config(
         raise ValueError(f'config.example.toml no longer has its name = "{DEFAULT_NAME}" and #voice lines')
     text = example.replace(number_line, f'bot_number = "{bot_number}"').replace(aci_line, f'allowed_acis = ["{aci}"]')
     text = name_line.sub(f'name = "{name}"', language_line.sub(f'language = "{language}"', text))
+    text = style_line.sub(f'style = "{style}"', text)
     if model_digest:
         if not re.fullmatch(r"[0-9a-f]{64}", model_digest) or len(_DIGEST_LINE.findall(text)) != 1:
             raise ValueError(
@@ -383,6 +393,8 @@ class Wizard:
         self.dry_run = dry_run
         self.name = name  # hers: the config's, once there is one, or the one chosen at the name question
         self.voice = FEMALE_VOICE  # the English voice that goes with the name chosen here
+        self.style = DEFAULT_STYLE  # her built-in style: the config's, once there is one, or the one chosen here
+        self.style_asked = False  # the style question came already (the config step): the end asks it no more
         self.signal_cli = shutil.which("signal-cli") or "signal-cli"
         self.clock: Callable[[], float] = time.monotonic  # the wait for her voice at the end
         self.sleep: Callable[[float], None] = time.sleep
@@ -680,6 +692,23 @@ class Wizard:
                 return chosen.code
             self.say(prompts.SETUP_LANGUAGE_UNKNOWN.format(answer=answer))
 
+    def her_style(self) -> str:
+        """Her built-in style while there is no soul.md: hearth (Enter) or playful, a name or its first letters; no
+        terminal keeps hearth. A dry run only shows the question."""
+        self.say(prompts.SETUP_STYLE.format(name=self.name))
+        self.style_asked = True
+        if self.dry_run:
+            self.say(prompts.SETUP_STYLE_DRY_RUN)
+            return self.style
+        while True:
+            answer = self.ask(prompts.SETUP_STYLE_ASK).lower()
+            chosen = [name for name in STYLES if name.startswith(answer)] if answer else [DEFAULT_STYLE]
+            if len(chosen) == 1:
+                self.style = chosen[0]
+                self.say(prompts.SETUP_STYLE_CHOSEN.format(style=self.style))
+                return self.style
+            self.say(prompts.SETUP_STYLE_UNKNOWN.format(answer=answer))
+
     def model_digest(self) -> str:
         """The digest Ollama lists for local-worker now (read-only); "" when it lists none."""
         try:
@@ -777,6 +806,7 @@ class Wizard:
         example = (REPO / "config.example.toml").read_text(encoding="utf-8")
         digest = self.model_digest()
         language = self.language()
+        style = self.her_style()
         projects = self.projects()
         text = render_config(
             example,
@@ -787,6 +817,7 @@ class Wizard:
             voice=self.voice,
             model_digest=digest,
             projects=projects,
+            style=style,
         )
         self._write_private(self.config_path, text)
         if self.dry_run:
@@ -798,8 +829,18 @@ class Wizard:
 
     def personality(self) -> None:
         """Her style file, said at the end, once it is known where her files are: in her own user as her (her ~ is
-        /var/estia; the move takes your folder), else in your config folder. No soul.md: her built-in style."""
+        /var/estia; the move takes your folder), else in your config folder. No soul.md: her built-in style. A re-run
+        in her own user asks the style here (the config step did not run) and prints the lines to add as her."""
         if self.own_user():
+            if not self.style_asked:
+                self.her_style()
+                self.say(
+                    prompts.SETUP_STYLE_HERS_DRY_RUN
+                    if self.dry_run
+                    else prompts.SETUP_STYLE_HERS.format(
+                        style=self.style, edit=prompts.HER_CONFIG_EDIT, save=prompts.NANO_SAVE
+                    )
+                )
             self.say(
                 prompts.SETUP_PERSONALITY_HERS.format(
                     name=self.name,
@@ -811,7 +852,11 @@ class Wizard:
         if soul.exists():
             self.say(f"✓ Personality: {soul} (yours; edit it any time).")
         else:
-            self.say(prompts.SETUP_PERSONALITY.format(name=self.name, soul=soul))
+            self.say(
+                prompts.SETUP_PERSONALITY.format(
+                    name=self.name, soul=soul, style=self.style, words=prompts.STYLE_WORDS[self.style]
+                )
+            )
 
     def _write_private(self, path: Path, text: str) -> None:
         """Write a file only the user can read; a file already there is copied first, never just replaced."""
@@ -981,6 +1026,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             cfg = load_config(args.config)
             wizard.name = cfg.name  # her name from here on (the banner, the steps, the last line)
+            wizard.style = cfg.personality_style
         except ConfigError as exc:
             problem = exc
     wizard.say(f"{wizard.name} setup: the model, her Signal number, who may talk to her, the config, always on.\n")

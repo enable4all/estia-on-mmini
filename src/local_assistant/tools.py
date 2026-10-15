@@ -21,7 +21,7 @@ from local_assistant.calendar_tools import CalendarTools
 from local_assistant.claims import switch_clauses
 from local_assistant.config import DEFAULT_HOST_LABEL, DEFAULT_NAME
 from local_assistant.devices import Devices
-from local_assistant.documents import LOOK_ON_REQUEST_SECONDS, Documents
+from local_assistant.documents import LOOK_ON_REQUEST_SECONDS, Documents, not_estia_kb, shown_folder
 from local_assistant.fetcher import FetchError, Page
 from local_assistant.mail_tools import MailTools
 from local_assistant.maps import Mapper, MapsError, Place, Route
@@ -945,6 +945,8 @@ class Tools:
             look = await self._documents.look(budget=LOOK_ON_REQUEST_SECONDS)
             if look.problem == "refused":  # macOS itself refuses her account: the share would change nothing
                 return prompts.DOCUMENTS_REFUSED_RESULT
+            if look.problem and not_estia_kb(self._documents.folder):  # her config is the fix (live, 15 Oct)
+                return prompts.DOCUMENTS_NOT_KB_RESULT.format(folder=shown_folder(self._documents.folder))
             if look.problem:
                 return prompts.DOCUMENTS_CLOSED_RESULT
         if name == "search_documents":

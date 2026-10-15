@@ -16,7 +16,16 @@ from pathlib import Path
 import pytest
 
 from local_assistant import documents as docs
-from local_assistant.documents import LOOKED_KEY, DocumentError, Documents, Helper, HelperError, clean_name
+from local_assistant.documents import (
+    LOOKED_KEY,
+    DocumentError,
+    Documents,
+    Helper,
+    HelperError,
+    clean_name,
+    helper_env,
+    not_estia_kb,
+)
 from local_assistant.part_status import PartStatus
 from local_assistant.store import Store
 from tests.conftest import TZ
@@ -78,7 +87,8 @@ async def test_the_helper_runs_with_fixed_arguments_and_a_clean_environment(
     assert reading.page_count == 2 and reading.skipped == ()
     names = set(json.loads(Path(f"{state}.env").read_text()))
     assert "BRAVE_API_KEY" not in names  # macOS adds its own two to every process
-    assert names <= {"HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "PATH", "__CF_USER_TEXT_ENCODING", "LC_CTYPE"}
+    allowed = {"HOME", "CFFIXED_USER_HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "PATH"}  # CFFIXED_USER_HOME: HOME
+    assert names <= allowed | {"__CF_USER_TEXT_ENCODING", "LC_CTYPE"}
 
 
 async def test_the_helpers_answer_is_checked(tmp_path: Path, state: Path) -> None:
@@ -657,3 +667,23 @@ async def test_macos_refusing_the_folder_is_named_apart_from_a_missing_share(
     with pytest.raises(DocumentError) as caught:
         await documents.save(b"%PDF-1.7\nx\n", "a.pdf", WHEN)
     assert caught.value.code == "refused"
+
+
+def test_the_helper_gets_foundations_home_from_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Her account's record keeps /var/empty (AGENTS.md, Gotchas): a helper given HOME alone gets that as Foundation's
+    home, and Vision's text recognition fails at once (live, 15 Oct: every warm-up in under 0.3 s; text pages still
+    read). The helper gets HOME as Foundation's home too, whatever the bridge's own CFFIXED_USER_HOME says."""
+    monkeypatch.setenv("HOME", "/var/estia")
+    monkeypatch.setenv("CFFIXED_USER_HOME", "/var/empty")
+    env = helper_env()
+    assert env["HOME"] == env["CFFIXED_USER_HOME"] == "/var/estia"
+    monkeypatch.delenv("HOME")
+    assert "CFFIXED_USER_HOME" not in helper_env()  # no HOME, nothing invented
+
+
+def test_a_folder_in_a_home_other_than_estia_kb_is_told_apart() -> None:
+    """Live, 15 Oct: her config still named the first share's folder in Documents, and /docs blamed the share."""
+    assert not_estia_kb(Path("/Users/alex/Documents/Notes"))
+    assert not_estia_kb(Path("/Users/alex/estia-kb/sub"))
+    assert not not_estia_kb(Path("/Users/alex/Estia-KB"))
+    assert not not_estia_kb(Path("/private/var/folders/xy/T/Estia-KB"))  # not in a home: the share's own words

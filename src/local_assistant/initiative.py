@@ -29,6 +29,14 @@ At most once: the message and a `sending` row are stored together before it goes
 `unknown` and the message `ignored` (recovery never sends it), and a send that failed is never tried again. Gemma's
 part is stored as an outgoing text (the user's reply has its context), the footer apart (never in her history or the
 search). Logs and the log table hold ids, kinds, days and reason words, never text.
+
+The evening note (owner, D4) stands apart: code's three fixed questions (no Gemma) at the user's time, off unless the
+user's typed /evening on or /evening HH:MM (the state table, which wins) or `[initiative] evening`. It needs no
+/initiative on, never counts toward `max_per_day` or a weekly cap and is never blocked by them; the rest of the gate
+holds it (/quiet, /lock, quiet hours, busy, practice) for two hours after its time, then it is skipped that evening with
+its reason. At most once a day (any log row of that evening ends it), only to the one allowed account that turned it on
+(the config's time goes to the only allowed account; with several, to none until one types /evening on), a note (never
+in her history), never followed up after a silence, never counted ("goes well", /status).
 """
 
 from __future__ import annotations
@@ -100,6 +108,10 @@ KEEP_LOG_S = 365 * 86_400.0
 KEEP_FOLLOWUPS_S = 30 * 86_400.0
 QUIET_KEY = "initiative:quiet"  # set (when) while /quiet pauses her messages; "" otherwise
 ENABLED_KEY = "initiative:enabled"  # "on" or "off" from the user's typed /initiative; unset: the config decides
+EVENING_KEY = "initiative:evening"  # the user's /evening (JSON: on, at, aci, since); unset: the config decides
+EVENING_DEFAULT = "21:00"  # /evening on when no time was ever set, here or in the config
+EVENING_SLOT_S = 2 * 3600.0  # held from its time on: given up two hours later (midnight at the latest)
+LOGGED: tuple[InitiativeOutcome, ...] = ("sending", "sent", "unknown", "skipped", "failed")  # any row ends an evening
 
 
 def is_enabled(store: Store, configured: bool) -> bool:
@@ -113,7 +125,7 @@ PLAN_KEY = "initiative:improvise_plan"  # this week's slots for the improvised n
 LOOKBACK_KEY = "initiative:lookback_week"  # the ISO week whose look back went out or was skipped
 EARLY_KEY = "initiative:early_day"  # the day whose early-start check is done
 PRIORITY: tuple[InitiativeKind, ...] = ("announce", "calendar", "early_start", "followup", "lookback", "improvise")
-NOTES: tuple[InitiativeKind, ...] = ("announce", "calendar", "early_start")  # code-written: notes, out of history
+NOTES: tuple[InitiativeKind, ...] = ("announce", "calendar", "early_start", "evening")  # code's: notes, out of history
 WAITS = (
     "quiet_hours",
     "busy",
@@ -269,9 +281,13 @@ def check_text(text: str, *, limit: int, allowed: frozenset[str] | set[str] = fr
 
 def in_quiet_hours(moment: datetime, hours: tuple[int, int] | None) -> bool:
     """Start inclusive, end exclusive, across midnight; None (or an equal start and end): never."""
+    return minute_in_quiet_hours(moment.hour * 60 + moment.minute, hours)
+
+
+def minute_in_quiet_hours(minute: int, hours: tuple[int, int] | None) -> bool:
+    """in_quiet_hours for a time of day in minutes after midnight."""
     if hours is None or hours[0] == hours[1]:
         return False
-    minute = moment.hour * 60 + moment.minute
     start, end = hours
     return start <= minute < end if start < end else minute >= start or minute < end
 
@@ -438,6 +454,7 @@ class Settings:
     lookback_minute: int = 19 * 60
     early_minute: int = 20 * 60
     digest_minute: int = 9 * 60 + 15
+    evening: int | None = None  # the evening note's time in the config (minutes); None: off unless /evening on
 
     @classmethod
     def of(cls, cfg: Config) -> Settings:
@@ -456,6 +473,7 @@ class Settings:
             lookback_minute=minute,
             early_minute=minutes_of(cfg.initiative_early_check),
             digest_minute=minutes_of(cfg.digest_time),
+            evening=minutes_of(cfg.initiative_evening) if cfg.initiative_evening else None,
         )
 
     def on(self, kind: InitiativeKind) -> bool:
@@ -522,6 +540,63 @@ class _Item:
     followup: FollowUp | None = None
     slot: float = 0.0  # the improvised note's planned time
     told: list[Any] = field(default_factory=list)  # the calendar changes its note tells
+    day: str = ""  # the local day its log row names (the evening note's: the evening it belongs to)
+
+
+@dataclass(frozen=True)
+class Evening:
+    """The evening note while it is on: the account it goes to, its time (minutes after midnight) and since when (the
+    /evening that set it: an evening whose time had passed by then is not due)."""
+
+    aci: str
+    minute: int
+    since: float = 0.0
+
+    @property
+    def time(self) -> str:
+        return clock_text(self.minute)
+
+
+def saved_evening(store: Store) -> dict[str, Any] | None:
+    """The user's last /evening on, off or HH:MM (EVENING_KEY), None when never typed."""
+    try:
+        saved = json.loads(store.get_state(EVENING_KEY) or "null")
+    except json.JSONDecodeError:
+        return None
+    return saved if isinstance(saved, dict) else None
+
+
+def evening_of(store: Store, configured: int | None, acis: Sequence[str]) -> Evening | None:
+    """The evening note while it is on: the user's /evening (the state table) wins; else the config's time
+    (`configured`, minutes) for the only allowed account (the config names none: with several, it goes to none until
+    one types /evening on). An account no longer allowed gets nothing."""
+    saved = saved_evening(store)
+    if saved is None:
+        return Evening(acis[0], configured) if configured is not None and len(acis) == 1 else None
+    aci, at, since = saved.get("aci"), saved.get("at"), saved.get("since", 0.0)
+    if saved.get("on") is not True or not isinstance(aci, str) or not isinstance(at, str):
+        return None
+    holder = next((allowed for allowed in acis if allowed.lower() == aci.lower()), None)
+    try:
+        minute = minutes_of(at)
+    except ValueError:
+        return None
+    return Evening(holder, minute, float(since) if isinstance(since, int | float) else 0.0) if holder else None
+
+
+def clock_text(minute: int) -> str:
+    """Minutes after midnight as "21:00"."""
+    return f"{minute // 60:02d}:{minute % 60:02d}"
+
+
+def _typed_time(words: str) -> str | None:
+    """ "20:30" or "8:30" as "20:30" / "08:30"; None when it is no time of day."""
+    padded = f"0{words}" if re.fullmatch(r"\d:\d\d", words) else words
+    try:
+        minutes_of(padded)
+    except ValueError:
+        return None
+    return padded
 
 
 class Initiative:
@@ -600,6 +675,74 @@ class Initiative:
             return prompts.INITIATIVE_STATE_ON.format(line=self.settings.line())
         return prompts.INITIATIVE_STATE_OFF.format(limits=self.settings.limits())
 
+    # the evening note's switch: the user's typed /evening (the state table) wins over the config
+
+    def _evening_saved(self) -> dict[str, Any] | None:
+        return saved_evening(self._store)
+
+    def evening(self) -> Evening | None:
+        """The evening note while it is on (evening_of)."""
+        return evening_of(self._store, self.settings.evening, self._acis)
+
+    def evening_time(self) -> str:
+        """The evening note's time while it is on, "" when off: her list of what she can do names it."""
+        held = self.evening()
+        return held.time if held is not None else ""
+
+    def set_evening(self, aci: str, words: str) -> str:
+        """/evening (the state), /evening on, /evening off, /evening 20:30 (typed by the user only: never a voice note,
+        a call or Gemma): the reply, in code's words. It goes to one account only; another's /evening is refused while
+        it is on. A time inside the quiet hours is refused (it would never come)."""
+        held = self.evening()
+        if held is not None and held.aci.lower() != aci.lower():
+            return prompts.EVENING_OTHER
+        if not words:
+            return self._evening_state(held)
+        now = float(round(self._clock()))  # as stored: an evening is due when its time is not before this
+        if words == "off":
+            if held is None:
+                return prompts.EVENING_ALREADY_OFF
+            self._save_evening(on=False, at=held.time, aci=aci, since=now)
+            log.info("evening: turned off by /evening off")
+            return prompts.EVENING_OFF_REPLY
+        at = (held.time if held is not None else self._evening_last()) if words == "on" else _typed_time(words)
+        if at is None:
+            return prompts.EVENING_USAGE
+        if minute_in_quiet_hours(minutes_of(at), self.settings.quiet_hours):
+            return prompts.EVENING_IN_QUIET_HOURS.format(time=at, hours=self._hours_text())
+        if held is not None and held.time == at:
+            reply = prompts.EVENING_ALREADY_ON.format(time=at)
+        else:
+            self._save_evening(on=True, at=at, aci=aci, since=now)
+            log.info("evening: turned on by /evening")
+            start = self._midnight(self._local(now).date()) + timedelta(minutes=minutes_of(at))
+            reply = prompts.EVENING_ON.format(time=at, start="today" if now <= start.timestamp() else "tomorrow")
+        return reply + (prompts.EVENING_STILL_QUIET if self.quiet else "")
+
+    def _evening_state(self, held: Evening | None) -> str:
+        if held is None:
+            return prompts.EVENING_STATE_OFF.format(time=self._evening_last())
+        text = prompts.EVENING_STATE_ON.format(time=held.time)
+        if minute_in_quiet_hours(held.minute, self.settings.quiet_hours):
+            text += prompts.EVENING_STATE_HELD.format(hours=self._hours_text())
+        return text
+
+    def _evening_last(self) -> str:
+        """The time /evening on takes: the last one set here, else the config's, else 21:00."""
+        saved = (self._evening_saved() or {}).get("at")
+        if isinstance(saved, str) and _typed_time(saved) == saved:
+            return saved
+        return clock_text(self.settings.evening) if self.settings.evening is not None else EVENING_DEFAULT
+
+    def _save_evening(self, *, on: bool, at: str, aci: str, since: float) -> None:
+        self._store.set_state(EVENING_KEY, json.dumps({"on": on, "at": at, "aci": aci, "since": since}))
+        for key in [key for key in self._why if key.startswith("evening:")]:
+            del self._why[key]  # a wait from before the change is not logged as given up
+
+    def _hours_text(self) -> str:
+        hours = self.settings.quiet_hours
+        return f"{clock_text(hours[0])}-{clock_text(hours[1])}" if hours is not None else ""
+
     @property
     def quiet(self) -> bool:
         return bool(self._store.get_state(QUIET_KEY))
@@ -611,12 +754,21 @@ class Initiative:
             was = self.quiet
             self._store.set_state(QUIET_KEY, "")
             template = prompts.QUIET_OFF if was else prompts.QUIET_OFF_ALREADY
-            return template.format(rules=self.settings.limits())
+            return template.format(rules=self._quiet_rules())
         self._store.set_state(QUIET_KEY, f"{now:.0f}")
         recent = self._store.initiative_entries(since=iso(now - QUIETED_S), outcomes=("sent", "unknown"))
-        self._store.set_initiative_quieted([entry.id for entry in recent], now, at=iso(now))
+        counted = [entry.id for entry in recent if entry.kind != "evening"]  # the evening note is never counted
+        self._store.set_initiative_quieted(counted, now, at=iso(now))
         log.info("initiative: paused by /quiet")
         return prompts.QUIET_ON
+
+    def _quiet_rules(self) -> str:
+        """What /quiet off resumes: the initiative's limits (as before), and the evening note while it is on."""
+        held = self.evening()
+        rules = [self.settings.limits()] if self.enabled or held is None else []
+        if held is not None:
+            rules.append(prompts.EVENING_RULE.format(time=held.time))
+        return "; ".join(rules)
 
     def note_activity(self) -> None:
         """A message came in: a text being written is dropped (Gemma's one slot is the user's); it waits as busy."""
@@ -636,6 +788,8 @@ class Initiative:
             outcome: InitiativeOutcome = "sent" if sent else "unknown"
             self._store.set_initiative_outcome(entry.id, outcome, at=iso(now))
             log.warning("initiative: %s %d was being sent at the stop: %s", entry.kind, entry.id, outcome)
+        if self.settings.evening is not None and self._evening_saved() is None and len(self._acis) != 1:
+            log.warning("evening: [initiative] evening names no account and several are allowed: none gets it")
 
     async def run_forever(self) -> None:
         while True:
@@ -649,6 +803,9 @@ class Initiative:
         now = self._clock()
         local = self._local(now)
         self._housekeeping(now, local)
+        evening = self._evening_item(now, local)  # apart: it needs no /initiative on
+        if evening is not None and await self._attempt(evening, now, local):
+            return  # at most one message a minute
         if not self.enabled:
             if self._calendar is not None:
                 self._calendar.forget()  # turned on later: a new baseline, never what changed while off
@@ -712,6 +869,30 @@ class Initiative:
                 return None
             self._early_found = day
         return _Item("early_start", key, self._acis, ends)
+
+    def _evening_item(self, now: float, local: datetime) -> _Item | None:
+        """The evening note while its two hours last, never past midnight (at most one a calendar day, D4), unless
+        that evening already has a log row (sent, maybe sent, failed or skipped: at most once) or its time had passed
+        when /evening set it. After that, an evening that waited is skipped with the reason it last waited for
+        (yesterday's on the first tick after midnight)."""
+        held = self.evening()
+        if held is None:
+            return None
+        for day in (local.date() - timedelta(days=1), local.date()):
+            start = self._midnight(day) + timedelta(minutes=held.minute)
+            begins, key = start.timestamp(), f"evening:{day.isoformat()}"
+            if now < begins or begins < held.since:
+                continue
+            if self._store.count_initiative(day.isoformat(), day.isoformat(), kind="evening", outcomes=LOGGED):
+                continue
+            ends = min(begins + EVENING_SLOT_S, self._midnight(day + timedelta(days=1)).timestamp())
+            if now >= ends:
+                reason = self._why.pop(key, "")
+                if reason:
+                    self._skip("evening", reason, now, start)
+                continue
+            return _Item("evening", key, (held.aci,), ends, day=day.isoformat())
+        return None
 
     def _followup_items(self, now: float, local: datetime) -> list[_Item]:
         items: list[_Item] = []
@@ -821,6 +1002,8 @@ class Initiative:
     # the gate
 
     def _gate(self, item: _Item, now: float, local: datetime) -> str:
+        if item.kind == "evening":
+            return self._evening_gate(now, local)
         settings = self.settings
         if not self.enabled or not settings.on(item.kind):
             return "off"
@@ -831,23 +1014,51 @@ class Initiative:
         if in_quiet_hours(local, settings.quiet_hours):
             return "quiet_hours"
         day = local.date().isoformat()
-        if self._store.count_initiative(day, day) >= settings.max_per_day:
+        evenings = self._store.count_initiative(day, day, kind="evening")  # never counted
+        if self._store.count_initiative(day, day) - evenings >= settings.max_per_day:
             return "day_cap"
         cap = settings.week_cap(item.kind)
         monday = local.date() - timedelta(days=local.weekday())
         first, last = monday.isoformat(), (monday + timedelta(days=6)).isoformat()
         if cap is not None and self._store.count_initiative(first, last, kind=item.kind) >= cap:
             return "week_cap"
-        newest = self._store.last_incoming_ts()
-        if self._busy() or (newest is not None and now - newest / 1000 < BUSY_S):
-            return "busy"
-        if self._practising():
-            return "practice"
+        held = self._busy_reason(now) or self._after_evening(now)
+        if held:
+            return held
         if item.kind in ("lookback", "improvise") and len(self._acis) != 1:
             return "several_users"
         if item.kind == "improvise":
             return self._improvise_ready(now)
         return ""
+
+    def _evening_gate(self, now: float, local: datetime) -> str:
+        """The gate where it applies to the evening note; each reason waits: never whether she may start messages, her
+        caps or the number of accounts."""
+        if self.quiet:
+            return "quiet"
+        if self._locked():
+            return "locked"
+        if in_quiet_hours(local, self.settings.quiet_hours):
+            return "quiet_hours"
+        return self._busy_reason(now)
+
+    def _busy_reason(self, now: float) -> str:
+        """An answer, a queue, a call or a user message in the last 15 minutes (`busy`), or a /babble session
+        (`practice`: her message would land in the roleplay); "" when none."""
+        newest = self._store.last_incoming_ts()
+        if self._busy() or (newest is not None and now - newest / 1000 < BUSY_S):
+            return "busy"
+        if self._practising():
+            return "practice"
+        return ""
+
+    def _after_evening(self, now: float) -> str:
+        """`busy` for 15 minutes after an evening note went out (sent or maybe sent), as after a user message: the
+        other kinds never follow it a minute later. A wait, never a count (D4: the evening note is never counted)."""
+        notes = self._store.initiative_entries(
+            since=iso(now - BUSY_S), kinds=("evening",), outcomes=("sent", "unknown")
+        )
+        return "busy" if any(now - iso_to_epoch(note.created_at) < BUSY_S for note in notes) else ""
 
     def _improvise_ready(self, now: float) -> str:
         peer = self._acis[0]
@@ -904,6 +1115,8 @@ class Initiative:
         return True
 
     async def _compose(self, item: _Item, now: float, local: datetime) -> Draft:
+        if item.kind == "evening":
+            return Draft(prompts.EVENING_NOTE)  # code's own words, never Gemma's
         if item.kind in ("followup", "lookback", "improvise"):
             self._task = asyncio.create_task(self._write(item, now, local))
             try:
@@ -964,6 +1177,11 @@ class Initiative:
 
     def _blocked(self, item: _Item, reason: str, detail: str, now: float, local: datetime) -> None:
         """Each kind keeps its own rule: wait while its slot lasts, move, or be skipped (logged once)."""
+        if item.kind == "evening":  # every reason of its gate waits, while its two hours last (_evening_item)
+            if self._why.get(item.key) != reason:
+                log.info("initiative: evening note waits (%s)", reason)
+            self._why[item.key] = reason
+            return
         if reason not in ("quiet_hours", "busy", "practice") and detail != "waiting":
             log.info("initiative: %s not sent now (%s%s)", item.kind, reason, f": {detail}" if detail else "")
         if reason == "gemma_down" and detail != "waiting":
@@ -1037,7 +1255,7 @@ class Initiative:
         footer = None
         if item.kind != "announce":
             footer = prompts.initiative_footer(item.kind, improvise_per_week=self.settings.improvise_per_week)
-        day = local.date().isoformat()
+        day = item.day or local.date().isoformat()
         sent_any = False
         for peer in item.peers:
             with self._store.tx():
@@ -1082,8 +1300,8 @@ class Initiative:
 
     def _housekeeping(self, now: float, local: datetime) -> None:
         for entry in self._store.initiative_entries(since=iso(now - QUIETED_S), outcomes=("sent", "unknown")):
-            if entry.replied_at is not None or entry.message_id is None:
-                continue
+            if entry.replied_at is not None or entry.message_id is None or entry.kind == "evening":
+                continue  # the evening note's replies are never counted
             peer = self._store.message(entry.message_id).peer_aci
             reply = self._store.first_reply_after(peer, entry.message_id)
             if reply is not None and reply.signal_ts:
@@ -1103,7 +1321,7 @@ class Initiative:
             return [prompts.INITIATIVE_OFF]
         now = self._clock()
         local = self._local(now)
-        entries = self._store.initiative_entries(since=iso(now - STATUS_S))
+        entries = [e for e in self._store.initiative_entries(since=iso(now - STATUS_S)) if e.kind != "evening"]
         sent = [e for e in entries if e.kind != "announce" and e.outcome in ("sent", "unknown")]
         answered = sum(1 for entry in sent if entry.replied_at is not None)
         quiets = self._store.count_quiet_commands(since_ms=int((now - STATUS_S) * 1000))
@@ -1213,7 +1431,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"initiative: the database cannot be read ({cfg.db_path}); has the bridge run yet?", file=sys.stderr)
         return 1
     try:
-        context = ContextBuilder(store, Profile(store), cfg.timezone, soul_path=cfg.soul_path, name=cfg.name)
+        context = ContextBuilder(
+            store,
+            Profile(store),
+            cfg.timezone,
+            soul_path=cfg.soul_path,
+            name=cfg.name,
+            style=cfg.personality_style,
+            calm_on_worry=cfg.personality_calm_on_worry,
+        )
         ollama = OllamaGemma(cfg.ollama_base_url, cfg.model)
         gemma = PinnedGemma(
             ollama, ModelPin(ollama.model_entry, cfg.model_digest)
