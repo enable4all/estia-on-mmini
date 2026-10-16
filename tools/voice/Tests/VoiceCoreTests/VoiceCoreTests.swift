@@ -168,6 +168,32 @@ private func sine(_ hertz: Double, rate: Int, count: Int, amplitude: Float = 1) 
             == "It costs five dollars and ninety nine cents, twenty percent off, three point five kg, one thousand two hundred items")
     }
 
+    /// Owner, 16 Oct: "13:00" was read as "one three zero zero" (the colon left between "thirteen" and "zero"). A time
+    /// is said as people say it, with its part of the day; a range names the part once.
+    @Test func timesAreSaidAsTimesOfTheDay() {
+        #expect(NumberNormalizer.normalize("Lunch at 13:00.") == "Lunch at one in the afternoon.")
+        #expect(NumberNormalizer.normalize("At 09:05 and 9:30") == "At nine oh five in the morning and nine thirty in the morning")
+        #expect(NumberNormalizer.normalize("12:00, 00:00, 21:45, 03:10")
+            == "noon, midnight, nine forty five in the evening, three ten at night")
+        #expect(NumberNormalizer.normalize("Meeting 14:00–15:00") == "Meeting two to three in the afternoon")
+        #expect(NumberNormalizer.normalize("from 11:30-13:00") == "from eleven thirty in the morning to one in the afternoon")
+        #expect(NumberNormalizer.normalize("12:00 - 13:30") == "noon to one thirty in the afternoon")
+        #expect(NumberNormalizer.normalize("Call at 7:30 PM, or 7:30 a.m.")
+            == "Call at seven thirty in the evening, or seven thirty in the morning.")
+        #expect(NumberNormalizer.normalize("At 7:30 a.m. tomorrow, 10:00 pm. Then")
+            == "At seven thirty in the morning tomorrow, ten at night. Then")
+        #expect(NumberNormalizer.normalize("12:15 am, 12:00 PM, 22:30") == "twelve fifteen at night, noon, ten thirty at night")
+    }
+
+    /// Only a time with a colon is a time: a ratio, a price with a dot and seconds keep their old reading.
+    @Test func whatIsNoTimeStaysAsBefore() {
+        #expect(NumberNormalizer.normalize("16:9 screens") == "sixteen:nine screens")
+        #expect(NumberNormalizer.normalize("$13.00 and 3.50 kg") == "thirteen dollars and three point five zero kg")
+        #expect(NumberNormalizer.normalize("24:00 and 9:75") == "twenty four:zero and nine:seventy five")
+        #expect(NumberNormalizer.normalize("at 12:30:45 sharp") == "at twelve:thirty:forty five sharp")
+        #expect(NumberNormalizer.normalize("9:30 amazing") == "nine thirty in the morning amazing")
+    }
+
     /// A number too large for Int (19 digits or more: a reference or tracking number) stays as written, never "zero".
     @Test func aNumberTooLargeForIntStaysAsWritten() {
         #expect(NumberNormalizer.normalize("Reference 12345678901234567890, please") == "Reference 12345678901234567890, please")

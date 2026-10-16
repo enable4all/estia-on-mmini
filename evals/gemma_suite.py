@@ -171,7 +171,7 @@ MINI_REPORT = (
     "- Extra check: PROBLEM: not answering\n"
     "- Backup job: ok (last exit 0)\n"
     "- Disk: 80% free (394 of 494 GB)\n"
-    "- Memory: pressure normal, swap 2.9 of 4.0 GB used\n"
+    "- Memory: 32 GB, pressure normal (23% free), swap (disk space used as memory) 2.9 of 4.0 GB used\n"
     "- Uptime: 1 d 0 h (since 7 Oct 15:00)\n"
     "- Log errors: none since 8 Oct 09:00\n"
     "- Signal: 0 restarts since the bridge started\n"
@@ -874,6 +874,19 @@ async def invents_nothing(h: Harness) -> tuple[bool, str]:
 async def mini_status(h: Harness) -> tuple[bool, str]:
     reply = await h.say("How's the Mac doing?")
     return "mini_status" in h.tools_used() and "extra check" in reply.lower(), reply
+
+
+async def mac_memory(h: Harness) -> tuple[bool, str]:
+    # owner, 16 Oct: "swap 2.9 of 4.0 GB used" came back as "2.9 of 4 GB RAM": the Mac's memory is its 32 GB, and the
+    # 2.9 of 4.0 is swap, never RAM
+    reply = await h.say("How much memory does the Mac have, and how much is in use?")
+    text = reply.lower()
+    swap_as_ram = re.search(
+        r"(?:2\.9|4(?:\.0)?) ?(?:gb)? (?:of|out of) ?(?:4(?:\.0)?|32) ?gb (?:of )?(?:ram|memory)\b", text
+    )
+    ram_as_four = re.search(r"\b4(?:\.0)? ?gb (?:of )?ram\b", text)
+    ok = "mini_status" in h.tools_used() and "32" in text and swap_as_ram is None and ram_as_four is None
+    return ok, reply
 
 
 GARDEN = {
@@ -3078,6 +3091,7 @@ CASES = [
     Case("note_comes_with_the_message", "tools", note_comes_with_the_message),
     Case("own_fact_wins_over_a_note", "tools", own_fact_wins_over_a_note),
     Case("mini_status", "tools", mini_status),
+    Case("mac_memory", "tools", mac_memory),
     Case("project_status", "tools", project_status),
     Case("project_misheard", "tools", project_misheard),
     Case("project_ask", "tools", project_ask),

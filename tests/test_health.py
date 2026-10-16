@@ -24,6 +24,8 @@ EXTRA = (
 HELPER = Problem("extra-helper", "Helper", "not answering")
 PRESSURE = (SYSCTL, "-n", "kern.memorystatus_vm_pressure_level")
 SWAP = (SYSCTL, "-n", "vm.swapusage")
+MEMSIZE = (SYSCTL, "-n", "hw.memsize")
+FREE = (SYSCTL, "-n", "kern.memorystatus_level")  # the free share, as memory_pressure's "memory free percentage"
 BOOT = (SYSCTL, "-n", "kern.boottime")
 
 
@@ -41,6 +43,8 @@ class FakeMini:
             JOB: "\tstate = not running\n\truns = 1408\n\tlast exit code = 0\n\trun interval = 60 seconds\n",
             PRESSURE: "1\n",
             SWAP: "total = 4096.00M  used = 3013.88M  free = 1082.12M  (encrypted)\n",
+            MEMSIZE: "34359738368\n",
+            FREE: "23\n",
             BOOT: "{ sec = 1791378038, usec = 791046 } Wed Oct  7 15:00:38 2026\n",
         }
         self.total, self.free = 500_000_000_000, 400_000_000_000
@@ -106,7 +110,7 @@ async def test_all_fine_report_and_no_problems(store: Store, logs: Path) -> None
         "- Helper: ok\n"
         "- Backup job: ok (last exit 0)\n"
         "- Disk: 80% free (400 of 500 GB)\n"
-        "- Memory: pressure normal, swap 2.9 of 4.0 GB used\n"
+        "- Memory: 32 GB, pressure normal (23% free), swap (disk space used as memory) 2.9 of 4.0 GB used\n"
         "- Uptime: 20 h 49 min (since 7 Oct 15:00)\n"
         "- Log errors: none since 8 Oct 11:40\n"
         "- Signal: 0 restarts since the bridge started\n"
@@ -224,12 +228,30 @@ async def test_low_disk_is_a_problem(store: Store, logs: Path) -> None:
     assert await health.check() == [Problem("disk", "Disk", "7% free")]
 
 
+async def test_the_memory_line_names_the_macs_memory_and_what_swap_is(store: Store, logs: Path) -> None:
+    """Owner, 16 Oct: "swap 2.9 of 4.0 GB used" came back from Gemma as "2.9 of 4 GB RAM". The line names the Mac's
+    memory (hw.memsize, in GB of 1024^3 as Apple counts it: 32 GB) and its free share, and says what swap is; a value
+    sysctl cannot give is left out, never guessed."""
+    mini = FakeMini()
+    health = make(store, mini, logs)
+    assert (
+        "- Memory: 32 GB, pressure normal (23% free), swap (disk space used as memory) 2.9 of 4.0 GB used\n"
+        in await health.report()
+    )
+    mini.commands[MEMSIZE] = TimeoutError()
+    mini.commands[FREE] = "not a number\n"
+    assert "- Memory: pressure normal, swap (disk space used as memory) 2.9 of 4.0 GB used\n" in await health.report()
+
+
 async def test_memory_pressure(store: Store, logs: Path) -> None:
     mini = FakeMini()
     health = make(store, mini, logs)
     mini.commands[PRESSURE] = "2\n"
     assert await health.check() == []
-    assert "- Memory: pressure warning, swap 2.9 of 4.0 GB used\n" in await health.report()
+    assert (
+        "- Memory: 32 GB, pressure warning (23% free), swap (disk space used as memory) 2.9 of 4.0 GB used\n"
+        in await health.report()
+    )
     mini.commands[PRESSURE] = "4\n"
     assert await health.check() == [Problem("memory", "Memory", "pressure critical")]
     mini.commands[PRESSURE] = TimeoutError()

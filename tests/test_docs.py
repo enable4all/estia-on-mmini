@@ -1237,8 +1237,8 @@ SITE_README = (
     "Try a video you know has captions.",
     '| "A message came from a new linked device N and was held." |',
     "Yours: send `/devices ok N` from your phone.",
-    "| No answer after `/lock` | The emergency stop is on | Send `/unlock` from the device that sent `/lock`, after the "
-    "wait it names |",
+    "| No answer after `/lock` | The emergency stop is on | Send `/unlock` from the device that sent `/lock`, 10 minutes "
+    "later at the earliest |",  # 16 Oct: was "after the wait it names" (dev-60 told)
     '| "Wake-up: 07:00 … No call: …" |',
     "voice still loading, calls off, a call already running, or three calls that day",
     "A message you didn't ask for, ending",

@@ -117,6 +117,12 @@ def _failed(exc: BaseException) -> str:
     return f"check failed ({exc})" if isinstance(exc, CommandError) else f"check failed ({type(exc).__name__})"
 
 
+def _number(output: object) -> int | None:
+    """A sysctl's whole-number answer, or None (failed, or not a number)."""
+    text = output.strip() if isinstance(output, str) else ""
+    return int(text) if text.isdecimal() else None
+
+
 def _problem_row(key: str, label: str, detail: str) -> _Row:
     return _Row(label, f"PROBLEM: {detail}", Problem(key, label, detail))
 
@@ -282,9 +288,13 @@ class Health:
         return _Row("Disk", f"{round(percent)}% free ({free / 1e9:.0f} of {total / 1e9:.0f} GB)")
 
     async def _memory_row(self) -> _Row:
-        pressure_out, swap_out = await asyncio.gather(
+        """The Mac's memory, its pressure and free share, and swap said for what it is (owner, 16 Oct: "swap 2.9 of
+        4.0 GB used" came back as "2.9 of 4 GB RAM"). A value sysctl cannot give is left out, never guessed."""
+        pressure_out, swap_out, size_out, free_out = await asyncio.gather(
             self._run([SYSCTL, "-n", "kern.memorystatus_vm_pressure_level"]),
             self._run([SYSCTL, "-n", "vm.swapusage"]),
+            self._run([SYSCTL, "-n", "hw.memsize"]),
+            self._run([SYSCTL, "-n", "kern.memorystatus_level"]),  # the free share, as memory_pressure reports it
             return_exceptions=True,
         )
         if isinstance(pressure_out, BaseException):
@@ -296,13 +306,18 @@ class Health:
         try:
             match = _SWAP.search(swap_out) if isinstance(swap_out, str) else None
             swap = (
-                f"swap {float(match.group(2)) / 1024:.1f} of {float(match.group(1)) / 1024:.1f} GB used"
+                f"swap (disk space used as memory) {float(match.group(2)) / 1024:.1f} of "
+                f"{float(match.group(1)) / 1024:.1f} GB used"
                 if match
                 else "swap unknown"
             )
         except Exception:
             swap = "swap unknown"
-        return _Row("Memory", f"pressure {pressure}, {swap}")
+        size = _number(size_out)
+        free = _number(free_out)
+        memory = f"{size / 1024**3:.0f} GB, " if size else ""  # Apple counts memory in GB of 1024^3: 32 GB
+        share = f" ({free}% free)" if free is not None and 0 <= free <= 100 else ""
+        return _Row("Memory", f"{memory}pressure {pressure}{share}, {swap}")
 
     async def _uptime_row(self) -> _Row:
         try:

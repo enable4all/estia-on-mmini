@@ -7,12 +7,12 @@ import Foundation
 /// Pure, dependency-free, unit-tested in isolation.
 public enum NumberNormalizer {
 
-    /// Returns `text` with money / percent / decimals / integers expanded to words.
+    /// Returns `text` with clock times / money / percent / decimals / integers expanded to words.
     /// Non-numeric text is returned unchanged.
     public static func normalize(_ text: String) -> String {
-        var s = text
-        // Order matters: money first (it owns the `$` + decimal), then percent,
+        // Order matters: times first (they own the `:`), then money (it owns the `$` + decimal), then percent,
         // then bare decimals, then any remaining standalone integers.
+        var s = timesOfDay(text)
         s = replace(s, #"\$([0-9][0-9,]*)(?:\.([0-9]{2}))?"#) { g in
             let dollars = intOf(g[1])
             let cents = g.count > 2 ? intOf(g[2]) ?? 0 : 0
@@ -27,6 +27,38 @@ public enum NumberNormalizer {
         }
         s = replace(s, #"[0-9][0-9,]*"#) { g in spoken(g[0]) }
         return s
+    }
+
+    // MARK: - Clock times
+
+    /// One time: H:MM or HH:MM (hour 0 to 23, minutes 00 to 59), never inside a longer number or with seconds, and an
+    /// optional am/pm ("PM", "p.m.", "am"). A dotted "a.m." keeps its last dot where it ends a sentence (at the end, or
+    /// before a capital).
+    private static let clock = #"(?<![0-9:.,])([01]?[0-9]|2[0-3]):([0-5][0-9])(?![0-9]|:[0-9])"#
+        + #"(?:\s?([AaPp])\.?[Mm]\b(?:\.(?!\s*$|\s+\p{Lu}))?)?"#
+
+    /// Clock times in words, as people say them (owner, 16 Oct: "13:00" was read "one three zero zero"): the hour on
+    /// the 12-hour clock with its part of the day, noon and midnight by name; a range ("14:00–15:00") names a part
+    /// they share once ("two to three in the afternoon").
+    public static func timesOfDay(_ text: String) -> String {
+        let range = replace(text, clock + #"(?:\s*[-–—]\s*|\s+to\s+)"# + clock) { g in
+            let (start, end) = (time(g[1], g[2], g[3]), time(g[4], g[5], g[6]))
+            let first = start.part != nil && start.part == end.part ? start.words : start.spoken
+            return first + " to " + end.spoken
+        }
+        return replace(range, clock) { g in time(g[1], g[2], g[3]).spoken }
+    }
+
+    /// A time's words and its part of the day (none for noon and midnight). With am/pm the hour is read on the
+    /// 12-hour clock (1 to 12; another hour keeps its 24-hour reading).
+    private static func time(_ hour: String, _ minutes: String, _ meridiem: String) -> (words: String, part: String?, spoken: String) {
+        var h = Int(hour) ?? 0
+        let m = Int(minutes) ?? 0
+        if !meridiem.isEmpty, (1...12).contains(h) { h = h % 12 + (meridiem.lowercased() == "p" ? 12 : 0) }
+        if m == 0, h == 0 || h == 12 { let name = h == 0 ? "midnight" : "noon"; return (name, nil, name) }
+        let words = ones[h % 12 == 0 ? 12 : h % 12] + (m == 0 ? "" : m < 10 ? " oh " + ones[m] : " " + cardinal(m))
+        let part = h < 5 ? "at night" : h < 12 ? "in the morning" : h < 18 ? "in the afternoon" : h < 22 ? "in the evening" : "at night"
+        return (words, part, words + " " + part)
     }
 
     // MARK: - Number words

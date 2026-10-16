@@ -1,4 +1,5 @@
 import CoreML
+import FluidAudio
 import Foundation
 import Testing
 import VoiceCore
@@ -194,5 +195,20 @@ import WhisperKit
         let sorted = times.sorted()
         #expect(sorted[sorted.count / 2] < .milliseconds(10), "chunk times: \(sorted)")
         #expect(sorted[sorted.count - 1] < .milliseconds(25), "chunk times: \(sorted)")
+    }
+}
+
+/// NeMo's text normalisation stays out (owner, 16 Oct: dropped as too big for what it reads well): English numbers and
+/// times reach Kokoro as VoiceCore's words. A FluidAudio upgrade that linked it again (a new default, a SwiftPM that
+/// ignores `traits: []`) would put its readings over them ("thirteen o'clock") and add its 9 MB.
+@Suite struct EnglishNumbers {
+    @Test func nemoTextNormalisationIsNotLinked() {
+        #expect(!NemoTextNormalizer.isAvailable)
+    }
+
+    @Test func kokoroGetsTheTimeInWords() throws {
+        let request = try SpeechRequest(json: Data(#"{"input": "Lunch at 13:00, the call at 7:30 PM."}"#.utf8))
+        #expect(request.engine == .kokoro)
+        #expect(request.spokenInput == "Lunch at one in the afternoon, the call at seven thirty in the evening.")
     }
 }

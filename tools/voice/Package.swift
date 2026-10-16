@@ -26,7 +26,10 @@ let package = Package(
         // WhisperKit 1.1.0+: fixes empty transcripts when prompt tokens are set (upstream #514).
         .package(url: "https://github.com/argmaxinc/WhisperKit.git", from: "1.1.0"),
         // FluidAudio exactly 0.15.8 (Kokoro strided-array fix #730, apostrophes #783, non-finite
-        // durations crash #816; Supertonic-3 included); `traits: []` leaves out a 9 MB text-normalisation library.
+        // durations crash #816; Supertonic-3 included); `traits: []` leaves out NeMo's text normalisation, a prebuilt
+        // 9 MB library (owner, 16 Oct: dropped; it read "13:00" as "thirteen o'clock" and German and French times
+        // with their colon): VoiceCore's NumberNormalizer reads English numbers and times, and a test
+        // (VoiceServiceTests, `EnglishNumbers`) fails if an upgrade links the library again.
         .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.15.8", traits: []),
     ],
     targets: [
@@ -49,7 +52,11 @@ let package = Package(
         // The service's own glue to the engines, where it needs their types (Whisper's decoding options).
         .testTarget(
             name: "VoiceServiceTests",
-            dependencies: ["voice-service", .product(name: "WhisperKit", package: "WhisperKit")],
+            dependencies: [
+                "voice-service",
+                .product(name: "WhisperKit", package: "WhisperKit"),
+                .product(name: "FluidAudio", package: "FluidAudio"),
+            ],
             swiftSettings: testingMacros
         ),
     ]
