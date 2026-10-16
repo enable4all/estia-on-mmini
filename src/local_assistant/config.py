@@ -389,7 +389,7 @@ class Config:
     calls_tunnel: Path | None = None  # default: data_dir / "vendor" / ...
     calls_socket_dir: Path | None = None  # default: data_dir / "calls", or ~/.la-calls when that is too long
     calls_speed: float = 1.05
-    calls_end_of_turn_seconds: float = 2.8  # owner, 15 Oct: a second more than 1.8, room to think
+    calls_end_of_turn_seconds: float = 2.3  # owner, 15 Oct: room to think (2.8); 17 Oct: 0.5 s less
     calls_idle_prompt_seconds: float = 90
     calls_idle_hangup_seconds: float = 600
     calls_max_minutes: float = 60
@@ -1287,7 +1287,7 @@ def _calls_settings(calls: object, *, voice: bool) -> _CallsSettings:
         raise ConfigError("calls.speed must be between 0.7 and 1.5")
     numbers: dict[str, float] = {}
     for key, default, low, high in (
-        ("end_of_turn_seconds", 2.8, 0.5, 5.0),
+        ("end_of_turn_seconds", 2.3, 0.5, 5.0),
         ("idle_prompt_seconds", 90, 10, 3600),
         ("idle_hangup_seconds", 600, 30, 7200),
         ("max_call_minutes", 60, 1, 240),

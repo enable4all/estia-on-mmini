@@ -1,0 +1,25 @@
+# A proposal for a feature, opened as an issue by GitHub Actions, so it names the project rather than a person's
+# account (as releases do: release.yml). Started by hand: Actions, "Run workflow", with a title and the text. Only
+# GitHub's own `gh` runs here; the inputs go in as data (environment variables), never into the script itself.
+name: proposal
+on:
+  workflow_dispatch:
+    inputs:
+      title:
+        description: The issue's title
+        required: true
+      body:
+        description: The issue's text (Markdown)
+        required: true
+permissions:
+  issues: write
+jobs:
+  open:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Open the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: ${{ inputs.title }}
+          BODY: ${{ inputs.body }}
+        run: printf '%s\n' "$BODY" | gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file -

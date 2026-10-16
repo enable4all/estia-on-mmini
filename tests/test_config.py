@@ -584,7 +584,10 @@ def test_calls_section_with_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert cfg.call_tunnel == vendor / "signal-call-tunnel/signal-call-tunnel/target/release/signal-call-tunnel"
     assert cfg.calls_java_home is None  # not set: found with /usr/libexec/java_home when the bridge starts
     assert cfg.call_socket_dir == cfg.data_dir / "calls"
-    assert (cfg.calls_speed, cfg.calls_end_of_turn_seconds) == (1.05, 2.8)  # owner, 15 Oct: a second more
+    assert (cfg.calls_speed, cfg.calls_end_of_turn_seconds) == (
+        1.05,
+        2.3,
+    )  # owner, 17 Oct: 0.5 s less than 2.8 ("2.8 is a lot right...?")
     assert (cfg.calls_idle_prompt_seconds, cfg.calls_idle_hangup_seconds, cfg.calls_max_minutes) == (90, 600, 60)
     assert cfg.calls_summary
 

@@ -144,7 +144,7 @@ class Host(Protocol):
 @dataclass(frozen=True)
 class CallSettings:
     socket_dir: Path
-    end_of_turn_s: float = 2.8
+    end_of_turn_s: float = 2.3  # owner, 17 Oct: 0.5 s less than 2.8
     idle_prompt_s: float = 90.0
     idle_hangup_s: float = 600.0
     idle_repeat_s: float = 600.0  # "Take your time, I'm here." once, then at most this often (owner, 16 Oct)
