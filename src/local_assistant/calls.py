@@ -147,6 +147,7 @@ class CallSettings:
     end_of_turn_s: float = 2.8
     idle_prompt_s: float = 90.0
     idle_hangup_s: float = 600.0
+    idle_repeat_s: float = 600.0  # "Take your time, I'm here." once, then at most this often (owner, 16 Oct)
     max_s: float = 3600.0
     summary: bool = True
     turn_timeout_s: float = 45.0
@@ -1091,6 +1092,7 @@ class CallManager:
             pending = await self._say_line(audio, opening.line, call.language, barge=True, keep=False)
         waking = opening is not None and opening.wake  # silence after "Good morning!" ends the call with a goodbye
         prompted = False
+        idle_said_at: float | None = None  # call time of the last "Take your time, I'm here."
         question_waiting = False  # her last answer asked for a device's yes, and it was heard whole
         hearing_trouble = 0
         while not call.ended.is_set():
@@ -1123,6 +1125,11 @@ class CallManager:
                         continue
                     if not prompted:
                         prompted = True
+                        now = audio.frames_in * FRAME_S
+                        if idle_said_at is not None and now - idle_said_at < s.idle_repeat_s:
+                            log.info("calls: said take-your-time %.0f s ago; listening on", now - idle_said_at)
+                            continue  # said a short while ago: quiet, the goodbye after silence stays as it was
+                        idle_said_at = now
                         await self._say_line(audio, lines.idle, call.language)
                         continue
                     await self._say_line(audio, prompts.CALL_IDLE_BYE, ENGLISH)

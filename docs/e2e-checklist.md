@@ -61,8 +61,9 @@ next to it. Keep your results in a note of your own, not in the repository, and 
 | # | Do | Expected | Result |
 |---|---|---|---|
 | 42 | Call her from the phone (twice) | Answered after about two rings (~5 s) with one of her greetings (e.g. "Hi, it's Estia. What's on your mind?"); the second call starts with a different one | |
-| 43 | Ask "what's on my calendar tomorrow?" | A short "Got it." (or "Gotcha.", "Okay, got it.", "Alright, got it.") at once (none with `acknowledge = false` in `[calls]`), then a short spoken answer from the calendar tool (with `fillers = true`, "Let me check." first if it takes a moment) | |
-| 43b | Ask "how are you?" | Her answer at once, with no "Got it." before it (a turn under five words gets none) | |
+| 43 | Ask "what's on my calendar tomorrow?" | A short line such as "Got it." or "On it." (one of ten, never one of the last two) at once (none with `acknowledge = false` in `[calls]`), then a short spoken answer from the calendar tool (with `fillers = true`, "Let me check." first if it takes a moment) | |
+| 43b | Ask "how are you?" | Her answer at once, with no "Got it."-style line before it (a turn under five words gets none) | |
+| 43c | Ask two long requests in a row | A short line before the first answer, none before the second | |
 | 44 | Think aloud with a long pause (~1.5 s) mid-sentence | Your turn does not end at the pause | |
 | 45 | Ask for something long, then talk over her | She stops within a moment and answers what you said | |
 | 46 | Cough while she talks, then type on a laptop near the phone while she talks | At most a short pause each time, then she carries on; nothing is answered | |

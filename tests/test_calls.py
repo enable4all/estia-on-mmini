@@ -553,6 +553,44 @@ async def test_silence_gets_a_gentle_prompt_then_a_goodbye() -> None:
         assert prompts.CALL_IDLE_BYE in h.voice.spoken
 
 
+async def test_take_your_time_comes_once_then_at_most_every_ten_minutes() -> None:
+    """Owner, 16 Oct: "that 90sec, im here etc. can you one time and then every 10m?" The first silence gets the
+    line; a later one within the repeat time gets none (she listens on)."""
+    turns = [Turn("One."), Turn("Two.")]
+    async with Harness(
+        ["first thing", "second thing"], turns, idle_prompt_s=0.5, idle_hangup_s=100.0, idle_repeat_s=1000.0
+    ) as h:
+        await h.connected()
+        await h.quiet_after(prompts.CALL_IDLE)  # the first silence: the line
+        h.helper.caller_says(speech(1.0))
+        await h.quiet_after("One.")
+        h.helper.caller_says_after(lambda: "One." in h.manager.said, 100, speech(1.0))  # 1 s of silence first
+        await h.quiet_after("Two.")
+        mark = len(h.helper.heard)
+        await h.until(lambda: len(h.helper.heard) > mark + 200)  # 2 s more of silence
+        assert h.manager.said.count(prompts.CALL_IDLE) == 1
+    assert h.host.turns == ["first thing", "second thing"]
+
+
+async def test_take_your_time_comes_again_after_the_repeat_time() -> None:
+    turns = [Turn("One.")]
+    async with Harness(["first thing"], turns, idle_prompt_s=0.5, idle_hangup_s=100.0, idle_repeat_s=0.0) as h:
+        await h.connected()
+        await h.quiet_after(prompts.CALL_IDLE)
+        h.helper.caller_says(speech(1.0))
+        await h.quiet_after("One.")
+        await h.until(lambda: h.manager.said.count(prompts.CALL_IDLE) == 2)  # the next silence: again
+
+
+def test_take_your_time_repeats_at_most_every_ten_minutes_by_default() -> None:
+    import dataclasses
+
+    from local_assistant.calls import CallSettings
+
+    defaults = {f.name: f.default for f in dataclasses.fields(CallSettings)}
+    assert defaults["idle_repeat_s"] == 600.0 and defaults["idle_prompt_s"] == 90.0
+
+
 async def test_silence_logs_the_lines_levels_to_tune_listening(caplog: pytest.LogCaptureFixture) -> None:
     # review 2026-10-11: a quiet caller who never starts an utterance left no trace to tune the start level with
     caplog.set_level(logging.INFO, logger="local_assistant.calls")
