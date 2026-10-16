@@ -12,21 +12,26 @@ private func spoken(_ text: String) throws -> String {
 /// ("E minor seven, C add nine, G over B"); a run of chords gets commas, Kokoro's only pause.
 @Suite struct ChordSpelling {
     @Test(arguments: [
-        ("C G7 Am F", "C, G seven, A minor, F"),
-        ("Capo 2 Am F C G", "Capo two A minor, F, C, G"),
+        ("C G7 Am F", "C major, G seven, A minor, F major"),
+        ("Capo 2 Am F C G", "Capo two A minor, F major, C major, G major"),
         ("E7, A7, B7", "E seven, A seven, B seven"),
         ("Em7 - Cadd9 - G/B - D/F#", "E minor seven, C add nine, G over B, D over F sharp"),
         ("Bb, Ebmaj7, F7sus4", "B flat, E flat major seven, F seven sus four"),
         ("C#m7b5 to F#7", "C sharp minor seven flat five to F sharp seven"),
         ("Bdim, Caug and G+", "B diminished, C augmented and G augmented"),
         ("Fm6, Abm, then Db/Ab", "F minor six, A flat minor, then D flat over A flat"),
-        ("Verse: G D Em C", "Verse: G, D, E minor, C"),
+        ("Verse: G D Em C", "Verse: G major, D major, E minor, C major"),
         ("F# minor is the relative minor of A.", "F sharp minor is the relative minor of A."),
         ("Then Dsus2, Dsus4 and Cmaj7.", "Then D sus two, D sus four and C major seven."),
         ("The key is E♭ major, with a B♭7 and an F♯m at the end.",
          "The key is E flat major, with a B flat seven and an F sharp minor at the end."),
         ("Play Am7 | D7 | Gmaj7 | Cmaj7 | F#m7b5 | B7 | Em", "Play A minor seven, D seven, G major seven, C major seven, F sharp minor seven flat five, B seven, E minor"),
         ("Try C6/9 or G7#9.", "Try C six nine or G seven sharp nine."),
+        // owner, 17 Oct (chords of a Red Hot Chili Peppers song): a lone "E" or "D" sounded "like exhaling"; a bare
+        // letter chord is said with "major" (measured: the letter alone 0.16-0.23 s at half the level around it)
+        ("The verse goes E, D, A, E, then G and C.", "The verse goes E major, D major, A major, E major, then G major and C major."),
+        ("The song is in E, capo on the 2nd fret.", "The song is in E major, capo on the second fret."),
+        ("Under the Bridge: D, F#, E, C#m, G#m, F#m, B", "Under the Bridge: D major, F sharp, E major, C sharp minor, G sharp minor, F sharp minor, B major"),
     ])
     func aChordIsSaidAsMusic(written: String, said: String) throws {
         #expect(try spoken(written) == said)
@@ -47,6 +52,8 @@ private func spoken(_ text: String) throws -> String {
         ("I like C# and F# for code", "I like C sharp and F sharp for code"),
         ("The CD and the DJ", "The CD and the DJ"),
         ("The Chorus begins", "The Chorus begins"),
+        ("The key of A minor, then the E string and a D chord.", "The key of A minor, then the E string and a D chord."),
+        ("Pick A, B or C.", "Pick A, B or C."),
     ])
     func whatIsNoChordStays(written: String, said: String) throws {
         #expect(try spoken(written) == said)

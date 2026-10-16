@@ -41,6 +41,9 @@ public enum ChordSpeller {
             }
             current = -1
         }
+        // a run that holds a chord other than a bare letter ("C G7 Am F"): its bare letters are chords too
+        var runHasChord: [Int: Bool] = [:]
+        for (i, token) in tokens.enumerated() where run[i] >= 0 && token.chord.kind != .letter { runHasChord[run[i]] = true }
         var out = ""
         var last = 0
         for (i, token) in tokens.enumerated() {
@@ -55,7 +58,14 @@ public enum ChordSpeller {
                 out += ns.substring(with: NSRange(location: last, length: start - last))
             }
             let spelled = token.chord.kind == .strong || (token.chord.kind.isAmbiguous && musical)
-            out += spelled ? token.chord.spoken : ns.substring(with: token.range)
+            if token.chord.kind == .letter, (inRun && runHasChord[run[i]] == true) || mentionsMusic(ns.substring(with: sentence)),
+               !followedByQuality(ns, after: token.range) {
+                // owner, 17 Oct: a lone "E" or "D" sounded "like exhaling" (0.16-0.23 s at half the level around
+                // it); a bare letter chord is the major chord, said so
+                out += ns.substring(with: token.range) + " major"
+            } else {
+                out += spelled ? token.chord.spoken : ns.substring(with: token.range)
+            }
             last = NSMaxRange(token.range)
         }
         out += ns.substring(from: last)
@@ -106,6 +116,19 @@ public enum ChordSpeller {
         guard rest.first == " " else { return false }
         let word = rest.drop { $0 == " " }.prefix { $0.isLetter }
         return pronouns.contains(String(word)) || pronouns.contains(String(word).lowercased())
+    }
+
+    /// Words after a letter that already say what it is ("the key of A minor", "the E string", "a D chord").
+    private static let qualityWords: Set<String> = [
+        "major", "minor", "maj", "min", "chord", "chords", "sharp", "flat", "natural", "string", "strings", "fret",
+        "shape", "shapes", "note", "notes", "key", "power", "seven", "seventh", "sus", "dim", "diminished", "aug",
+        "augmented", "add",
+    ]
+
+    private static func followedByQuality(_ ns: NSString, after range: NSRange) -> Bool {
+        let rest = ns.substring(from: NSMaxRange(range))
+        guard rest.first == " " else { return false }
+        return qualityWords.contains(String(rest.drop { $0 == " " }.prefix { $0.isLetter }).lowercased())
     }
 
     private static func startsSentence(_ ns: NSString, at location: Int) -> Bool {

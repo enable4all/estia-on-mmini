@@ -13,7 +13,7 @@ private func spoken(_ text: String) throws -> String {
 enum PronunciationTable {
     static let rows: [(kind: String, written: String, said: String)] = [
         // chords run first; the number passes leave them alone
-        ("chords", "C G7 Am F", "C, G seven, A minor, F"),
+        ("chords", "C G7 Am F", "C major, G seven, A minor, F major"),
         ("chords", "Em7 - Cadd9 - G/B - D/F#", "E minor seven, C add nine, G over B, D over F sharp"),
         // cardinals up to trillions; a comma after a number stays (a pause)
         ("big numbers", "1,000,000", "one million"),
