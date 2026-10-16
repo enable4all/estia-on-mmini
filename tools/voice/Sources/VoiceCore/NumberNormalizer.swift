@@ -31,27 +31,55 @@ public enum NumberNormalizer {
 
     // MARK: - Clock times
 
-    /// One time: H:MM or HH:MM (hour 0 to 23, minutes 00 to 59), never inside a longer number or with seconds, and an
-    /// optional am/pm ("PM", "p.m.", "am"). A dotted "a.m." keeps its last dot where it ends a sentence (at the end, or
-    /// before a capital).
-    private static let clock = #"(?<![0-9:.,])([01]?[0-9]|2[0-3]):([0-5][0-9])(?![0-9]|:[0-9])"#
-        + #"(?:\s?([AaPp])\.?[Mm]\b(?:\.(?!\s*$|\s+\p{Lu}))?)?"#
+    /// am/pm after a time ("PM", "p.m.", "am", "pm" right after the digits). A dotted "a.m." keeps its last dot where
+    /// it ends a sentence (at the end, or before a capital).
+    private static let meridiem = #"(?:\s?([AaPp])\.?[Mm]\b(?:\.(?!\s*$|\s+\p{Lu}))?)"#
 
-    /// Clock times in words, as people say them (owner, 16 Oct: "13:00" was read "one three zero zero"): the hour on
-    /// the 12-hour clock with its part of the day, noon and midnight by name; a range ("14:00–15:00") names a part
-    /// they share once ("two to three in the afternoon").
+    /// One time: H:MM or HH:MM (hour 0 to 23, minutes 00 to 59), never inside a longer number or with seconds, and an
+    /// optional am/pm.
+    private static let clock = #"(?<![0-9:.,])([01]?[0-9]|2[0-3]):([0-5][0-9])(?![0-9]|:[0-9])"# + meridiem + "?"
+
+    /// An hour 1 to 12 with am/pm and no minutes ("7pm", "11 a.m.").
+    private static let hourOnly = #"(?<![0-9:.,])(1[0-2]|0?[1-9])(?![0-9:])"# + meridiem
+
+    /// Either end of a range: a clock time or an hour alone, am/pm optional (a range checks what it needs).
+    private static let rangeEnd = #"(?<![0-9:.,])([01]?[0-9]|2[0-3])(?::([0-5][0-9]))?(?![0-9]|:[0-9])"# + meridiem + "?"
+
+    /// Clock times in words, as people say them (owner, 16 Oct: "13:00" was read "one three zero zero"; "the 'am',
+    /// 'pm'": "7pm" was "sevenpm"): the hour on the 12-hour clock with its part of the day, noon and midnight by name;
+    /// an hour alone only with am/pm; a range ("14:00–15:00", "3-5pm") names a part they share once ("two to three in
+    /// the afternoon").
     public static func timesOfDay(_ text: String) -> String {
-        let range = replace(text, clock + #"(?:\s*[-–—]\s*|\s+to\s+)"# + clock) { g in
-            let (start, end) = (time(g[1], g[2], g[3]), time(g[4], g[5], g[6]))
+        let ranges = replace(text, rangeEnd + #"(?:\s*[-–—]\s*|\s+to\s+)"# + rangeEnd) { g in
+            guard let (start, end) = range(g) else { return g[0] }
             let first = start.part != nil && start.part == end.part ? start.words : start.spoken
             return first + " to " + end.spoken
         }
-        return replace(range, clock) { g in time(g[1], g[2], g[3]).spoken }
+        let clocks = replace(ranges, clock) { g in time(g[1], g[2], g[3]).spoken }
+        return replace(clocks, hourOnly) { g in time(g[1], "00", g[2]).spoken }
     }
+
+    /// A range's two times, or nil when it is no time range ("1-2 days": an hour alone needs am/pm). The first hour
+    /// without am/pm takes the second's ("3-5pm"), or the other half of the day when it is later ("11-1pm" is eleven
+    /// in the morning).
+    private static func range(_ g: [String]) -> (Spoken, Spoken)? {
+        let (startHour, startMinutes, endHour, endMinutes) = (Int(g[1]) ?? 0, g[2], Int(g[4]) ?? 0, g[5])
+        var startMeridiem = g[3]
+        let endMeridiem = g[6]
+        if startMeridiem.isEmpty, !endMeridiem.isEmpty, (1...12).contains(startHour) {
+            let sameHalf = startHour % 12 <= endHour % 12
+            startMeridiem = sameHalf ? endMeridiem : (endMeridiem.lowercased() == "p" ? "a" : "p")
+        }
+        if (startMinutes.isEmpty && startMeridiem.isEmpty) || (endMinutes.isEmpty && endMeridiem.isEmpty) { return nil }
+        return (time(g[1], startMinutes.isEmpty ? "00" : startMinutes, startMeridiem),
+                time(g[4], endMinutes.isEmpty ? "00" : endMinutes, endMeridiem))
+    }
+
+    private typealias Spoken = (words: String, part: String?, spoken: String)
 
     /// A time's words and its part of the day (none for noon and midnight). With am/pm the hour is read on the
     /// 12-hour clock (1 to 12; another hour keeps its 24-hour reading).
-    private static func time(_ hour: String, _ minutes: String, _ meridiem: String) -> (words: String, part: String?, spoken: String) {
+    private static func time(_ hour: String, _ minutes: String, _ meridiem: String) -> Spoken {
         var h = Int(hour) ?? 0
         let m = Int(minutes) ?? 0
         if !meridiem.isEmpty, (1...12).contains(h) { h = h % 12 + (meridiem.lowercased() == "p" ? 12 : 0) }

@@ -1580,9 +1580,21 @@ def call_greetings(name: str) -> tuple[str, ...]:
     return tuple(greeting.format(name=name) for greeting in CALL_GREETINGS)
 
 
-# said as soon as a request of a few words is taken in (owner: "Got it." and a few variations). Never a hum: Kokoro
-# garbled "Hmm.", "Mhm.", "Mm-hm." and "Uh-huh." (Whisper heard "Emily.", "Me have.", "Eh hi."); these came back exactly
-CALL_ACK_LINES = ("Got it.", "Gotcha.", "Okay, got it.", "Alright, got it.")
+# said as soon as a request of a few words is taken in (owner: "Got it." and a few variations; 16 Oct: "a bit
+# repetitive", "lets not do ok"), never on two turns in a row, never one of the last two. Never a hum: Kokoro garbled
+# "Hmm.", "Mhm.", "Mm-hm." and "Uh-huh." (Whisper heard "Emily.", "Me have.", "Eh hi."); these came back exactly
+CALL_ACK_LINES = (
+    "Got it.",
+    "Gotcha.",
+    "Sure.",
+    "Right.",
+    "Alright.",
+    "Understood.",
+    "On it.",
+    "Sure thing.",
+    "Alright, got it.",
+    "Right, got it.",
+)
 CALL_IDLE = "Take your time, I'm here."
 CALL_IDLE_BYE = "I'll hang up now. Call me any time."
 CALL_MAX_BYE = "We've been talking for a long while, so I'll hang up now. Call me back any time."

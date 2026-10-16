@@ -1536,8 +1536,54 @@ def test_a_sound_in_another_language_does_not_interrupt(said: str) -> None:
 
 def test_the_acknowledgement_is_a_short_got_it() -> None:
     # owner 2026-10-11: "Got it." and a few variations. Kokoro garbled "Hmm.", "Mhm.", "Mm-hm." and "Uh-huh." (Whisper
-    # heard its clips as "Emily.", "Me have.", "Eh hi."); these four came back exactly
-    assert prompts.CALL_ACK_LINES == ("Got it.", "Gotcha.", "Okay, got it.", "Alright, got it.")
+    # heard its clips as "Emily.", "Me have.", "Eh hi."). Owner 2026-10-16: "a bit repetitive", "lets not do ok": ten,
+    # most without "got it", none with "okay"; each came back exactly, 3 of 3, in af_heart at 1.05 ("Alright" as
+    # "All right")
+    assert prompts.CALL_ACK_LINES == (
+        "Got it.",
+        "Gotcha.",
+        "Sure.",
+        "Right.",
+        "Alright.",
+        "Understood.",
+        "On it.",
+        "Sure thing.",
+        "Alright, got it.",
+        "Right, got it.",
+    )
+    assert not any("okay" in line.lower() for line in prompts.CALL_ACK_LINES)
+
+
+async def test_no_acknowledgement_on_two_turns_in_a_row_and_never_one_of_the_last_two() -> None:
+    """Owner, 16 Oct: the "Got it" was repetitive. A request right after an acknowledged one gets none; a new one is
+    neither of the last two said."""
+    said = [f"please tell me what is on number {n}" for n in range(5)]
+    answers = [f"Answer {n}." for n in range(5)]
+    async with Harness(said, [Turn(a) for a in answers], acknowledge=True, rng=random.Random(3)) as h:
+        await h.connected()
+        await h.quiet_after(GREETING)
+        for answer in answers:
+            h.helper.caller_says(speech(1.2))
+            await h.quiet_after(answer)
+    spoken = h.manager.said[1:]
+    acks = [line for line in spoken if line in prompts.CALL_ACK_LINES]
+    assert len(acks) == 3  # turns 1, 3 and 5
+    assert spoken == [acks[0], "Answer 0.", "Answer 1.", acks[1], "Answer 2.", "Answer 3.", acks[2], "Answer 4."]
+    assert acks[1] != acks[0] and acks[2] not in acks[:2]
+
+
+async def test_a_short_turn_between_two_requests_lets_the_second_be_acknowledged() -> None:
+    said = ["what is on my calendar tomorrow", "thanks", "and what about the day after"]
+    answers = ["Two meetings.", "You're welcome.", "Nothing."]
+    async with Harness(said, [Turn(a) for a in answers], acknowledge=True) as h:
+        await h.connected()
+        await h.quiet_after(GREETING)
+        for answer in answers:
+            h.helper.caller_says(speech(1.2))
+            await h.quiet_after(answer)
+    spoken = h.manager.said[1:]
+    assert spoken[0] in prompts.CALL_ACK_LINES and spoken[1:3] == ["Two meetings.", "You're welcome."]
+    assert spoken[3] in prompts.CALL_ACK_LINES and spoken[4] == "Nothing."
 
 
 async def test_a_dutch_call_acknowledges_a_long_turn_in_dutch_and_a_short_one_not_at_all() -> None:

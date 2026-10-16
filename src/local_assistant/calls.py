@@ -713,6 +713,7 @@ class _Call:
     user_turns: int = 0
     dropped: bool = False
     unfinished: bool = False  # the call ended while an answer was still being worked on
+    acknowledged_last: bool = False  # the last request got a "got it": the next one gets none
 
 
 class CallManager:
@@ -754,6 +755,7 @@ class CallManager:
         self._practice = practice  # the language this user is practising (/babble), read once when a call starts
         self._last_line = ""
         self._last_greeting = ""  # kept apart: one greeting per call, and the next call's must differ
+        self._recent_acknowledgements: list[str] = []  # the last two "got it"s, never said again next
         self._call: _Call | None = None
         self._dial: _Dial | None = None  # a call she is placing, until it is picked up or ends
         self._task: asyncio.Task[None] | None = None
@@ -1174,8 +1176,15 @@ class CallManager:
             call.user_turns += 1
             said = f"{prompts.CUTTING_IN} {text}" if cutting_in else text
             # a "got it" only for a request: never before the answer to a device question (it comes at once, and a
-            # sound must not seem a yes), never after a few words ("how are you?" needs no "got it")
-            acknowledge = s.acknowledge and not question_waiting and turn_words(text) >= ACK_MIN_WORDS
+            # sound must not seem a yes), never after a few words ("how are you?" needs no "got it"), never on two
+            # turns in a row (owner, 16 Oct: repetitive)
+            acknowledge = (
+                s.acknowledge
+                and not question_waiting
+                and not call.acknowledged_last
+                and turn_words(text) >= ACK_MIN_WORDS
+            )
+            call.acknowledged_last = acknowledge
             turn = await self._turn(call, audio, said, acknowledge=acknowledge)
             interruption, heard = await self._speak(call, audio, turn, waiting=turn.asks_yes)
             call.lines.append(f"{self.name}: {heard}")
@@ -1216,7 +1225,7 @@ class CallManager:
         lines = call.spoken
         try:
             if acknowledge:  # "Got it." while the answer is already being worked on: the request was taken in
-                await self._say_line(audio, self._pick(lines.acknowledge), call.language)
+                await self._say_line(audio, self._pick_acknowledgement(lines.acknowledge), call.language)
                 line_end = think_from = self._clock()  # a thinking line only after a real wait beyond it
             while not task.done():
                 now = self._clock()
@@ -1271,6 +1280,14 @@ class CallManager:
         picked = self._rng.choice(choices)
         if last is None:
             self._last_line = picked
+        return picked
+
+    def _pick_acknowledgement(self, lines: tuple[str, ...]) -> str:
+        """A "got it" that is neither of the last two said (fewer lines: not the last one), kept across calls."""
+        recent = self._recent_acknowledgements
+        choices = [line for line in lines if line not in recent] or [line for line in lines if line not in recent[-1:]]
+        picked = self._rng.choice(choices or list(lines))
+        self._recent_acknowledgements = [*recent[-1:], picked]
         return picked
 
     async def _abandon(self, call: _Call, task: asyncio.Task[Turn]) -> None:

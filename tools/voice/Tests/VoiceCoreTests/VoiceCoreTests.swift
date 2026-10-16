@@ -185,6 +185,26 @@ private func sine(_ hertz: Double, rate: Int, count: Int, amplitude: Float = 1) 
         #expect(NumberNormalizer.normalize("12:15 am, 12:00 PM, 22:30") == "twelve fifteen at night, noon, ten thirty at night")
     }
 
+    /// Owner, 16 Oct: "the 'am', 'pm'": an hour with am/pm and no minutes ("7pm" was "sevenpm") is a time too; a
+    /// range's first hour without am/pm takes the second's, or the other half of the day when it is later ("11-1pm").
+    @Test func anHourWithAmOrPmIsATimeOfTheDay() {
+        #expect(NumberNormalizer.normalize("Dinner at 7 PM.") == "Dinner at seven in the evening.")
+        #expect(NumberNormalizer.normalize("at 7pm, or 11 a.m. tomorrow") == "at seven in the evening, or eleven in the morning tomorrow")
+        #expect(NumberNormalizer.normalize("12 PM and 12am") == "noon and midnight")
+        #expect(NumberNormalizer.normalize("Open 9am–5pm") == "Open nine in the morning to five in the afternoon")
+        #expect(NumberNormalizer.normalize("free 3-5pm") == "free three to five in the afternoon")
+        #expect(NumberNormalizer.normalize("from 11 to 1 pm") == "from eleven in the morning to one in the afternoon")
+        #expect(NumberNormalizer.normalize("10-12pm") == "ten in the morning to noon")
+        #expect(NumberNormalizer.normalize("7:30-9pm") == "seven thirty to nine in the evening")
+        #expect(NumberNormalizer.normalize("between 2 and 4 PM") == "between two and four in the afternoon")
+    }
+
+    /// Without am/pm an hour alone is a number, as before.
+    @Test func anHourWithoutAmOrPmStaysANumber() {
+        #expect(NumberNormalizer.normalize("1-2 days, from 3 to 5") == "one-two days, from three to five")
+        #expect(NumberNormalizer.normalize("2023-10 and 13pm") == "two thousand twenty three-ten and thirteenpm")
+    }
+
     /// Only a time with a colon is a time: a ratio, a price with a dot and seconds keep their old reading.
     @Test func whatIsNoTimeStaysAsBefore() {
         #expect(NumberNormalizer.normalize("16:9 screens") == "sixteen:nine screens")
