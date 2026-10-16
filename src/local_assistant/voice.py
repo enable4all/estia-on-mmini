@@ -364,7 +364,7 @@ COMMANDS = (
     "help",
 )
 _COMMAND = re.compile(rf"(?<![\w/~.])/({'|'.join(COMMANDS)})(?![\w-]|/|\.\w)", re.IGNORECASE)
-_EMOJI = re.compile("[\U0001f000-\U0001faff☀-➿⬀-⯿️‍]")
+_EMOJI = re.compile("[\U0001f000-\U0001faff☀-♬♰-➿⬀-⯿️‍]")  # never ♭ ♮ ♯: said as flat, natural, sharp
 _EMPHASIS = re.compile(r"\*\*|__|~~")
 _TABLE_RULE = re.compile(r"^\|?\s*:?-{2,}")
 _HEADING = re.compile(r"^#{1,6}\s+")
@@ -421,9 +421,31 @@ def spoken_text(answer: str, max_chars: int = 1500, *, min_chars: int = MIN_SPOK
     return cut.rstrip() + rest
 
 
+_SENTENCE_GAP = re.compile(r"(?<=[.!?])\s+|(?<=[。！？])\s*")
+# Never a sentence end: a title, "vs.", "e.g." or "i.e." before the next word (a name: "Dr. Smith", "PSV vs. Ajax",
+# "e.g. Spotify"; the voice service would end a part that stops at "e.g." with a full stop); the others only before a
+# lower-case letter or a digit ("8 a.m. now", "No. 5"), so "At 8 a.m. Then we go." still ends after "a.m.". A
+# lower-case "no." is the word ("I said no. 5 people agreed."; the voice service reads only "no.7" as a number).
+_BEFORE_A_NAME = frozenset({"Dr.", "Mr.", "Mrs.", "Ms.", "St.", "vs.", "e.g.", "E.g.", "i.e.", "I.e."})
+_BEFORE_LOWER_CASE = frozenset({"No.", "approx.", "Approx.", "a.m.", "p.m.", "A.M.", "P.M."})
+
+
 def sentences(spoken: str) -> list[str]:
-    """Spoken text split at sentence ends, so a call can start speaking the first one while the rest is made."""
-    return [part for part in re.split(r"(?<=[.!?])\s+|(?<=[。！？])\s*", spoken.strip()) if part]
+    """Spoken text split at sentence ends, so a call can start speaking the first one while the rest is made; never
+    after a title or an abbreviation inside a sentence (`_BEFORE_A_NAME`, `_BEFORE_LOWER_CASE`), in every language."""
+    text = spoken.strip()
+    parts: list[str] = []
+    start = 0
+    for gap in _SENTENCE_GAP.finditer(text):
+        words = text[: gap.start()].split()
+        last = words[-1].lstrip("(\"'“‘[") if words else ""
+        after = text[gap.end() : gap.end() + 1]
+        if last in _BEFORE_A_NAME or (last in _BEFORE_LOWER_CASE and (after.islower() or after.isdigit())):
+            continue
+        parts.append(text[start : gap.start()])
+        start = gap.end()
+    parts.append(text[start:])
+    return [part for part in parts if part]
 
 
 def _private_wav(wav: bytes, folder: Path) -> tuple[Path, Path]:

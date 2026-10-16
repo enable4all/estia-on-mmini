@@ -42,6 +42,19 @@ actor Serial {
     }
 }
 
+/// What takes an English pronunciation table: Kokoro (FluidAudio's `KokoroAneManager`), or a test's fake.
+protocol EnglishLexiconTaking {
+    func setEnglishCustomLexicon(_ entries: [String: String]) async
+}
+
+extension KokoroAneManager: EnglishLexiconTaking {}
+
+/// Kokoro's English, before its first sentence: VoiceCore's lexicon over Misaki's (capitals said as their letters,
+/// `EnglishLexicon`).
+func prepareEnglish(_ kokoro: some EnglishLexiconTaking) async {
+    await kokoro.setEnglishCustomLexicon(EnglishLexicon.entries)
+}
+
 /// Whisper and Kokoro, loaded and warmed once at start, then kept in memory; Supertonic-3 on first use; the
 /// speech detector at start too, on its own.
 actor Engines {
@@ -155,6 +168,7 @@ actor Engines {
         do {
             let kokoro = KokoroAneManager(variant: .english)
             try await kokoro.initialize()
+            await prepareEnglish(kokoro)
             _ = try await kokoro.synthesize(text: "Ready.", voice: SpeechRequest.defaultVoice, speed: 1.1)  // warm-up
             self.kokoro = kokoro
             tts = .ready

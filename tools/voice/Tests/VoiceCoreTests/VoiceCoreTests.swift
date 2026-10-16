@@ -165,7 +165,7 @@ private func sine(_ hertz: Double, rate: Int, count: Int, amplitude: Float = 1) 
 
     @Test func numbersAreSpelledOut() {
         #expect(NumberNormalizer.normalize("It costs $5.99, 20% off, 3.5 kg, 1,200 items")
-            == "It costs five dollars and ninety nine cents, twenty percent off, three point five kg, one thousand two hundred items")
+            == "It costs five dollars and ninety nine cents, twenty percent off, three point five kilograms, one thousand two hundred items")
     }
 
     /// Owner, 16 Oct: "13:00" was read as "one three zero zero" (the colon left between "thirteen" and "zero"). A time
@@ -199,16 +199,28 @@ private func sine(_ hertz: Double, rate: Int, count: Int, amplitude: Float = 1) 
         #expect(NumberNormalizer.normalize("between 2 and 4 PM") == "between two and four in the afternoon")
     }
 
+    /// Chords are no times (review, 16 Oct: "C G7 Am F" came out "C Gseven in the morning F"): am/pm only in one case
+    /// ("am", "AM", "a.m.", "A.M."), never "Am" or "Pm", and never an hour glued to a letter ("G7").
+    @Test func chordsAreNoTimes() {
+        for chords in ["The chorus is C G7 Am F.", "Capo 2 Am F C G", "Bar 12 Am", "Fret 5 Pm", "E7 Am Dm G7", "D7 Am7 G7 Am"] {
+            let spoken = NumberNormalizer.normalize(chords)
+            #expect(!["morning", "afternoon", "evening", "night", "noon", "midnight"].contains { spoken.contains($0) },
+                    "\(chords) -> \(spoken)")
+        }
+        #expect(NumberNormalizer.normalize("at 7 A.M. sharp, 3 PM, 7am, 11 a.m. and 7:30 P.M.")
+            == "at seven in the morning sharp, three in the afternoon, seven in the morning, eleven in the morning and seven thirty in the evening.")
+    }
+
     /// Without am/pm an hour alone is a number, as before.
     @Test func anHourWithoutAmOrPmStaysANumber() {
-        #expect(NumberNormalizer.normalize("1-2 days, from 3 to 5") == "one-two days, from three to five")
-        #expect(NumberNormalizer.normalize("2023-10 and 13pm") == "two thousand twenty three-ten and thirteenpm")
+        #expect(NumberNormalizer.normalize("1-2 days, from 3 to 5") == "one to two days, from three to five")
+        #expect(NumberNormalizer.normalize("2023-10 and 13pm") == "two thousand twenty three-ten and thirteen pm")  // a letter glued to a digit gets a space
     }
 
     /// Only a time with a colon is a time: a ratio, a price with a dot and seconds keep their old reading.
     @Test func whatIsNoTimeStaysAsBefore() {
         #expect(NumberNormalizer.normalize("16:9 screens") == "sixteen:nine screens")
-        #expect(NumberNormalizer.normalize("$13.00 and 3.50 kg") == "thirteen dollars and three point five zero kg")
+        #expect(NumberNormalizer.normalize("$13.00 and 3.50 kg") == "thirteen dollars and three point five zero kilograms")
         #expect(NumberNormalizer.normalize("24:00 and 9:75") == "twenty four:zero and nine:seventy five")
         #expect(NumberNormalizer.normalize("at 12:30:45 sharp") == "at twelve:thirty:forty five sharp")
         #expect(NumberNormalizer.normalize("9:30 amazing") == "nine thirty in the morning amazing")

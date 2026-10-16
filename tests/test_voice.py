@@ -133,6 +133,14 @@ def test_spoken_text_says_a_slash_command_instead_of_dropping_it_as_a_path() -> 
     )
 
 
+def test_music_signs_are_spoken_emoji_are_not() -> None:
+    # review, 16 Oct: the emoji range took the flat and sharp signs with it, so "E♭ major" was said "E major"
+    assert spoken_text("The key is E♭ major, with a B♭7, an F♯m and a C♮.") == (
+        "The key is E♭ major, with a B♭7, an F♯m and a C♮."
+    )
+    assert spoken_text("Sunny ☀️ today 😀, a ♥ and a ♪ tune.") == "Sunny today, a and a tune."
+
+
 def test_every_command_in_help_is_spoken_as_a_command() -> None:
     named = set(re.findall(r"(?<![\w/])/([a-z]+)\b", prompts.HELP))
     assert named and named <= set(COMMANDS), named - set(COMMANDS)
@@ -187,6 +195,40 @@ def test_sentences_split_spoken_text_for_speaking_one_by_one() -> None:
         "Okay",
     ]
     assert sentences("") == []
+
+
+@pytest.mark.parametrize(
+    ("spoken", "parts"),
+    [
+        ("Dr. Smith is in.", ["Dr. Smith is in."]),
+        ("Mr. and Mrs. Example are here. Ms. Example too.", ["Mr. and Mrs. Example are here.", "Ms. Example too."]),
+        ("PSV vs. Ajax tonight.", ["PSV vs. Ajax tonight."]),
+        ("See St. Mark's. It is old.", ["See St. Mark's.", "It is old."]),
+        ("It's 8 a.m. now.", ["It's 8 a.m. now."]),
+        ("At 8 a.m. Then we go.", ["At 8 a.m.", "Then we go."]),
+        ("We start at 9 p.m. sharp. Or 10 P.M. tomorrow.", ["We start at 9 p.m. sharp.", "Or 10 P.M. tomorrow."]),
+        ("e.g. this. Then that.", ["e.g. this.", "Then that."]),
+        # before a name too: the voice service would end the first part with a full stop ("…, for example.")
+        (
+            "Streaming services, e.g. Spotify and YouTube, are popular.",
+            ["Streaming services, e.g. Spotify and YouTube, are popular."],
+        ),
+        ('Use one, e.g. "Spotify" works. I.e. That one.', ['Use one, e.g. "Spotify" works.', "I.e. That one."]),
+        ("Fruit, i.e. Apples. E.g. Pears too.", ["Fruit, i.e. Apples.", "E.g. Pears too."]),
+        (
+            "Apples (e.g. green ones), i.e. sour ones, cost approx. 5 euros.",
+            ["Apples (e.g. green ones), i.e. sour ones, cost approx. 5 euros."],
+        ),
+        ("No. 5 is next. Then 6.", ["No. 5 is next.", "Then 6."]),
+        ("No. That's it.", ["No.", "That's it."]),
+        ("I said no. 5 people agreed.", ["I said no.", "5 people agreed."]),  # a lower-case "no." is the word
+        ("Bonjour. Ça va ? Oui, très bien !", ["Bonjour.", "Ça va ?", "Oui, très bien !"]),
+        ("Hallo. Wie geht's? Gut!", ["Hallo.", "Wie geht's?", "Gut!"]),
+    ],
+)
+def test_sentences_never_end_at_a_title_or_an_abbreviation_inside_one(spoken: str, parts: list[str]) -> None:
+    # a title, "vs.", "e.g." and "i.e." stand before a name; the rest only before a lower-case letter or a digit
+    assert sentences(spoken) == parts
 
 
 def test_the_voice_can_be_changed_while_running() -> None:

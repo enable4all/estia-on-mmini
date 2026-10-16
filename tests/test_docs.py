@@ -472,6 +472,21 @@ def test_a_spoken_project_name_is_documented() -> None:
         assert not re.search(r"\b(?:authe|othie)\b", text, re.IGNORECASE), name
 
 
+def test_the_guide_says_how_english_is_read_aloud_as_the_voice_service_reads_it() -> None:
+    """0.9.2: numbers, money, dates and chords are said as people say them (English only); every reading the guide
+    quotes is a row of the voice service's pronunciation table, so the guide never promises one the code lacks."""
+    text = GUIDE.read_text(encoding="utf-8")
+    assert "chord names are not yet spoken as music" not in text
+    start = text.index("**Read aloud in English.**")
+    part = text[start : text.index("**Calls wait for her voice.**")]
+    table = (ROOT / "tools/voice/Tests/VoiceCoreTests/SpokenEnglishTests.swift").read_text(encoding="utf-8")
+    readings = re.findall(r'"([^"]+)" as "([^"]+)"', part)
+    assert len(readings) >= 8
+    for written, said in readings:
+        assert f'"{written}", "{said}")' in table, written
+    assert "English only" in part and "**Known limits:**" in part
+
+
 # the site's drift tests (estia-13oct, from the site session) read these: the website under the tagline, Tiffany as
 # our own thinking partner, and a plain README sentence for each of the site's items
 

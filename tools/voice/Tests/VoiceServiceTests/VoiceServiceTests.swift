@@ -212,3 +212,18 @@ import WhisperKit
         #expect(request.spokenInput == "Lunch at one in the afternoon, the call at seven thirty in the evening.")
     }
 }
+
+/// Kokoro gets VoiceCore's lexicon (capitals said as their letters) before its first sentence.
+@Suite struct EnglishLexiconWiring {
+    actor FakeKokoro: EnglishLexiconTaking {
+        var entries: [String: String]?
+        func setEnglishCustomLexicon(_ entries: [String: String]) { self.entries = entries }
+    }
+
+    @Test func kokoroGetsVoiceCoresLexicon() async {
+        let kokoro = FakeKokoro()
+        await prepareEnglish(kokoro)
+        #expect(await kokoro.entries == EnglishLexicon.entries)
+        #expect(await kokoro.entries?["ID"] == "ˈI dˈi")
+    }
+}
