@@ -643,24 +643,30 @@ class Commands:
         return f"New conversation started. I still have your profile ({count} facts) and can search our earlier chats."
 
     def _profile_text(self) -> str:
-        """/profile: one fact per line with its number, under its category as a bold heading (the snapshot's order;
-        without a category: Other; no category at all: no headings), a blank line between groups."""
-        facts = self._profile.facts()
-        if not facts:
+        """/profile: the user's own facts (always in her prompt), then the notes from chats (the ones that may matter
+        come with a message), each with its fill level; one fact per line with its number, under its category as a
+        bold heading (the snapshot's order; without a category: Other; no category at all: no headings), a blank
+        line between groups."""
+        if not self._profile.facts():
             return 'Your profile is empty so far. Tell me about yourself, or say "remember that ...".'
-        used = sum(len(fact.text) for fact in facts)
 
         def line(fact: Fact, text: str) -> str:
             return f"#{fact.id} {text} ({_SOURCES[fact.source_kind]}, {local_date(fact.created_at, self._tz)})"
 
-        blocks = [prompts.PROFILE_HEADER.format(used=used, limit=self._profile.max_chars)]
-        groups = by_category(facts)
-        if groups is None:
-            blocks.append("\n".join(line(fact, fact.text) for fact in facts))
-        else:
-            blocks += [
+        def grouped(facts: list[Fact]) -> list[str]:
+            groups = by_category(facts)
+            if groups is None:
+                return ["\n".join(line(fact, fact.text) for fact in facts)]
+            return [
                 "\n".join([f"**{category}**", *(line(f, rest) for f, rest in entries)]) for category, entries in groups
             ]
+
+        yours, notes = self._profile.yours(), self._profile.notes()
+        blocks = [prompts.PROFILE_HEADER.format(used=self._profile.used_chars(), limit=self._profile.max_chars)]
+        blocks += grouped(yours) if yours else [prompts.PROFILE_NONE_YET]
+        if notes:
+            used, limit = self._profile.notes_used_chars(), self._profile.notes_max_chars
+            blocks += [prompts.PROFILE_NOTES_HEADER.format(used=used, limit=limit), *grouped(notes)]
         return "\n\n".join([*blocks, prompts.PROFILE_FOOTER])
 
     def _forget(self, args: str, message_id: int) -> str:
@@ -696,8 +702,9 @@ class Commands:
 
     async def _status(self) -> str:
         info = await self._status_provider()
-        facts = self._profile.facts()
-        used = sum(len(fact.text) for fact in facts)
+        yours, notes = self._profile.yours(), self._profile.notes()
+        mine = round(100 * self._profile.used_chars() / self._profile.max_chars)
+        noted = round(100 * self._profile.notes_used_chars() / self._profile.notes_max_chars)
         learned = local_datetime(info.last_learning_run, self._tz) if info.last_learning_run else "not yet"
         sections = {
             prompts.STATUS_RUNNING: [
@@ -706,7 +713,7 @@ class Commands:
                 f"Signal connection restarts: {info.restarts}",
             ],
             prompts.STATUS_MEMORY: [
-                f"Profile: {len(facts)} facts, {round(100 * used / self._profile.max_chars)}% full",
+                f"Profile: {len(yours)} facts of yours, {mine}% full; {len(notes)} notes from chats, {noted}% full",
                 f"Last learning run: {learned}",
                 f"History: {info.messages} messages, database {info.db_bytes / 1_000_000:.1f} MB",
             ],

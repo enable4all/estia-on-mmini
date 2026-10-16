@@ -893,11 +893,16 @@ LETTERS = REPO_AVATAR.parent / "letters"
 
 def test_a_name_other_than_estia_gets_its_letter_with_the_orange_stop() -> None:
     """Owner, 15 Oct: a name other than Estia shows its first letter, a to z, with Estia's orange full stop ("t." for
-    Tiffany); a picture the user set always wins, "" still means none, and any other first letter keeps the e."""
+    Tiffany); an accented letter shows its base letter (Á, É, Ñ, Ö: review, 15 Oct); a picture the user set always
+    wins, "" still means none, and any other first letter (another script, or Ø and Ł, which have no base letter)
+    keeps the e."""
     assert parse_config(BASE | {"name": "Tiffany"}).avatar == LETTERS / "t.png"
     assert parse_config(BASE | {"name": "maya"}).avatar == LETTERS / "m.png"
     assert parse_config(BASE | {"name": "ESTIA"}).avatar == REPO_AVATAR
-    assert parse_config(BASE | {"name": "Élodie"}).avatar == REPO_AVATAR  # not a to z: the e.
+    for name, letter in (("Élodie", "e"), ("Ángela", "a"), ("Ñandú", "n"), ("Zoë", "z")):
+        assert parse_config(BASE | {"name": name}).avatar == LETTERS / f"{letter}.png", name
+    for name in ("Øyvind", "Łucja", "Σωκράτης", "Ωmega", "李"):  # no base letter a to z: Estia's e.
+        assert parse_config(BASE | {"name": name}).avatar == REPO_AVATAR, name
     assert parse_config(BASE | {"name": "Tiffany", "avatar": ""}).avatar is None
     assert parse_config(BASE | {"name": "Tiffany", "avatar": "/Users/alex/me.png"}).avatar == Path("/Users/alex/me.png")
 

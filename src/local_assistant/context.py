@@ -44,6 +44,25 @@ PHOTO_PREFIX = "[photo]"  # how a photo message is stored: "[photo] <caption>"
 GONE_PREFIX = "[photo, no longer visible]"  # in Gemma's input once the photo is not shown any more
 
 
+def _with_notes(chat: dict[str, Any], block: str) -> dict[str, Any]:
+    """The user's message with her notes before its words (in its text part when it carries a photo): the question
+    comes last (evals, 16 Oct: with the notes after it, an old note won over the PROFILE)."""
+    if not block:
+        return chat
+    content = chat["content"]
+    if isinstance(content, str):
+        return {**chat, "content": f"{block}\n\n{content}"}
+    parts = [{**part, "text": f"{block}\n\n{part['text']}"} if part.get("type") == "text" else part for part in content]
+    return {**chat, "content": parts}
+
+
+def without_notes(text: str) -> str:
+    """A user message's text as the user wrote it: her notes block before it (`_with_notes`) left out."""
+    if text.startswith(prompts.NOTES_HEADER) and "\n\n" in text:
+        return text.split("\n\n", 1)[1]
+    return text
+
+
 def _text_of(content: Any) -> str:
     """The text of a chat message's content; image parts do not count (base64 would distort the ratio)."""
     if isinstance(content, list):
@@ -225,19 +244,27 @@ class ContextBuilder:
         rules: str | None = None,
         glance: str = "",
         call: bool = False,
+        notes: bool = True,
     ) -> list[dict[str, Any]]:
         """System prompt, then the conversation. Earlier tool calls are replayed after the message that caused
         them: without them Gemma saw "remember X" → "Noted: X" and learned it could skip the remember call.
         Photos (data URIs per message id) are only given for the message being answered (Hermes: images are
         turn-scoped); in history a photo message is its "[photo] caption" text. `rules`: other rules for this answer
         only (a practice turn); the style and the profile stay below them. `glance`: a call's counts at its start.
-        `call`: a call's turn (its rules without the list of what she can do)."""
+        `call`: a call's turn (its rules without the list of what she can do). `notes`: her notes that may matter
+        for the newest message come in it, before its words (the profile's second part, owner 16 Oct), so everything
+        before it stays the same from one message to the next; off for a practice turn."""
         system = self.system_prompt(conversation, rules, glance, call=call)
         built: list[dict[str, Any]] = [{"role": "system", "content": system}]
         window = self.window(conversation)
-        newest = max((message.id for message in window if message.direction == "in"), default=None)
+        # the message being answered: the last of the user's in the window's order (a text held during a call is stored
+        # first, a lower id, and gets its place only when answered), not the highest id
+        newest = next((message.id for message in reversed(window) if message.direction == "in"), None)
         for message in window:
-            built.append(self.to_chat(message, (images or {}).get(message.id, ()), newest=message.id == newest))
+            chat = self.to_chat(message, (images or {}).get(message.id, ()), newest=message.id == newest)
+            if notes and message.id == newest:
+                chat = _with_notes(chat, self._profile.notes_block(message.text))
+            built.append(chat)
             if message.direction == "in":
                 built.extend(self._trace(message.id))
         return built

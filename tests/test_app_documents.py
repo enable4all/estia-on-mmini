@@ -318,6 +318,29 @@ async def test_docs_names_a_config_folder_that_is_not_estia_kb(tmp_path: Path, m
         await stop(harness)
 
 
+async def test_a_sent_pdf_names_a_config_folder_that_is_not_estia_kb(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A PDF sent while her config names another folder in a home gets her config's fix, as /docs does, never the
+    share's: the share opens only ~/Estia-KB, so running it changes nothing and the next PDF fails the same way."""
+    harness = await start(
+        tmp_path,
+        monkeypatch,
+        FakeGemma(),
+        **(settings(tmp_path) | {"documents_folder": Path("/Users/alex/Documents/Notes")}),
+    )
+    try:
+        put(harness.folder, "a1.pdf", LEASE)
+        deliver(harness.folder, None, T0, attachments=[attachment("a1.pdf", LEASE)])
+        await until(lambda: len(sent(harness.folder)) == 1)
+        note = shown(harness.folder)[0]
+        assert note == on_phone(prompts.DOCUMENT_NOT_KB.format(folder="~/Documents/Notes"))
+        assert note.startswith("Not saved: ") and "share-documents.sh" not in note
+        assert prompts.DOCS_NOT_KB.partition(": ")[2] in prompts.DOCUMENT_NOT_KB  # /docs' words: same fact, same words
+    finally:
+        await stop(harness)
+
+
 async def test_macos_refusing_the_folder_gets_its_own_words(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     harness = await start(tmp_path, monkeypatch, FakeGemma(), **settings(tmp_path))
     try:

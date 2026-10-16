@@ -186,6 +186,10 @@ async def test_a_pdf_sent_on_signal_is_read_by_the_real_helper_and_her_search_to
         await stop(harness)
 
 
+# Vision on macOS 27 fails without Foundation's home; on macOS 26.6 in a test VM it read the page anyway (16 Oct)
+NO_HOME_NEEDED = "Vision on this Mac reads without Foundation's home: its failure cannot be shown here"
+
+
 def test_text_recognition_needs_foundations_home(monkeypatch: pytest.MonkeyPatch) -> None:
     """Live, 15 Oct: as her, Foundation's home was her account record's /var/empty (helper_env passed HOME alone), and
     every Vision scan failed in under 0.3 s: scanned pages and the warm-up failed, text pages still read. The real
@@ -203,6 +207,27 @@ def test_text_recognition_needs_foundations_home(monkeypatch: pytest.MonkeyPatch
         )
         return json.loads(done.stdout.strip().splitlines()[-1]).get("ok")
 
-    assert warm({"PATH": "/usr/bin:/bin", "HOME": "/var/empty", "CFFIXED_USER_HOME": "/var/empty"}) is False
+    without_home = warm({"PATH": "/usr/bin:/bin", "HOME": "/var/empty", "CFFIXED_USER_HOME": "/var/empty"})
     monkeypatch.setenv("CFFIXED_USER_HOME", "/var/empty")
     assert warm(helper_env()) is True
+    if without_home is not False:
+        pytest.skip(NO_HOME_NEEDED)
+
+
+def test_a_scanned_page_vision_fails_on_is_named_apart_from_an_unreadable_one(tmp_path: Path) -> None:
+    """With /var/empty as Foundation's home Vision fails at once: the page is skipped as "ocr_failed" (read again
+    after a start, and the part's warning), never as "unreadable" (a page that cannot be read)."""
+    scan = tmp_path / "scan.pdf"
+    scan.write_bytes(scan_pdf(BOILER, tmp_path))
+    done = subprocess.run(
+        [helper_command()[0], "read", str(scan), "--max-pages", "300", "--max-seconds", "60"],
+        env={"PATH": "/usr/bin:/bin", "HOME": "/var/empty", "CFFIXED_USER_HOME": "/var/empty"},
+        capture_output=True,
+        text=True,
+        timeout=90,
+        check=False,
+    )
+    answer = json.loads(done.stdout.strip().splitlines()[-1])
+    if answer["ok"] and answer["pages"]:
+        pytest.skip(NO_HOME_NEEDED)
+    assert (answer["ok"], answer["pages"], answer["skipped"]) == (True, [], [{"n": 1, "why": "ocr_failed"}])

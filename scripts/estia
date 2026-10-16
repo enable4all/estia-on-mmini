@@ -25,6 +25,8 @@
 # --dry-run (first) prints the command instead of running it, and needs no root.
 set -euo pipefail
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
+self="$0"
+[[ "$self" == /* ]] || self="$PWD/$self"  # this script's own path, for usage(): started by a relative one too
 cd /  # her user cannot enter your folders
 dry=""
 if [[ "${1:-}" == --dry-run ]]; then dry=1; shift; fi
@@ -40,7 +42,7 @@ plist="$root/Library/LaunchDaemons/$bridge.plist"
 as_her=(/usr/bin/sudo -u "$user" -H -- /usr/bin/env -i "HOME=$home" "PATH=/usr/local/estia/current/.venv/bin:/usr/bin:/bin:/usr/sbin:/sbin" LANG=en_US.UTF-8)
 as_root=("$tools/python3" -I -c 'import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); runpy.run_module(sys.argv.pop(1), run_name="__main__", alter_sys=True)' "$tools/src")
 
-usage() { /usr/bin/awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0" >&2; exit 2; }
+usage() { /usr/bin/awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$self" >&2; exit 2; }
 show() { printf 'would run:'; printf ' %s' "$@"; printf '\n'; }
 run() {
   if [[ -n "$dry" ]]; then show "${as_her[@]}" "$@"; exit 0; fi

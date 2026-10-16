@@ -5,15 +5,18 @@ import Testing
 
 @testable import DocumentsCore
 
-/// Stands in for Vision: answers per page number, or fails for the pages in `failing`.
+/// Stands in for Vision: answers per page number, or fails for the pages in `failing` (the page cannot be drawn) and
+/// in `visionFailing` (Vision's own error, as with /var/empty as Foundation's home: live, 15 Oct).
 final class FakeRecognizer: PageRecognizer {
     var answers: [Int: String] = [:]
     var failing: Set<Int> = []
+    var visionFailing: Set<Int> = []
     private(set) var asked: [Int] = []
 
     func text(of page: PDFPage, number: Int) throws -> String {
         asked.append(number)
         if failing.contains(number) { throw ReadError.unreadable }
+        if visionFailing.contains(number) { throw NSError(domain: "com.apple.Vision", code: 9) }
         return answers[number] ?? ""
     }
 }
@@ -61,6 +64,19 @@ final class FakeRecognizer: PageRecognizer {
         ])
         #expect(reading.pages[0].text.contains("Page one."))
         #expect(reading.skipped == [Skipped(n: 4, why: "unreadable")])
+    }
+
+    @Test func aPageVisionFailsOnIsNamedApartFromAPageThatCannotBeRead() throws {
+        // Vision's own failure is text recognition failing, not the page: the bridge reads the document again after
+        // a start, and the part shows its warning
+        let data = TestPDF.make(pages: 3) { _, _ in }
+        let fake = FakeRecognizer()
+        fake.answers = [1: "Scanned page one."]
+        fake.failing = [2]
+        fake.visionFailing = [3]
+        let reading = try read(data, recognizer: fake).get()
+        #expect(reading.pages == [Page(n: 1, text: "Scanned page one.", ocr: true)])
+        #expect(reading.skipped == [Skipped(n: 2, why: "unreadable"), Skipped(n: 3, why: "ocr_failed")])
     }
 
     @Test func aPageWithOnlySpacesCountsAsAPageWithoutText() throws {

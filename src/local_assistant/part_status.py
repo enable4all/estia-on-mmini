@@ -19,6 +19,11 @@ when that was checked, and since when answers are paused because the model no lo
 working, last read 14:05 · failing since 14:05: reason → the next step. A failure whose fix (a sign-in, key, address
 or helper) was saved again after its latest failure is not tested yet: set up again, not tested yet; the next failure
 makes it failing again.
+
+A part that works may also carry a warning: one of its abilities does not (documents: text recognition failed, so
+scanned pages are not read, while text pages are). It is kept from its first time through reads that work and under a
+failure, until the bridge sees that ability work again (`unwarn`), and shown as "!" with its fix, unless the part is
+failing (✗ is what shows then).
 """
 
 from __future__ import annotations
@@ -66,9 +71,10 @@ Reason = Literal[
     "certificate",
     "no_light",
     "not_hers",
+    "ocr_unavailable",
     "error",
 ]
-State = Literal["untested", "working", "failing"]
+State = Literal["untested", "working", "failing", "warning"]  # "warning": `describe` only, never `state`
 REASONS: frozenset[str] = frozenset(get_args(Reason))
 REASON_MAX_CHARS = 60
 WRITE_EVERY_SECONDS = 60.0  # an unchanged state is written at most this often
@@ -92,6 +98,8 @@ class Record:
     reason: str = ""  # a Reason, when failed
     code: int = 0  # the HTTP status of the failure, when there was one
     last: float | None = None  # the latest failure, when it went on after `failed` (written at most once a minute)
+    warning: str = ""  # a Reason: the part works, but one of its abilities does not (documents: "ocr_unavailable")
+    warned: float | None = None  # since when, kept from its first time until the ability works again
 
 
 @dataclass(frozen=True)
@@ -116,7 +124,9 @@ class PartLine:
     fix: str = ""  # the next step, when failing
 
     def line(self) -> str:
-        return f"{self.label}: {self.text}" + (f" → {self.fix}" if self.fix else "")
+        """/status's line; a warning is marked "!" as in doctor (a failure's text says failing)."""
+        mark = "! " if self.state == "warning" else ""
+        return f"{self.label}: {mark}{self.text}" + (f" → {self.fix}" if self.fix else "")
 
 
 def mail_part(name: str) -> str:
@@ -224,16 +234,28 @@ def _record(entry: Any) -> Record | None:
         ok, failed = _time(entry.get("ok")), _time(entry.get("failed"))
     except ValueError:
         return None
-    if ok is None and failed is None:
+    warning, warned = _warning(entry)
+    if ok is None and failed is None and not warning:
         return None
     if failed is None:
-        return Record(ok=ok)
+        return Record(ok=ok, warning=warning, warned=warned)
     reason = entry.get("reason")
     try:
         last = _time(entry.get("last"))
     except ValueError:
         last = None  # odd: as if it failed only once
-    return Record(ok, failed, reason if reason in REASONS else "error", _code(entry.get("code")), last)
+    reason = reason if reason in REASONS else "error"
+    return Record(ok, failed, reason, _code(entry.get("code")), last, warning, warned)
+
+
+def _warning(entry: dict[str, Any]) -> tuple[str, float | None]:
+    """The record's warning and since when; none when either is missing or odd."""
+    warning = entry.get("warning")
+    try:
+        warned = _time(entry.get("warned"))
+    except ValueError:
+        return "", None
+    return (warning, warned) if warning in REASONS and warned is not None else ("", None)
 
 
 def _code(value: Any) -> int:
@@ -281,7 +303,28 @@ def describe(
 ) -> PartLine:
     """The part's state in words, for doctor and /status alike. `saved`: when the setup that fixes the recorded
     failure (a sign-in, key, address or helper) was saved, if known; saved after the failure, it is not tested yet.
-    `mailbox`: for an Outlook calendar, its mailbox's name (the fix names it). `estia_kb`: see `fix_for`."""
+    `mailbox`: for an Outlook calendar, its mailbox's name (the fix names it). `estia_kb`: see `fix_for`. A warning
+    follows the state, with its own fix, unless the part is failing."""
+    line = _described(part, record, now, tz, saved=saved, mailbox=mailbox, estia_kb=estia_kb)
+    if record is None or not record.warning or record.warned is None or line.state == "failing":
+        return line
+    text = prompts.PART_WARNING.format(
+        text=line.text, when=local_when(record.warned, now, tz), reason=reason_text(record.warning)
+    )
+    return PartLine(line.label, "warning", text, fix_for(part, record.warning, mailbox=mailbox, estia_kb=estia_kb))
+
+
+def _described(
+    part: str,
+    record: Record | None,
+    now: float,
+    tz: ZoneInfo,
+    *,
+    saved: float | None,
+    mailbox: str,
+    estia_kb: bool,
+) -> PartLine:
+    """`describe` without the warning."""
     kind, _, name = part.partition(":")
     label = (
         prompts.PART_LABELS[kind].format(name=name)
@@ -393,6 +436,31 @@ class PartStatus:
         elif not paused and self._security.model_cloud is not None:
             self._keep_security(replace(self._security, model_cloud=None))
 
+    def warn(self, part: str, reason: Reason) -> None:
+        """The part works, but one of its abilities does not (documents: "ocr_unavailable"); kept from its first time."""
+        try:
+            self._warn(part, reason)
+        except Exception:
+            log.exception("part status: recording %s failed", part)
+
+    def unwarn(self, part: str) -> None:
+        """The ability the part's warning named works again."""
+        try:
+            old = self._records.get(part)
+            if old is not None and old.warning:
+                self._keep(part, replace(old, warning="", warned=None))
+        except Exception:
+            log.exception("part status: recording %s failed", part)
+
+    def _warn(self, part: str, reason: str) -> None:
+        if not is_part(part):
+            log.warning("part status: not a part, ignored")
+            return
+        old = self._records.get(part) or Record()
+        reason = reason if reason in REASONS else "error"
+        if old.warning != reason:
+            self._keep(part, replace(old, warning=reason, warned=self._clock()))
+
     def _keep_security(self, security: Security) -> None:
         self._security = security
         if self.path is None:
@@ -425,7 +493,7 @@ class PartStatus:
         recent = old is not None and old.ok is not None and 0 <= now - old.ok < WRITE_EVERY_SECONDS
         if recent and state(old) == "working":
             return  # still working, and written less than a minute ago
-        self._keep(part, Record(ok=now))
+        self._keep(part, Record(ok=now, warning=old.warning, warned=old.warned) if old else Record(ok=now))
 
     def _failed(self, part: str, reason: str, code: int) -> None:
         if not is_part(part):
@@ -443,7 +511,7 @@ class PartStatus:
             later = now if now != old.failed else old.last  # the latest failure beats an older fix
             new = replace(old, reason=reason, code=code, last=later)  # "since" stays
         else:
-            new = Record(ok=old.ok, failed=now, reason=reason, code=code)
+            new = Record(ok=old.ok, failed=now, reason=reason, code=code, warning=old.warning, warned=old.warned)
         self._keep(part, new)
 
     def _keep(self, part: str, record: Record) -> None:
@@ -465,6 +533,8 @@ class PartStatus:
                     entry["last"] = record.last
                 if record.code:
                     entry["code"] = record.code
+            if record.warning:
+                entry |= {"warning": record.warning, "warned": record.warned}
             parts[part] = entry
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         fd, temp = tempfile.mkstemp(dir=path.parent, prefix=".status-", suffix=".tmp")  # 0600

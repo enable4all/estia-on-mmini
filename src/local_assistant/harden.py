@@ -44,6 +44,7 @@ REPO = Path(__file__).resolve().parents[2]
 TRUST = ("--trust-new-identities", "on-first-use")  # the identity rule the bridge pins too
 IPV4 = "-Djava.net.preferIPv4Stack=true"  # signal_io.IPV4: one network path, as the bridge uses
 PLIST = ownuser.DAEMONS / f"{ownuser.BRIDGE}.plist"
+NOT_LOADED = "Could not find service"  # launchctl print's answer for a service launchd does not have (estia stop)
 QUESTIONS = {
     "firewall": "Turn on the firewall?",
     "stealth": "Turn on stealth mode? The Mac then no longer answers ping or probes of closed ports.",
@@ -490,13 +491,20 @@ class Harden:
         daemon = self.host.path(PLIST).exists()
         if daemon and not self.sudo():
             return
+        # she runs again afterwards only when launchd had her before: one stopped on purpose (`estia stop`, the first
+        # step after a compromise) stays stopped; an answer that cannot be read (a timeout, another message) may be
+        # that too, so she is stopped for the PIN (harmless when not loaded: one signal-cli per account) and never
+        # started again
+        shown = self.host.run([LAUNCHCTL, "print", f"system/{ownuser.BRIDGE}"], read_only=True) if daemon else (1, "")
+        running = daemon and shown[0] == 0
+        unread = daemon and not running and NOT_LOADED not in shown[1]
         if (
             not daemon
             and self.host.run(["/usr/bin/pgrep", "-f", r"\.venv/bin/local-assistant"], read_only=True)[0] == 0
         ):
             self.say("✗ A bridge runs in a terminal: stop it (Ctrl-C), then run scripts/harden.sh again.")
             return
-        if daemon:
+        if running or unread:
             self.host.run([SUDO, "-n", LAUNCHCTL, "bootout", f"system/{ownuser.BRIDGE}"])
             if self.host.live:
                 for _ in range(50):  # one signal-cli per account: wait until hers is gone
@@ -507,7 +515,7 @@ class Harden:
             code, out = self.host.run(self.pin_helper(), input=f"{pin}\n", timeout=180, cwd=Path("/"))
         finally:
             pin = ""
-            if daemon:  # she runs again, whatever happened to the PIN
+            if running:  # she runs again, whatever happened to the PIN
                 self.host.run([SUDO, "-n", LAUNCHCTL, "bootstrap", "system", str(PLIST)])
                 if self.host.live:
                     for _ in range(30):
@@ -518,7 +526,17 @@ class Harden:
                             break
                         self.sleep(2)
         result = out.strip().splitlines()[-1] if out.strip() else "Registration Lock: no answer"
-        self.say(("✓ " if code == 0 else "✗ ") + result + ("; she runs again." if daemon else ""))
+        start = f"{ownuser.ESTIA} start" if self.own_user else f"{SUDO} {LAUNCHCTL} bootstrap system {PLIST}"
+        after = (
+            "; she runs again."
+            if running
+            else f"; she stays stopped (whether she ran before could not be read): start her with {start}"
+            if unread
+            else "; she stays stopped (she was stopped before)."
+            if daemon
+            else ""
+        )
+        self.say(("✓ " if code == 0 else "✗ ") + result + after)
 
     def pin_helper(self) -> list[str]:
         if self.own_user:

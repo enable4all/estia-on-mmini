@@ -18,7 +18,7 @@ from local_assistant.claims import (
     restates,
     without_reminder_talk,
 )
-from local_assistant.context import ContextBuilder, without_fake_notices
+from local_assistant.context import ContextBuilder, without_fake_notices, without_notes
 from local_assistant.gemma import Completion, GemmaClient, ToolCall
 from local_assistant.signal_text import MARKERS, unmarked
 from local_assistant.store import Conversation, Message
@@ -30,6 +30,7 @@ log = logging.getLogger(__name__)
 
 
 INSTANT_TOOLS = frozenset({"remember", "forget", "end_call"})  # no "let me check" on a call for these
+DOCUMENT_REPLY_TOKENS = 2_000  # an answer after read_document may run this long: a section in full (16 Oct)
 
 
 @dataclass(frozen=True)
@@ -249,6 +250,7 @@ def profile_notice(turn: Turn) -> str:
     lines = [f"Saved #{fid}: {text} (/forget {fid} undoes it)" for fid, text in turn.saved]
     lines += [f"Updated #{fid}: {text}" for fid, text in turn.updated]
     lines += [f"Removed #{fid}: {text}" for fid, text in turn.removed]
+    lines += [f"Moved to notes #{fid}: {text}" for fid, text in turn.moved]  # making room: kept, not always sent
     return "**Profile changes**\n" + "\n".join(lines) if lines else ""  # bold in Signal (markup)
 
 
@@ -315,7 +317,11 @@ class Brain:
         # on a call her rules leave out the list of what she can do (spoken sentences, never a list)
         on_call = message.text.startswith(prompts.CALL_MARK)
         messages = self._context.build(conversation, shown or None, glance=glance, call=on_call)
-        said = [str(m["content"]) for m in messages if m.get("role") == "user" and isinstance(m.get("content"), str)]
+        said = [  # the user's own words: her notes before the newest message are not theirs
+            without_notes(str(m["content"]))
+            for m in messages
+            if m.get("role") == "user" and isinstance(m.get("content"), str)
+        ]
         # the user asked for a reminder, a wake-up or a call now or in their message before ("and at 17:00?")
         asked_before = any(mentions_reminder(text) for text in said[-2:]) or mentions_reminder(message.text)
         calls = 0
@@ -333,7 +339,10 @@ class Brain:
         while True:
             limit = self._learn_tool_calls if turn.learned_document_id is not None else self._max_tool_calls
             allow_tools = calls < limit
-            completion = await self._complete(messages, allow_tools, limit_tokens)
+            # a section given in full after reading its pages (owner, 16 Oct: B5 was cut mid-sentence at 600); a
+            # call keeps its own spoken cap
+            room = DOCUMENT_REPLY_TOKENS if turn.read_documents and max_tokens is None else limit_tokens
+            completion = await self._complete(messages, allow_tools, max(limit_tokens, room))
             if completion.tool_calls and allow_tools:
                 if on_tools is not None and any(call.name not in INSTANT_TOOLS for call in completion.tool_calls):
                     on_tools()
@@ -453,7 +462,7 @@ class Brain:
         answer, after outside text in the practice conversation (an audio file or a photo) unless the user sent them."""
         # a practice call's turn gets the call's style too (its rules have no list of what she can do to leave out)
         on_call = message.text.startswith(prompts.CALL_MARK)
-        messages = self._context.build(conversation, shown or None, rules=practice.rules, call=on_call)
+        messages = self._context.build(conversation, shown or None, rules=practice.rules, call=on_call, notes=False)
         completion = await self._gemma.chat(messages, max_tokens=max_tokens, tools=None)
         if not _has_images(messages):  # image tokens are counted by Ollama but not in our characters
             self._context.calibrate(messages, completion.prompt_tokens)
@@ -477,7 +486,11 @@ class Brain:
             (prompts.AUDIO_MARK, "[photo]")
         ):
             text = defang_links(text, message.text)
-        said = [str(m["content"]) for m in messages if m.get("role") == "user" and isinstance(m.get("content"), str)]
+        said = [
+            without_notes(str(m["content"]))
+            for m in messages
+            if m.get("role") == "user" and isinstance(m.get("content"), str)
+        ]
         users = [*said[-2:], message.text]
         asked = any(mentions_reminder(line) for line in users)
         words = tidy(text, spoken=True)  # her words, without the "→" line (the user's own sentence, corrected)

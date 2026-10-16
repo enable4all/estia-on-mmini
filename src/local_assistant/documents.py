@@ -9,7 +9,9 @@ The look (every `look_minutes`, and whenever the user asks about documents or ty
 times only, never following a link; a PDF is read only when it is new or changed. The reading is tools/documents'
 helper (Apple's PDFKit, and Vision for a page without text, on the Mac), run with fixed arguments, a clean environment
 and a time limit, one document at a time; it prints one JSON line. Each page's text goes into her database's full-text
-index (`store`, schema v10). Gemma is not used in any of this: it only answers from the index when the user asks.
+index (`store`, schema v10; v12 keeps the reader that read each file, `INDEX_VERSION`, so a fix to the reader reads
+again what an older one did not read whole). Gemma is not used in any of this: it only answers from the index when the
+user asks.
 
 The look never holds the folder for long: it takes the reading lock one document at a time, so a sent PDF is saved
 between two; the hourly look reads `LOOK_SECONDS` at most and stops when a call begins, a look on request its 45 s,
@@ -44,7 +46,7 @@ from zoneinfo import ZoneInfo
 from local_assistant import prompts
 from local_assistant.config import OWNER_HOME, is_estia_kb
 from local_assistant.part_status import PartStatus
-from local_assistant.store import DocFile, DocPage, Store
+from local_assistant.store import DocFile, DocPage, Store, fold, name_words
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +61,7 @@ WARM_SECONDS = 180
 WARM_TIMEOUT = 200.0
 PAGE_CHARS = 20_000  # a page's text kept at most (a full page of small print is about 5,000 characters)
 READ_CHARS = 6_000  # read_document gives at most this much of a page
+READ_PAGES = 3  # read_document reads this many pages at most in one call (a section that goes on)
 SEARCH_HITS = 6  # passages search_documents gives
 LOOK_ON_REQUEST_SECONDS = 45.0  # a question's look reads new files this long at most; the rest at the next look
 LOOK_SECONDS = 600.0  # the hourly look reads this long at most; the rest at the next tick, a minute later
@@ -76,6 +79,12 @@ FIRST_LOOK_KEY = "documents:first_look"  # "1" until a new share's first look ha
 # why the folder cannot be listed: these mean closed (her index goes); any other error passes (the index stays)
 CLOSED_ERRORS = frozenset({errno.EACCES, errno.EPERM, errno.ENOENT, errno.ENOTDIR, errno.ELOOP})
 PDF_START = b"%PDF-"
+# the reader (the helper and the bridge's reading of it) that read a file, kept per file (`doc_files.reader`): a fix to
+# the reader changes neither a file's size nor its change time, so a file an older reader did not read whole (pages
+# skipped, or the file unreadable) is read again once. 1: the first reader (14 Oct), and every row from before v12;
+# 2: Foundation's home set for the helper (15 Oct: in her own user Vision failed, and scanned pages were skipped)
+INDEX_VERSION = 2
+OCR_FAILED = "ocr_failed"  # a page Vision failed on (the helper's own code): read again after a start, like a timeout
 HELPER_ERRORS = frozenset({"not_pdf", "encrypted", "too_big", "too_many_pages", "timeout", "unreadable"})
 _WHY = re.compile(r"[a-z_]{1,30}")
 _TOKEN = re.compile(r"[0-9a-f]{16,64}")
@@ -162,17 +171,26 @@ class Helper:
         self._status = status or PartStatus(None)
 
     async def warm(self) -> bool:
-        """`warm --max-seconds 180`: Vision's model prepared before a document needs it. Whether it worked."""
+        """`warm --max-seconds 180`: Vision's model prepared before a document needs it. Whether it worked. A warm-up
+        that fails is the part's warning, "ocr_unavailable" (doctor and /status show "!"; live, 15 Oct: under her
+        account every warm-up failed and only the log said so), unless the helper itself is missing or broken (a
+        failure, already recorded); one that works ends it."""
         started = time.monotonic()
         try:
             data = await self._run(["warm", "--max-seconds", str(WARM_SECONDS)], limit=WARM_TIMEOUT)
         except HelperError as exc:
             log.warning("documents helper: warm-up failed: %s", exc.code)
+            if exc.code == "timeout":
+                self._status.warn(PART, "ocr_unavailable")
             return False
         ok = data.get("ok") is True
         log.info(
             "documents helper: warm-up %s in %d ms", "done" if ok else "failed", (time.monotonic() - started) * 1000
         )
+        if ok:
+            self._status.unwarn(PART)
+        else:
+            self._status.warn(PART, "ocr_unavailable")
         return ok
 
     async def read(self, path: Path) -> Reading:
@@ -205,6 +223,10 @@ class Helper:
             (time.monotonic() - started) * 1000,
         )
         self._status.ok(PART)
+        if any(page.ocr for page in reading.pages):
+            self._status.unwarn(PART)  # Vision read a page: text recognition works
+        if any(why == OCR_FAILED for _, why in reading.skipped):
+            self._status.warn(PART, "ocr_unavailable")  # Vision failed on a page: text recognition does not work
         return reading
 
     async def _answers(self) -> bool:
@@ -273,6 +295,16 @@ async def _stop(proc: asyncio.subprocess.Process) -> None:
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
         await proc.wait()
+
+
+def _retried_after_a_start(file: DocFile) -> bool:
+    """A file read again once after each start (the warm-up first): it timed out, or Vision failed on a page."""
+    return file.error == "timeout" or any(why == OCR_FAILED for _, why in file.skipped)
+
+
+def _read_by_an_older_reader(file: DocFile) -> bool:
+    """A file an older reader (INDEX_VERSION) did not read whole: pages skipped, or the file unreadable."""
+    return file.reader < INDEX_VERSION and (bool(file.skipped) or file.error == "unreadable")
 
 
 def _number(value: object) -> int | None:
@@ -373,7 +405,8 @@ class Documents:
             if path not in known
             or (known[path].size, known[path].mtime_ns) != (item.size, item.mtime_ns)
             or known[path].error == "no_access"  # the share was run again since: tried every look
-            or (known[path].error == "timeout" and path not in self._retried)  # once a start: after the warm-up
+            or (_retried_after_a_start(known[path]) and path not in self._retried)  # once a start: after the warm-up
+            or _read_by_an_older_reader(known[path])  # once: the new reader's row is INDEX_VERSION's
         ]
         todo.sort(key=lambda item: item.mtime_ns, reverse=True)  # the newest first, should the time run out
         started = time.monotonic()
@@ -542,6 +575,7 @@ class Documents:
             error=error,
             source="signal" if source == "signal" else "folder",
             announced=announced,
+            reader=INDEX_VERSION,
         )
         found = self._store.doc_file(file_id)
         assert found is not None
@@ -579,7 +613,9 @@ class Documents:
             self._lock.release()
 
     def _read_later(self, item: Listed) -> DocFile:
-        file_id = self._store.put_doc_file(item.path, item.size, -1, [], page_count=0, source="signal", announced=True)
+        file_id = self._store.put_doc_file(
+            item.path, item.size, -1, [], page_count=0, source="signal", announced=True, reader=INDEX_VERSION
+        )
         found = self._store.doc_file(file_id)
         assert found is not None
         return found
@@ -654,12 +690,19 @@ class Documents:
 
     def find(self, document: str) -> DocFile | None:
         """A document by its number (#12), its path or name in the folder, or words of its name; None when no single
-        one matches."""
+        one matches (`find_all` gives them all)."""
+        found = self.find_all(document)
+        return found[0] if len(found) == 1 else None
+
+    def find_all(self, document: str) -> list[DocFile]:
+        """The documents that fit `document` best: its number (#12), its path, name or stem, else every file whose
+        name holds all its words with the fewest other words ("Practice Exam": the exam, not "… Exam - Answer
+        Sheet"; "lease": both "2026-10-14 lease.pdf" and "2026-10-15 lease.pdf", a sent PDF's date naming nothing)."""
         asked = " ".join(document.strip().strip("\"'").split())
         files = self.files()
         number = asked.lstrip("#")
         if number.isdecimal():
-            return next((file for file in files if file.id == int(number)), None)
+            return [file for file in files if file.id == int(number)]
         folded = asked.casefold()
         for match in (
             lambda file: file.path.casefold() == folded,
@@ -667,13 +710,16 @@ class Documents:
             lambda file: Path(file.path).stem.casefold() == folded,
         ):
             found = [file for file in files if match(file)]
-            if len(found) == 1:
-                return found[0]
-        words = [word for word in re.findall(r"\w+", folded) if word != "pdf"]
+            if found:
+                return found
+        words = {word for word in re.findall(r"[^\W_]+", fold(asked)) if word != "pdf" and not word.isdecimal()}
         if not words:
-            return None
-        found = [file for file in files if all(word in _words(file.path) for word in words)]
-        return found[0] if len(found) == 1 else None
+            return []
+        found = [file for file in files if words <= _words(file.path)]
+        if len(found) > 1:
+            fewest = min(len(_words(file.path) - words) for file in found)
+            found = [file for file in found if len(_words(file.path) - words) == fewest]
+        return found
 
     def listing(self) -> str:
         """/docs: every document, newest first, with its number, pages or why it cannot be read."""
@@ -692,33 +738,67 @@ class Documents:
         lines.append(prompts.DOCS_SEND_HINT)
         return "\n".join(lines)
 
-    def search_text(self, words: str) -> str:
-        """search_documents' result: the best passages with their document and page (outside text)."""
+    def search_text(self, words: str, document: str = "") -> str:
+        """search_documents' result: the best passages with their document and page (outside text); `document`: in
+        that one only (`find`)."""
         if not words.strip():
             raise ValueError("the search words are empty.")
-        hits = self._store.search_doc_pages(words, limit=SEARCH_HITS)
+        scope: list[int] | None = None
+        if document.strip():
+            matching = self.find_all(document)  # two files of one name (a lease sent on two days): both searched
+            if not matching:
+                return self._not_found(document)
+            scope = [file.id for file in matching]
+        hits = self._store.search_doc_pages(words, limit=SEARCH_HITS, file_ids=scope)
         if not hits:
-            count = len(self.files())
+            count = len(self.files()) if scope is None else len(scope)
             return prompts.DOCUMENTS_NO_MATCH.format(words=" ".join(words.split())[:80], count=count)
+        pages = {file.id: file.pages for file in self.files()}
         blocks = [prompts.DOCUMENTS_PASSAGES]
         for number, hit in enumerate(hits, 1):
-            blocks.append(f'[{number}] "{hit.path}", page {hit.page}: {" ".join(hit.passage.split())}')
+            line = f'[{number}] "{hit.path}", page {hit.page}: {" ".join(hit.passage.split())}'
+            # the passage reaches its page's end (FTS5 marks a cut with "…") and a page follows: Gemma took page 9's
+            # passage for all of B5 (eval, 16 Oct)
+            if not hit.passage.rstrip().endswith("…") and hit.page < pages.get(hit.file_id, 0):
+                line += " " + prompts.DOCUMENT_GOES_ON.format(next=hit.page + 1)
+            blocks.append(line)
         return "\n".join(blocks)
 
-    def read_text(self, document: str, page: int) -> str:
-        """read_document's result: one page, capped (outside text)."""
-        file = self.find(document)
-        if file is None:
-            names = ", ".join(f'"{Path(item.path).name}"' for item in self.files()[:8]) or "none yet"
-            return prompts.DOCUMENT_NOT_FOUND.format(document=document.strip()[:80], names=names)
+    def read_text(self, document: str, page: int, last_page: int | None = None) -> str:
+        """read_document's result: one page, or on to `last_page` (a section that goes on past its page), at most
+        `READ_PAGES` pages and never past the last one; each page capped (outside text)."""
+        if last_page is not None and last_page < page:
+            raise ValueError("last_page must be the page or a later one")
+        matching = self.find_all(document)
+        if len(matching) > 1:  # which one: named, never guessed
+            names = ", ".join(f'"{Path(item.path).name}"' for item in matching[:8])
+            return prompts.DOCUMENT_SEVERAL.format(document=document.strip()[:80], names=names)
+        if not matching:
+            return self._not_found(document)
+        file = matching[0]
         if file.error:
             return prompts.DOCUMENT_UNREADABLE.format(
                 name=file.path, why=prompts.DOCUMENT_ERRORS.get(file.error, file.error)
             )
+        asked = page if last_page is None else last_page
+        last = max(page, min(asked, page + READ_PAGES - 1, file.pages))
+        text = "\n\n".join(self._page_text(file, number) for number in range(page, last + 1))
+        if asked > last < file.pages:
+            text += "\n" + prompts.DOCUMENT_READ_ON.format(pages=READ_PAGES, next=last + 1)
+        elif last < file.pages:
+            text += "\n" + prompts.DOCUMENT_GOES_ON.format(next=last + 1)
+        return text
+
+    def _not_found(self, document: str) -> str:
+        names = ", ".join(f'"{Path(item.path).name}"' for item in self.files()[:8]) or "none yet"
+        return prompts.DOCUMENT_NOT_FOUND.format(document=document.strip()[:80], names=names)
+
+    def _page_text(self, file: DocFile, page: int) -> str:
         found = self._store.doc_page(file.id, page)
         if found is None:
             why = dict(file.skipped).get(page)
             if why is not None:
+                why = prompts.DOCUMENT_PAGE_WHY.get(why, why)
                 return prompts.DOCUMENT_PAGE_SKIPPED.format(page=page, name=file.path, why=why)
             count = f"{file.pages} page{'' if file.pages == 1 else 's'}"
             return prompts.DOCUMENT_NO_PAGE.format(page=page, name=file.path, count=count)
@@ -809,4 +889,4 @@ def _why(exc: OSError) -> str:
 
 
 def _words(path: str) -> set[str]:
-    return set(re.findall(r"\w+", Path(path).stem.casefold().replace("_", " ")))
+    return name_words(path)

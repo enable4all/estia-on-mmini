@@ -32,6 +32,7 @@ import stat
 import subprocess
 import tempfile
 import time
+import unicodedata
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -118,14 +119,23 @@ class Check:
     unread: bool = False  # the setting could not be read: neither held nor not held (security_level)
 
 
-_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+# never printed as they are: control characters (escape sequences, new lines, tabs), format characters (bidi
+# overrides, zero-width), surrogates, and the line and paragraph separators
+_UNPRINTED = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
+
+
+def clean(text: str) -> str:
+    """Text root prints that someone else chose (a commit subject, a file name, a path, a tool's output) made safe for
+    root's terminal: each control, format or separator character is a "?", so it can neither start a line, move the
+    cursor, turn text around nor hide a character."""
+    return "".join("?" if unicodedata.category(char) in _UNPRINTED else char for char in text)
 
 
 def tail(output: str, lines: int = 5) -> str:
-    """The last lines of a failing tool's output, on one line and without escape sequences (why it failed). Only for
-    tools that never print a secret (git, uv, tar, dscl, sysadminctl, launchctl)."""
+    """The last lines of a failing tool's output, on one line and cleaned (`clean`: why it failed). Only for tools
+    that never print a secret (git, uv, tar, dscl, sysadminctl, launchctl)."""
     kept = [line.strip() for line in output.splitlines() if line.strip()][-lines:]
-    return _CONTROL.sub("?", " / ".join(kept))[:600]
+    return clean(" / ".join(kept))[:600]
 
 
 def estia_root() -> Path:
@@ -816,19 +826,37 @@ _SUDO_DEFAULTS = {
     "timestamp_type=global": "one sudo sign-in counts for every program of yours (timestamp_type=global)",
     "!tty_tickets": "one sudo sign-in counts for every program of yours (!tty_tickets)",
 }
+# how long one sudo sign-in lasts in its Terminal window: sudo's own default is 5 minutes; a negative value never ends
+# it, a longer one keeps it open longer (any later program in that window becomes root without the password)
+SUDO_MINUTES = 5.0
+_SUDO_TIMEOUT = re.compile(r'\btimestamp_timeout\s*=\s*"?(-?[0-9]+(?:\.[0-9]+)?)"?')
 SUDO_FIX = (
     f"edit it with {SUDO} {VISUDO} (/etc/sudoers), or {SUDO} {VISUDO} -f <file> for a file in /etc/sudoers.d; "
     f"{HARDEN} removes a file there that holds only rules without the password (it asks first)"
 )
 
 
+def _sudo_timeout(value: str) -> str | None:
+    """Why a timestamp_timeout (minutes) keeps one sudo sign-in open too long, or None when it does not."""
+    minutes = float(value)
+    if minutes < 0:
+        return f"one sudo sign-in never ends in that Terminal window (timestamp_timeout={value})"
+    if minutes > SUDO_MINUTES:
+        return f"one sudo sign-in lasts {value} minutes in that Terminal window, not 5 (timestamp_timeout={value})"
+    return None
+
+
 def sudo_listing(listing: str) -> Check:
     """Your sudo as `sudo -l` lists it (yours, or root's `sudo -l -U <you>`): every rule and Default that applies to
-    you, from /etc/sudoers and /etc/sudoers.d alike. A rule that runs without the password (NOPASSWD) and Defaults
-    that skip it or share one sign-in with every program of yours are named as kinds and counts, never the rules.
-    Not sudo's listing: not read."""
+    you, from /etc/sudoers and /etc/sudoers.d alike. A rule that runs without the password (NOPASSWD), Defaults that
+    skip it or share one sign-in with every program of yours, and a sign-in that lasts longer than sudo's 5 minutes
+    or never ends (timestamp_timeout: the last one for every command, as sudo reads them, and each one for a command
+    of its own, which changes only that command's) are named as kinds and counts, never the rules. Not sudo's listing:
+    not read."""
     rules = 0
     found: list[str] = []
+    timeout: str | None = None  # every command's: the last one listed wins
+    timeouts: list[str] = []  # "Runas and Command-specific defaults": each counts on its own
     section = ""
     read = False
     for raw in listing.splitlines():
@@ -837,16 +865,28 @@ def sudo_listing(listing: str) -> Check:
             continue
         if not raw[:1].isspace():  # a heading: "Matching Defaults entries for …:", "User … may run …:"
             low = line.lower()
-            section = "defaults" if "defaults" in low else "rules" if " may run" in low else ""
+            specific = "command-specific" in low or "runas" in low
+            section = (
+                ("specific" if specific else "defaults") if "defaults" in low else "rules" if " may run" in low else ""
+            )
             read = read or bool(section) or "not allowed to run sudo" in low
             continue
         if section == "rules" and re.search(r"\bNOPASSWD:", line):
             rules += 1
-        elif section == "defaults":
+        elif section in ("defaults", "specific"):
             for token in re.split(r"[\s,]+", line):
                 why = _SUDO_DEFAULTS.get(token)
                 if why and why not in found:
                     found.append(why)
+            for match in _SUDO_TIMEOUT.finditer(line):
+                if section == "defaults":
+                    timeout = match.group(1)
+                else:
+                    timeouts.append(match.group(1))
+    for value in (*([timeout] if timeout is not None else []), *timeouts):
+        why = _sudo_timeout(value)
+        if why and why not in found:
+            found.append(why)
     if not read:
         return Check("sudoers", "warn", PASSWORDLESS, "could not be read", f"{HARDEN} reads it", unread=True)
     if rules:
@@ -862,7 +902,8 @@ def owner_sudo(host: Host) -> Check:
     """Your sudo, read as you without a password (read-only): `sudo -n -k -l` lists your rules without asking only
     when one of them runs without the password (sudo's listpw default) or none needs one; "a password is required"
     means no rule skips it. -k ignores your cached sign-in (it is kept): a sudo used a minute ago proves nothing. The
-    sign-in settings (timestamp_type) need your password: harden reads them, and root for her doctor."""
+    sign-in settings (timestamp_type, timestamp_timeout) need your password: then only the rules are read here; harden
+    reads them once sudo is asked, and root for her doctor."""
     if host.dry_run:  # a dry run never runs sudo, not even to list
         return Check("sudoers", "warn", PASSWORDLESS, "not read in a dry run (sudo is not run there)", unread=True)
     code, out = host.run([SUDO, "-n", "-k", "-l"], read_only=True)
@@ -1117,7 +1158,9 @@ def account_file(signal_data: Path, entry: dict[str, Any]) -> dict[str, Any] | N
 def signal_account(signal_data: Path, number: str) -> dict[str, Any] | None:
     """signal-cli's own account file for the number (accounts.json names it), without a number the only account there;
     None when there is none or it cannot be read. It holds her keys: callers take one fact from it, never pass it on.
-    Doctor, setup and the move all read it here (`read_json`: no link followed, no FIFO waited on)."""
+    Doctor, setup and the move all read it here (`read_json`: no link at the file's own name followed, no FIFO
+    waited on; a link in a folder on the way is followed, so the move walks her folders for one first, and a link
+    made after that walk is caught by the walk of her copy before she starts)."""
     try:
         matches = signal_listed(signal_data, number)
     except (OSError, ValueError):

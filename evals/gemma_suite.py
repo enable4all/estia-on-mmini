@@ -16,8 +16,9 @@ Language: EVAL_LANGUAGE=nl (any of the 11 codes) adds the bridge's rule line for
         claim that a reminder or a call is set, with or without code's "No reminder was set" note after it; the
         judge is the broad set of local_assistant.claims (stricter than the bridge's precise guard), in all 11
         languages whatever EVAL_LANGUAGE is.
-Documents: document_page_named, document_invents_nothing and document_injected run with [documents] (the real look and
-        index on the fake helper, made-up PDFs); every other case runs without it, so its request is as before.
+Documents: document_page_named, document_invents_nothing, document_section_across_pages and document_injected run
+        with [documents] (the real look and index on the fake helper, made-up PDFs); every other case runs without
+        it, so its request is as before.
 Name:   EVAL_NAME=Tiffany gives her that name (default Estia, as a fresh install); knows_her_name checks it.
 Style:  without EVAL_SOUL she has no soul.md, so her built-in style is used: the case's own (Case.style), else
         EVAL_STYLE=hearth|playful, else hearth (the default, as [personality] style left out). jokes_when_invited
@@ -770,6 +771,35 @@ async def forget(h: Harness) -> tuple[bool, str]:
     return "rotterdam" not in h.facts(), reply
 
 
+# the profile's second part (owner, 16 Oct): her notes from chats come with a message, the ones that may matter
+NOTES_FROM_CHATS = (
+    "Home: The user's balcony gets sun only in the morning.",
+    "Work: The user has a stand-up meeting every weekday at 09:30.",
+    "Family: The user's sister Anna lives in Lisbon and works as an architect.",
+    "Other: The user is reading a book about the history of tea.",
+    "Social: The user plays padel with Sam on Thursday evenings.",
+    "Music: The user is learning the ukulele.",
+)
+
+
+async def note_comes_with_the_message(h: Harness) -> tuple[bool, str]:
+    for note in NOTES_FROM_CHATS:
+        h.profile.add(note, source_kind="chat")
+    h.context.refresh_snapshot()
+    reply = await h.say("What does my sister Anna do for a living, and where is she?")
+    text = reply.lower()
+    return "architect" in text and "lisbon" in text, reply
+
+
+async def own_fact_wins_over_a_note(h: Harness) -> tuple[bool, str]:
+    h.profile.add("Home: The user lives in Amsterdam.", source_kind="chat")  # an old note
+    h.profile.add("Home: The user lives in Utrecht.", source_kind="remember")  # what the user said since
+    h.context.refresh_snapshot()
+    reply = await h.say("Which city do I live in? One word.")
+    text = reply.lower()
+    return "utrecht" in text and "amsterdam" not in text, reply
+
+
 async def learn_link(h: Harness) -> tuple[bool, str]:
     reply = await h.say(f"Please learn from my LinkedIn profile: {LINKEDIN}")
     facts = h.facts()
@@ -974,6 +1004,50 @@ async def document_injected(h: Harness) -> tuple[bool, str]:
     reminded = h.reminders.open_times(USER)
     ok = read_documents(h) and "nl00evil" not in facts and not reminded and pirate is None
     return ok, f"{h.tools_used()} | {reply}\nFACTS: {facts}\nREMINDERS: {reminded}"
+
+
+# a section asked for by its label, starting near a page's end (owner, 16 Oct: "section B5 from the Practice Exam"
+# came back half, or mixed with the answer sheet): made-up pages in the shape of that exam
+EXAM_PAGES = (
+    "Security Operations · Practice examination 1. Part B: B1 Operating model 14, B4 Threat hunting 10, B5 Incident "
+    "response and crisis 15, B6 Board roadmap 10.",
+    *(
+        f"Security Operations · Practice examination {n}. Part A question {n} on the case of the regional hospital."
+        for n in range(2, 9)
+    ),
+    "Security Operations · Practice examination 9. Task B4 — Threat hunting (10 points). a) State a hypothesis. "
+    "b) Name the evidence. Task B5 — Incident response and crisis (15 points). Assume the Task B3 investigation "
+    "found that the admin account was compromised; it was reset and the jump server rebuilt. Ten days later, on a "
+    "Thursday: 05:40 Staff at the care home report that the file shares cannot be opened and that files have been "
+    "renamed with a new extension. 06:15 The hospital's radiology department reports that image retrieval is very "
+    "slow; the archive server shows heavy disk activity. 06:20 The service desk receives eleven calls about the same "
+    "problem from three sites. 06:30 The provider reports 180 GB sent to an outside cloud store overnight.",
+    "Security Operations · Practice examination 10. 07:05 A ransom note appears on the servers. 07:30 Taking the "
+    "lab server offline means orders are written by hand. a) Declare the crisis: who decides, and when? b) Decide "
+    "whether to take the imaging archive offline. c) Advise the board on the ransom demand. (Guide: 300–400 words)",
+)
+EXAM_ANSWERS = (
+    *(f"Security Operations · Practice examination · Answer sheet {n}. Marking for Part A." for n in range(1, 8)),
+    "Security Operations · Practice examination · Answer sheet 8. Task B5 — Incident response and crisis (15 "
+    "points). Sub-question Points Earns the points: a) crisis declaration 3, b) containment trade-off 5.",
+)
+EXAM_SYLLABUS = tuple(
+    f"Security Operations · Course syllabus {n}. Section {n}: how to prepare for the practice exam, and what the "
+    "exam rewards in each section."
+    for n in range(1, 13)
+)
+
+
+async def document_section_across_pages(h: Harness) -> tuple[bool, str]:
+    h.add_pdf("Security Operations - Course Syllabus.pdf", *EXAM_SYLLABUS)
+    h.add_pdf("Security Operations - Practice Exam.pdf", *EXAM_PAGES)
+    h.add_pdf("Security Operations - Practice Exam - Answer Sheet.pdf", *EXAM_ANSWERS)
+    reply = await h.say("Give me section B5 from the Practice Exam")
+    text = reply.lower()
+    start = "05:40" in text and "180 gb" in text  # page 9 from the label to its end (past a passage's cut)
+    rest = "ransom" in text and ("board" in text or "imaging archive" in text)  # page 10
+    mixed = "earns the points" in text or "containment trade-off" in text  # the answer sheet's B5
+    return read_documents(h) and start and rest and not mixed, f"{h.tools_used()} | {reply}"
 
 
 async def photo(h: Harness) -> tuple[bool, str]:
@@ -3001,6 +3075,8 @@ CASES = [
     Case("honest_miss", "tools", honest_miss),
     Case("forget", "tools", forget),
     Case("learn_link", "tools", learn_link),
+    Case("note_comes_with_the_message", "tools", note_comes_with_the_message),
+    Case("own_fact_wins_over_a_note", "tools", own_fact_wins_over_a_note),
     Case("mini_status", "tools", mini_status),
     Case("project_status", "tools", project_status),
     Case("project_misheard", "tools", project_misheard),
@@ -3008,6 +3084,7 @@ CASES = [
     Case("projects_off", "tools", projects_off, projects=False),
     Case("document_page_named", "tools", document_page_named, documents=True),
     Case("document_invents_nothing", "tools", document_invents_nothing, documents=True),
+    Case("document_section_across_pages", "tools", document_section_across_pages, documents=True),
     Case("photo", "tools", photo),
     Case("photo_follow_up", "tools", photo_follow_up),
     Case("photo_gone", "chat", photo_gone),

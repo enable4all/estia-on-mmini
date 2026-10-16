@@ -84,6 +84,28 @@ async def test_read_gives_one_page_and_defaults_to_the_first(store: Store, docum
     assert store.tool_calls(asked.message.id)[0].result.startswith("(read_document result not kept")
 
 
+async def test_read_goes_on_to_last_page_and_search_keeps_to_a_named_document(
+    store: Store, documents: Documents, folder: Path
+) -> None:
+    """A section past its page's end: read_document's last_page (at most 3 pages); search_documents' document."""
+    pdf(folder / "house rules.pdf", "Pets: no dogs in the garden.")
+    tools = tools_with(store, documents)
+    asked = turn(store, "Give me the whole lease")
+    read = await tools.call(asked, "read_document", '{"document": "lease", "page": 1, "last_page": "3"}')
+    assert read.index("page 1 of 3") < read.index("page 2 of 3") < read.index("page 3 of 3")
+    bad = await tools.call(asked, "read_document", '{"document": "lease", "page": 2, "last_page": 1}')
+    assert bad.startswith("Error: last_page must be the page or a later one")
+    worse = await tools.call(asked, "read_document", '{"document": "lease", "last_page": "end"}')
+    assert worse.startswith("Error: last_page must be a whole number")
+    both = await tools.call(asked, "search_documents", '{"words": "pets"}')
+    kept = await tools.call(asked, "search_documents", '{"words": "pets", "document": "house rules"}')
+    assert '"lease.pdf"' in both and '"house rules.pdf"' in both
+    assert '"house rules.pdf", page 1' in kept and '"lease.pdf"' not in kept
+    names = {schema["function"]["name"]: schema["function"]["parameters"]["properties"] for schema in DOCUMENT_SCHEMAS}
+    assert set(names["search_documents"]) == {"words", "document"}
+    assert set(names["read_document"]) == {"document", "page", "last_page"}
+
+
 async def test_on_a_call_she_answers_from_the_index_only(
     store: Store, documents: Documents, folder: Path, state: Path
 ) -> None:

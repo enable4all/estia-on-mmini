@@ -218,6 +218,47 @@ def test_a_failure_after_its_fix_was_saved_is_failing_again(tmp_path: Path) -> N
     assert (again.state, again.text) == ("failing", "failing since 11:40: secret address no longer works")
 
 
+def test_a_warning_keeps_the_part_working_with_a_mark_and_its_fix(tmp_path: Path) -> None:
+    """Live, 15 Oct: Vision failed under her account while text pages still read, and the line said working. A failed
+    warm-up is the documents part's warning: "!" with its fix in doctor and /status, kept from its first time through
+    reads that work (text pages), under a failure, and gone only when text recognition works again."""
+    path = tmp_path / "status.json"
+    clock = Clock()
+    status = PartStatus(path, clock=clock)
+    status.ok("documents")
+    status.warn("documents", "ocr_unavailable")
+    assert saved(path)["documents"] == {"ok": NOW, "warning": "ocr_unavailable", "warned": NOW}
+    clock.now = NOW + 3_600
+    status.ok("documents")  # a text page read: the warning stays, from its first time
+    status.warn("documents", "ocr_unavailable")
+    record = read(path)["documents"]
+    assert (record.ok, record.warning, record.warned) == (NOW + 3_600, "ocr_unavailable", NOW)
+    line = describe("documents", record, NOW + 3_600, TZ)
+    assert line.state == "warning"
+    assert line.text == "working, last read 12:40; since 11:40: scanned pages not read (text recognition failed)"
+    assert line.fix == prompts.PART_FIXES["documents/ocr_unavailable"] and "restart" in line.fix
+    assert line.line() == f"Documents: ! {line.text} → {line.fix}"
+    status.failed("documents", "not_shared")  # a failure is what shows (✗), the warning kept under it
+    assert describe("documents", read(path)["documents"], NOW + 3_600, TZ).state == "failing"
+    assert read(path)["documents"].warning == "ocr_unavailable"
+    status.ok("documents")
+    assert describe("documents", read(path)["documents"], NOW + 3_600, TZ).state == "warning"
+    status.unwarn("documents")
+    assert describe("documents", read(path)["documents"], NOW + 3_600, TZ).state == "working"
+    assert "warning" not in saved(path)["documents"]
+
+
+def test_a_warning_before_any_read_is_kept(tmp_path: Path) -> None:
+    """The warm-up runs at the start, before the first look: its warning alone is a record."""
+    path = tmp_path / "status.json"
+    PartStatus(path, clock=lambda: NOW).warn("documents", "ocr_unavailable")
+    line = describe("documents", read(path)["documents"], NOW, TZ)
+    assert line.state == "warning"
+    assert line.text == "set up, not tested yet; since 11:40: scanned pages not read (text recognition failed)"
+    PartStatus(path, clock=lambda: NOW).unwarn("documents")
+    assert "documents" not in read(path)
+
+
 def test_each_part_has_its_label_verb_and_fix() -> None:
     old = NOW - 2 * 86_400
     mail = describe("mail:family", Record(failed=old, reason="sign_in"), NOW, TZ)

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Set Estia up step by step: tools, the model for this Mac, her Signal number, who may talk to her, the config,
-# always on, then the extras you pick. Safe to run again: done steps are skipped. --dry-run prints without doing.
+# Set Estia up step by step: tools, Ollama's official build, the model for this Mac, her Signal number, who may talk
+# to her, the config, always on, then the extras you pick. Safe to run again: done steps are skipped. --dry-run prints
+# without doing. Ollama is never Homebrew's (it lacks the MLX engine's JSON-schema library): setup's Python step keeps
+# the official build that answers, or installs it, checked, as a background service.
 # No key or password passes through this script; Signal's one-time captcha link and SMS code are typed hidden.
 # Run it in your own Terminal window: it asks questions and one-time codes (an AI's command tool has no terminal).
 set -euo pipefail
@@ -26,7 +28,7 @@ on_path() {  # Homebrew on PATH for this run, and its line in the login profile 
   eval "$("$homebrew/bin/brew" shellenv)"
   grep -qs "brew shellenv" "$profile" && return 0  # a line of its own or of Homebrew's: kept as it is
   if [[ -n "$dry" ]]; then
-    echo "Homebrew: would add $line to $profile, so new Terminal windows find brew, uv and ollama"
+    echo "Homebrew: would add $line to $profile, so new Terminal windows find brew and uv"
   else
     printf '\n%s\n' "$line" >> "$profile"
     echo "✓ Homebrew: added to new Terminal windows ($line in $profile)"
@@ -51,16 +53,17 @@ elif ! command -v brew >/dev/null; then
   on_path
 fi
 missing=()
-for tool in signal-cli ollama uv; do command -v "$tool" >/dev/null || missing+=("$tool"); done
+for tool in signal-cli uv; do command -v "$tool" >/dev/null || missing+=("$tool"); done
 if ((${#missing[@]})); then run brew install "${missing[@]}"; fi
 if [[ -n "$dry" ]]; then
-  echo "  (signal-cli must be 0.14.x; Ollama, when it does not answer: brew services start ollama, or its app)"
+  echo "  (signal-cli must be 0.14.x)"
   run uv python install 3.13
   run uv sync --frozen
   if [[ -x .venv/bin/python ]]; then exec .venv/bin/python -m local_assistant.setup "$@"; fi
-  echo "Then: the model for this Mac's memory, her Signal number (captcha link and SMS code typed hidden),"
-  echo "your account (a one-time word you send her), the config, always on in her own user (asks for your password),"
-  echo "the security step (each change on your yes), and the extras."
+  echo "Then: Ollama's official build (kept when it answers; else downloaded from GitHub, checked, and always on:"
+  echo "your Mac password once), the model for this Mac's memory, her Signal number (captcha link and SMS code typed"
+  echo "hidden), your account (a one-time word you send her), the config, always on in her own user (asks for your"
+  echo "password), the security step (each change on your yes), and the extras."
   exit 0
 fi
 # registration and the bridge use signal-cli 0.14's requests: another version fails later, with an obscure error
@@ -70,21 +73,7 @@ if [[ "$version" != "signal-cli 0.14."* ]]; then
   echo "Install signal-cli 0.14.x (brew install signal-cli, or brew upgrade signal-cli), then run setup again." >&2
   exit 1
 fi
-echo "✓ Tools: signal-cli, ollama, uv"
-ollama_up() { curl -s --max-time 2 http://127.0.0.1:11434/api/version >/dev/null; }
-if ! ollama_up; then
-  if brew list --formula ollama >/dev/null 2>&1; then  # Homebrew's Ollama: its service
-    run brew services start ollama
-  elif [[ -d "${ESTIA_TEST_ROOT:-}/Applications/Ollama.app" ]]; then  # the app from ollama.com
-    run open -a Ollama
-  fi
-  for _ in $(seq 1 30); do ollama_up && break; sleep 1; done
-  if ! ollama_up; then
-    echo "Ollama does not answer yet. Start it (open the Ollama app, or brew services start ollama when Homebrew" >&2
-    echo "installed it), then run setup again." >&2
-    exit 1
-  fi
-fi
+echo "✓ Tools: signal-cli, uv"
 run uv python install 3.13
 run uv sync --frozen --quiet
 exec uv run --quiet python -m local_assistant.setup "$@"

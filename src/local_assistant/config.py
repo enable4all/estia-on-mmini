@@ -12,6 +12,7 @@ import re
 import stat
 import subprocess
 import tomllib
+import unicodedata
 import urllib.parse
 import uuid
 from dataclasses import dataclass, field
@@ -307,7 +308,9 @@ class Config:
     window_tokens: int = 12_000
     emergency_tokens: int = 20_000
     summary_tokens: int = 500
-    profile_max_chars: int = 6_000
+    profile_max_chars: int = 4_000  # the user's own facts, in every prompt (owner, 16 Oct)
+    notes_max_chars: int = 12_000  # her notes from chats; only the ones that may matter come with a message
+    notes_per_message_chars: int = 1_500  # those notes, at most, in the user's newest message before its words
     fact_max_chars: int = 300
     idle_learn_seconds: float = 1_800
     soon_learn_seconds: float = 60
@@ -725,9 +728,10 @@ def check_name(value: object) -> str:
 
 def default_avatar(name: str) -> Path | None:
     """The picture for an `avatar` left out (owner, 15 Oct): for a name other than Estia, its first letter, a to z,
-    with Estia's orange full stop ("t." for ours, Tiffany, docs/brand/letters, drawn by docs/brand/source/letters.py); else,
-    and for any other first letter, Estia's e. None when the repo's file is not there."""
-    letter = name[:1].lower()
+    with Estia's orange full stop ("t." for ours, Tiffany, docs/brand/letters, drawn by docs/brand/source/letters.py),
+    an accented letter as its base letter (NFKD: Á, É, Ñ, Ö); else, and for any other first letter (another script, or
+    Ø and Ł, which have no base letter), Estia's e. None when the repo's file is not there."""
+    letter = unicodedata.normalize("NFKD", name[:1])[:1].lower()
     if name.casefold() != DEFAULT_NAME.casefold() and len(letter) == 1 and "a" <= letter <= "z":
         picture = LETTER_AVATARS / f"{letter}.png"
         if picture.is_file():

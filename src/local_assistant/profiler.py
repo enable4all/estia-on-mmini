@@ -229,7 +229,7 @@ class Profiler:
             conversation.append(
                 {
                     "role": "user",
-                    "content": prompts.OVER_CAP.format(limit=self._profile.max_chars, over=result.over_cap_by),
+                    "content": prompts.OVER_CAP.format(limit=self._profile.notes_max_chars, over=result.over_cap_by),
                 }
             )
             operations = await self._ask_ops(conversation, valid_ids, effort=effort)
@@ -278,14 +278,21 @@ class Profiler:
         return True
 
     async def consolidate_for(
-        self, fact: str, source_message_id: int | None, source_kind: SourceKind, source_document_id: int | None
+        self,
+        fact: str,
+        source_message_id: int | None,
+        source_kind: SourceKind,
+        source_document_id: int | None,
+        allowed_url: str | None = None,
     ) -> ApplyResult:
-        """remember() hit the cap: Gemma merges or drops facts so the new one fits (Hermes pattern).
+        """remember() hit the user's part's limit: Gemma merges or shortens their facts so the new one fits (Hermes
+        pattern); a fact it removes moves into her notes, never gone (owner, 16 Oct). Only the user's part is shown:
+        her notes have their own limit and free nothing here.
 
         The user is waiting for this answer, so Gemma does not think first.
         """
         over = self._profile.used_chars() + len(fact.strip()) - self._profile.max_chars
-        facts = "\n".join(f"#{f.id}: {f.text}" for f in self._profile.facts())
+        facts = "\n".join(f"#{f.id}: {f.text}" for f in self._profile.yours())
         prompt = prompts.CONSOLIDATE.format(
             limit=self._profile.max_chars,
             over=max(over, 1),
@@ -294,14 +301,20 @@ class Profiler:
         )
         conversation: list[dict[str, Any]] = [
             {"role": "system", "content": prompts.PROFILER_RULES},
-            {"role": "user", "content": f"{prompt}\n\nCURRENT PROFILE (fact_id: text)\n{facts}"},
+            {"role": "user", "content": f"{prompt}\n\nTHE USER'S PART OF THE PROFILE (fact_id: text)\n{facts}"},
         ]
         valid = {source_message_id} if source_message_id is not None else set()
         operations = await self._ask_ops(conversation, valid, effort="none")
         operations = [
             dataclasses.replace(o, source_message_id=source_message_id) if o.action == "add" else o for o in operations
         ]
-        return self._profile.apply(operations, source_kind=source_kind, source_document_id=source_document_id)
+        return self._profile.apply(
+            operations,
+            source_kind=source_kind,
+            source_document_id=source_document_id,
+            allowed_url=allowed_url,  # a link fact keeps its page's own link through the strict check
+            remove_to_notes=True,
+        )
 
     async def learn_page(self, page: Page, source_message_id: int | None, document_id: int) -> ApplyResult:
         """A page the user asked to learn from: one structured Gemma call extracts the facts about the user,
@@ -369,12 +382,16 @@ class Profiler:
             self._store.set_state(UNANNOUNCED_KEY, str(unannounced + changes))
 
     def _learn_prompt(self, batch: list[Message]) -> str:
-        facts = "\n".join(f"#{f.id}: {f.text}" for f in self._profile.facts()) or "(empty)"
+        """Both parts, by number: the user's own facts (never changed by learning: `Profile.apply` keeps them) and
+        her notes, which learning adds to, merges and tidies within their own limit."""
+        yours = "\n".join(f"#{f.id}: {f.text}" for f in self._profile.yours()) or "(empty)"
+        notes = "\n".join(f"#{f.id}: {f.text}" for f in self._profile.notes()) or "(empty)"
         lines = "\n".join(
             f"#{m.id} {local_stamp(m.signal_ts, self._tz) if m.signal_ts else ''} {m.text}" for m in batch
         )
         return (
-            f"CURRENT PROFILE (fact_id: text)\n{facts}\n\n"
+            f"CURRENT PROFILE: THE USER'S OWN FACTS (fact_id: text; never replace or remove these)\n{yours}\n\n"
+            f"CURRENT PROFILE: YOUR NOTES FROM EARLIER CHATS (fact_id: text)\n{notes}\n\n"
             f"NEW MESSAGES FROM THE USER (message id, local time, text)\n{lines}"
         )
 

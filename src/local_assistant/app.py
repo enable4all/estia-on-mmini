@@ -270,7 +270,13 @@ class App:
         self.guard.seed()
         self._start_up_waits = False  # the reminders' start-up check, put off while locked
         self._identity_changed: set[str] = set()  # accounts whose safety number changed since the start (memory only)
-        self.profile = Profile(store, max_chars=cfg.profile_max_chars, fact_max_chars=cfg.fact_max_chars)
+        self.profile = Profile(
+            store,
+            max_chars=cfg.profile_max_chars,
+            notes_max_chars=cfg.notes_max_chars,
+            notes_per_message=cfg.notes_per_message_chars,
+            fact_max_chars=cfg.fact_max_chars,
+        )
         # her list of what she can do names the Mac's security level: read at the start and every 4 hours (None: not
         # read yet, or off the live Mac)
         self._read_security_level = security_level or (lambda: hostsec.mac_security_level(Path.home(), cfg.bot_number))
@@ -1492,6 +1498,9 @@ class App:
                 file = await documents.save(data, attachment.filename, when)
             except DocumentError as exc:
                 log.warning("message %d: a PDF not saved: %s", message.id, exc.code)
+                if exc.code == "not_shared" and documents is not None and not_estia_kb(documents.folder):
+                    notes.append(prompts.DOCUMENT_NOT_KB.format(folder=shown_folder(documents.folder)))  # as /docs
+                    continue
                 notes.append(prompts.DOCUMENT_NOT_SAVED.get(exc.code, prompts.DOCUMENT_NOT_SAVED["failed"]))
                 continue
             except (SignalError, NotAllowedError) as exc:
@@ -1848,6 +1857,8 @@ class App:
             log.warning("message %d: learning from a page failed: %s", message.id, exc)
             return "I read the page but could not take the facts from it right now. Try again in a bit."
         self.context.refresh_snapshot()
+        if result.over_cap_by:  # one batch: nothing of it was saved
+            return prompts.LEARN_FULL.format(limit=self.profile.max_chars, over=result.over_cap_by)
         added = [fact for fact in self.profile.facts() if fact.id in result.added]
         lines = [f"Learned from {page.title or page.final_url}:"]
         lines += [f"Saved #{fact.id}: {fact.text}" for fact in added] or ["Nothing new: I already know what it says."]

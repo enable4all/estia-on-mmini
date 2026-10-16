@@ -5,7 +5,7 @@
   <img src="docs/brand/estia-hero-light.png" alt="A stone garden seen from above, its gravel raked in rings around a Mac mini" width="100%">
 </picture>
 
-**An insanely secure AI thinking partner living at home, on your own Mac.** Estia (Εστία, the hearth) runs on one Mac at home and is reached only through Signal: encrypted texts, voice notes and calls. Name her what you like. Ours is called Tiffany. Estia started as Tiffany, our own thinking partner, before she was opened up for every home.
+**An insanely secure AI thinking partner living at home, on your own Mac.** Estia (Εστία, the hearth) runs on one Mac at home and is reached only through Signal: encrypted texts, voice notes and calls. Name her what you like. Ours is called Tiffany. Estia started as Tiffany, our own thinking partner, before she was opened up for every home. Her Signal picture is her name's first letter with Estia's orange full stop, accents left out (Ángela gets an a.); a first letter outside a to z even then, such as Greek or Chinese, keeps Estia's e.
 
 Website: [estia.fun](https://estia.fun)
 
@@ -13,7 +13,7 @@ Website: [estia.fun](https://estia.fun)
 
 Insanely secure, and every claim can be checked in the open-source code.
 
-- **Local.** Gemma, Google's open AI model, runs on the Mac through the Ollama app; a cloud model, which Ollama runs on its own servers, is refused. No cloud AI service, no account with us, no telemetry. Chats, memory and profile stay on the Mac.
+- **Local.** Gemma, Google's open AI model, runs on the Mac through Ollama's official build; a cloud model, which Ollama runs on its own servers, is refused. No cloud AI service, no account with us, no telemetry. Chats, memory and profile stay on the Mac.
 - **Read-only mail and calendars.** She never sends, moves, deletes or marks mail, and never changes a calendar event.
 - **Lights and plugs follow a rule set per device.** Each device is `normal`, `ask first` or `never off` (switching it off is refused). A device change after outside text waits for your yes.
 - **Only Signal.** Reached through Signal on your phone or Signal Desktop on your laptop. No web app and no open port: the bridge listens on nothing, so nothing on the network can connect to her. Messages travel end-to-end encrypted through Signal. Only the Signal accounts in the config get an answer.
@@ -29,7 +29,7 @@ One line and one example each. Every detail and limit: [What she can do](GUIDE.m
 
 - **Chat.** A short, direct answer. The conversation is remembered. Example: "What's a good question to ask about free will?"
 
-- **Memory.** Saves what you tell her. Facts can be listed, corrected or removed. Example: "Remember that …", then `/profile`, `/fix` or `/forget`.
+- **Memory.** Saves what you tell her, known in every message, and notes from your chats, given when they matter. Facts can be listed, corrected or removed. Example: "Remember that …", then `/profile`, `/fix` or `/forget`.
 
 - **Reminders.** A text at that time: once, every day, every weekday or every week. A reminder is set only when a note from the code, not from the AI, says so. Example: "Remind me at 17:00 to call the dentist".
 
@@ -81,7 +81,7 @@ One line and one example each. Every detail and limit: [What she can do](GUIDE.m
 
 ## Install
 
-**1. A Mac and a number.** A Mac with Apple silicon and 16 GB of memory or more, plus a spare phone number for her Signal account.
+**1. A Mac and a number.** A Mac with Apple silicon and 16 GB of memory or more, plus a spare phone number for her Signal account. On 16 or 24 GB the smaller model failed some of her safety tests (SECURITY.md, known gaps). 32 GB with Gemma 26B is the tested setup.
 
 **2. Two lines, in your own Terminal window.** Setup asks its questions there, and the Signal codes, passwords and keys are typed hidden.
 
@@ -92,7 +92,7 @@ scripts/setup.sh
 
 **3. Check.** Setup is done when `/usr/bin/sudo /usr/local/estia/bin/estia doctor` shows no ✗ and her welcome message has arrived on your phone: reply to it to see her answer.
 
-**How long:** downloads and builds take about 30 minutes on a 100 Mbit/s line, most of it the model download (18.7 GB); about 15 minutes on a Mac with 16 or 24 GB of memory, where the model is 8.0 GB. Voice adds about 15 minutes while her voice loads, after its build and a 1.7 GB download (about 4 minutes). Each step, measured or computed: [How long it takes](GUIDE.md#how-long-it-takes).
+**How long:** downloads and builds take about 30 minutes on a 100 Mbit/s line, most of it the model download (18.3 GB); about 15 minutes on a Mac with 16 or 24 GB of memory, where the model is 7.7 GB. Voice adds about 15 minutes while her voice loads, after its build and a 1.7 GB download (about 4 minutes). Each step, measured or computed: [How long it takes](GUIDE.md#how-long-it-takes).
 
 A Mac without Apple's Command Line Tools, which hold git, asks to install them in a window on its own screen. Over a remote login (SSH), run Homebrew's installer first, which installs them (your Mac password once): `/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`, then the two lines above.
 

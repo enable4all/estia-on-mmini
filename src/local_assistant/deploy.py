@@ -50,6 +50,7 @@ from pathlib import Path
 
 from local_assistant import ownuser
 from local_assistant.hostsec import CHOWN, LAUNCHCTL, RM, SUDO, Host, estia_root, tail
+from local_assistant.hostsec import clean as clean  # one rule for what root prints, kept here by its name
 
 ENV = "/usr/bin/env"
 GIT = "/usr/bin/git"
@@ -88,6 +89,9 @@ DOCUMENTS = Path("tools/documents")
 DOCUMENTS_BINARY = DOCUMENTS / ".build/release/documents-helper"  # config's default helper: a checkout's path too
 DOCUMENTS_CHECK = DOCUMENTS / "check.pdf"  # one text page the new build reads before the release is frozen
 DOCUMENTS_CHECK_TEXT = "This page is read after every build of the documents helper."
+# a JVM signal-cli in a vendor/ folder: the only name taken (the folder names are the owner's to choose, and the review
+# prints them to root's terminal); anything else stops the deploy, named in escaped form
+JVM_ITEM = re.compile(r"signal-cli-[0-9][0-9A-Za-z.+-]*-jvm/signal-cli-[0-9][0-9A-Za-z.+-]*")
 
 
 class DeployError(Exception):
@@ -157,14 +161,6 @@ def read_calls(config: Path) -> bool:
     return ownuser.calls_in(text)
 
 
-_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
-
-
-def clean(text: str) -> str:
-    """Owner-written text (a commit subject, a file name) made safe to print: no escape sequences."""
-    return _CONTROL.sub("?", text)
-
-
 def ask_terminal(question: str) -> bool:
     """A yes from the terminal; without one (no terminal, end of input) it is a no."""
     if not sys.stdin.isatty():
@@ -196,9 +192,9 @@ def _check_links(tree: Path) -> None:
             rel = os.path.relpath(path, tree)
             target = os.path.realpath(path)
             if target != real and not target.startswith(f"{real}/"):
-                raise DeployError(f"{rel}: a link out of the release")
+                raise DeployError(f"{clean(rel)}: a link out of the release")
             if not os.path.exists(path):
-                raise DeployError(f"{rel}: a link to nothing")
+                raise DeployError(f"{clean(rel)}: a link to nothing")
 
 
 def _walk_build(top: Path, uid: int, final: Path, copy_to: Path | None) -> None:
@@ -427,7 +423,9 @@ class Deploy:
         for source, rel in items:
             old = tree_digest(self.current / "vendor" / rel)
             if old is None or old != self.reviewed[rel]:
-                lines.append(f"  {'new' if old is None else 'changed'}: vendor/{rel} (from {clean(str(source))})")
+                lines.append(
+                    f"  {'new' if old is None else 'changed'}: vendor/{clean(str(rel))} (from {clean(str(source))})"
+                )
         names = {rel.parts[0] for _source, rel in items}
         listed = self.live_meta().get("vendor")
         for name in listed if isinstance(listed, list) else []:
@@ -441,7 +439,7 @@ class Deploy:
         live = str(self.live_meta().get("sha", ""))
         programs = self.vendor_review()
         if not re.fullmatch(r"[0-9a-f]{7,64}", live):
-            self.say(f"First release from {self.checkout}: commit {sha[:12]}.")
+            self.say(f"First release from {clean(str(self.checkout))}: commit {sha[:12]}.")
         elif sha.startswith(live) and programs:
             self.say(f"Commit {sha[:12]} is live already; only her programs from outside git change:")
         elif sha.startswith(live):
@@ -452,7 +450,7 @@ class Deploy:
                 read_only=True,
             )
             if code != 0:
-                self.say(f"The live commit {live} is not in {self.checkout}: what changed cannot be shown.")
+                self.say(f"The live commit {live} is not in {clean(str(self.checkout))}: what changed cannot be shown.")
             else:
                 lines = log.splitlines()
                 self.say(f"{len(lines)} new commit(s) since the live {live}:")
@@ -502,7 +500,13 @@ class Deploy:
                 continue
             for jvm in sorted(root.glob("signal-cli-*-jvm/signal-cli-*")):
                 if (jvm / "bin" / "signal-cli").is_file():
-                    found.setdefault(jvm.relative_to(root), jvm)
+                    rel = jvm.relative_to(root)
+                    if not JVM_ITEM.fullmatch(str(rel)):
+                        raise DeployError(
+                            f"vendor item {str(rel)!a} in {clean(str(root))}: only a name like "
+                            "signal-cli-0.14.9-jvm/signal-cli-0.14.9 is taken; rename or remove it"
+                        )
+                    found.setdefault(rel, jvm)
             if (root / TUNNEL).is_file():
                 found.setdefault(TUNNEL, root / TUNNEL)
             if (root / NATIVE / "bin" / "signal-cli").is_file():
@@ -688,7 +692,9 @@ class Deploy:
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(self.clock()))
         release = self.releases / f"{stamp}-{sha[:12]}"
         if dirty:
-            self.say(f"note: uncommitted changes in {self.checkout} are not deployed (only commit {sha[:12]})")
+            self.say(
+                f"note: uncommitted changes in {clean(str(self.checkout))} are not deployed (only commit {sha[:12]})"
+            )
         if release.exists():
             raise DeployError(f"{release.name} exists already")
         if self.dry:
@@ -736,7 +742,7 @@ class Deploy:
             return
         for rel, shown in self.reviewed.items():
             if tree_digest(release / "vendor" / rel) != shown:
-                raise DeployError(f"vendor/{rel} changed after the review: run the deploy again to see it")
+                raise DeployError(f"vendor/{clean(str(rel))} changed after the review: run the deploy again to see it")
         shown_names = {rel.parts[0] for rel in self.reviewed}
         with contextlib.suppress(FileNotFoundError):
             for name in sorted(os.listdir(release / "vendor")):
@@ -1019,7 +1025,7 @@ class Deploy:
                 return 1
             release = self.build_release(sha, dirty)
         except DeployError as exc:
-            self.say(f"✗ deploy stopped, nothing switched: {exc}")
+            self.say(f"✗ deploy stopped, nothing switched: {clean(str(exc))}")
             return 1
         if not restart:
             self.switch(release)
@@ -1030,7 +1036,7 @@ class Deploy:
         try:
             plists = self.services(release)
         except DeployError as exc:
-            self.say(f"✗ deploy stopped, nothing switched: {exc}")
+            self.say(f"✗ deploy stopped, nothing switched: {clean(str(exc))}")
             if not self.dry:
                 shutil.rmtree(release, ignore_errors=True)
             return 1
@@ -1103,7 +1109,7 @@ def main(argv: list[str] | None = None) -> int:
             uv = "/opt/homebrew/bin/uv"
         run = Deploy(host, who, checkout, uv=uv, keep=args.keep, voice=args.voice, vendor=args.vendor)
     except DeployError as exc:
-        print(f"✗ {exc}", file=sys.stderr)
+        print(f"✗ {clean(str(exc))}", file=sys.stderr)
         return 1
     return run.run()
 

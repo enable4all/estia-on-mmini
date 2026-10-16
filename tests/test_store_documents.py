@@ -47,6 +47,35 @@ def test_upgrade_from_version_9_adds_the_index_and_keeps_attachments(tmp_path: P
     store.close()
 
 
+def test_upgrade_from_version_11_gives_every_file_the_reader_from_before(tmp_path: Path) -> None:
+    """v12: the reader that read each file (documents.INDEX_VERSION). A row from before, or one an older release writes
+    after a rollback, is reader 1: the reader before Foundation's home was set (15 Oct), whose skipped pages are read
+    again."""
+    path = tmp_path / "data" / "assistant.db"
+    old = Store.open(path)
+    old.put_doc_file("scan.pdf", 10, 1, [], page_count=1, skipped=((1, "unreadable"),))
+    old.close()
+    conn = sqlite3.connect(path)
+    conn.execute("ALTER TABLE doc_files DROP COLUMN reader")
+    conn.execute("PRAGMA user_version = 11")
+    conn.commit()
+    conn.close()
+    store = Store.open(path)
+    assert SCHEMA_VERSION == 13 and store._conn.execute("PRAGMA user_version").fetchone()[0] == 13  # v13: in_notes
+    assert [(file.path, file.reader, file.skipped) for file in store.doc_files()] == [
+        ("scan.pdf", 1, ((1, "unreadable"),))
+    ]
+    store.put_doc_file("scan.pdf", 10, 1, [DocPage(1, "Boiler manual", True)], page_count=1, reader=2)
+    assert [(file.reader, file.skipped) for file in store.doc_files()] == [(2, ())]
+    store._conn.execute(  # an older release's insert names no reader
+        "INSERT INTO doc_files (path, size, mtime_ns, source, found_at, created_at, updated_at)"
+        " VALUES ('old.pdf', 1, 1, 'folder', 'x', 'x', 'x')"
+    )
+    written = store.doc_file_by_path("old.pdf")
+    assert written is not None and written.reader == 1
+    store.close()
+
+
 def test_an_attachment_keeps_the_name_it_was_sent_with(store: Store) -> None:
     conv = store.current_conversation()
     message = store.add_incoming(conv.id, ME, T0, "text", "[document] lease.pdf")

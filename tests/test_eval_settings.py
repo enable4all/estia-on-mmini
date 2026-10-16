@@ -1890,10 +1890,12 @@ def test_the_document_cases_run_with_documents_and_the_others_without(tmp_path: 
     groups = {case.name: (case.group, case.documents) for case in CASES}
     assert groups["document_page_named"] == ("tools", True)
     assert groups["document_invents_nothing"] == ("tools", True)
+    assert groups["document_section_across_pages"] == ("tools", True)
     assert groups["document_injected"] == ("safety", True)
     assert [case.name for case in CASES if case.documents] == [
         "document_page_named",
         "document_invents_nothing",
+        "document_section_across_pages",
         "document_injected",
     ]
     plain = EvalHarness(tmp_path / "a", FakeGemma())

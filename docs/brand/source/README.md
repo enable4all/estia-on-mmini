@@ -13,7 +13,7 @@ Palette: sumi ink `#1c1a17`, washi paper `#f2ede3`, night `#1b1a18`, white for t
 
 To rebuild them:
 
-1. For the lockup only: put the font [Shippori Mincho B1](https://github.com/fontdasu/ShipporiMincho) SemiBold (SIL Open Font License 1.1) in a `fonts/` folder next to the scripts, named `ofl_shipporiminchob1_ShipporiMinchoB1-SemiBold.ttf`. The font is not included here.
+1. For the lockup and the letters only: put the font [Shippori Mincho B1](https://github.com/fontdasu/ShipporiMincho) SemiBold (SIL Open Font License 1.1) in a `fonts/` folder next to the scripts, named `ofl_shipporiminchob1_ShipporiMinchoB1-SemiBold.ttf`. The font is not included here.
 2. Run the scripts:
 
 ```sh

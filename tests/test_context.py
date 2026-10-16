@@ -35,7 +35,7 @@ def reply(store: Store, conv: Conversation, text: str, to: Message, ts: int) -> 
 
 def test_system_prompt_has_rules_snapshot_and_summary(store: Store) -> None:
     profile, context = make(store)
-    profile.add("The user likes tea.", source_kind="chat")
+    profile.add("The user likes tea.", source_kind="remember")
     conv = store.current_conversation()
     first = context.system_prompt(conv)
     assert first.startswith(prompts.rules(name=NAME))
@@ -90,7 +90,7 @@ def test_only_the_newest_message_shows_the_year(store: Store) -> None:
 def test_snapshot_is_frozen_until_refreshed(store: Store) -> None:
     profile, context = make(store)
     before = context.snapshot()
-    profile.add("The user likes tea.", source_kind="chat")
+    profile.add("The user likes tea.", source_kind="remember")
     assert context.snapshot() == before
     assert "#1 The user likes tea." in context.refresh_snapshot()
     assert "#1 The user likes tea." in context.snapshot()
@@ -770,7 +770,7 @@ def test_the_style_block_is_the_same_for_chat_and_her_own_messages(store: Store)
 
 def test_rules_for_one_answer_keep_the_style_and_profile_below_them(store: Store) -> None:
     profile, context = make(store)
-    profile.add("The user likes tea.", source_kind="chat")
+    profile.add("The user likes tea.", source_kind="remember")
     conv = store.current_conversation()
     practice = prompts.rules(name=NAME, practice=("nl", "A2"))
     system = context.build(conv, rules=practice)[0]["content"]
@@ -801,7 +801,7 @@ def test_the_call_glance_is_numbers_with_the_rule_to_offer_and_never_name() -> N
 
 def test_the_call_glance_comes_last_in_the_system_prompt(store: Store) -> None:
     profile, context = make(store)
-    profile.add("The user likes tea.", source_kind="chat")
+    profile.add("The user likes tea.", source_kind="remember")
     conv = store.current_conversation()
     glance = prompts.call_glance(["Mail digest: 1 to answer."], at="08:05", calendar=False, mail=True)
     system = context.build(conv, glance=glance)[0]["content"]

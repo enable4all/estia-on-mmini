@@ -195,9 +195,12 @@ def setup_dry_run(tmp_path: Path, *, tools: bool) -> tuple[str, Path]:
 def test_setup_dry_run_installs_runs_and_creates_nothing(tmp_path: Path, tools: bool) -> None:
     """The first step SETUP-WITH-YOUR-AI.md gives: it only prints, even on a fresh clone, and needs no terminal."""
     out, _ = setup_dry_run(tmp_path, tools=tools)
-    assert "$ uv python install 3.13" in out and "$ uv sync --frozen" in out and "Then: the model" in out
+    assert "$ uv python install 3.13" in out and "$ uv sync --frozen" in out and "Then: Ollama's official build" in out
+    assert "the model for this Mac's memory" in out
     assert ("Homebrew: would offer to install it" in out) is not tools
-    assert ("$ brew install signal-cli ollama uv" in out) is not tools
+    assert ("$ brew install signal-cli uv" in out) is not tools
+    assert "brew install signal-cli ollama" not in out and "brew services" not in out  # never Homebrew's Ollama
+    assert "Ollama's official build" in out
 
 
 def tools_stubs(bin_dir: Path, called: Path, *, signal_version: str = "0.14.9", ollama_formula: bool = True) -> None:
@@ -232,11 +235,7 @@ def test_setup_runs_homebrew_without_its_analytics(tmp_path: Path) -> None:
     result = in_a_terminal(setup_sh(clone), env)
     assert result.returncode == 0, result.stdout + result.stderr
     brew = [line for line in called.read_text(encoding="utf-8").splitlines() if " brew " in f" {line}"]
-    assert brew == [
-        "1 brew install signal-cli ollama",
-        "1 brew list --formula ollama",
-        "1 brew services start ollama",
-    ]
+    assert brew == ["1 brew install signal-cli"]  # uv is there; Ollama is never Homebrew's (setup's Ollama step)
 
 
 def test_setup_without_a_terminal_stops_before_anything(tmp_path: Path) -> None:
@@ -328,19 +327,20 @@ def test_the_homebrew_installer_is_shown_as_one_line_never_its_text(tmp_path: Pa
     assert (folder / "brew").exists()
 
 
-def test_ollama_from_its_app_is_started_with_the_app_never_brew_services(tmp_path: Path) -> None:
-    """Ollama installed from ollama.com (not Homebrew): `brew services start ollama` would fail, so setup opens the
-    app; an Ollama that never answers stops setup with what to do (finding 4)."""
+def test_setup_sh_never_installs_or_starts_ollama_itself(tmp_path: Path) -> None:
+    """Owner, 15 Oct: only Ollama's official build. setup.sh neither installs Homebrew's nor starts the app or a brew
+    service, even with Ollama not answering: setup's Python step keeps the official one or installs it, checked."""
     clone, bin_dir, called, env = fake_mac(tmp_path)
     tools_stubs(bin_dir, called, ollama_formula=False)
-    stub(bin_dir, "ollama", "exit 0")
     (tmp_path / "root/Applications/Ollama.app").mkdir(parents=True)
-    stub(bin_dir, "curl", "exit 7")  # Ollama never answers
+    stub(bin_dir, "curl", f'echo "curl $*" >> "{called}"; exit 7')  # nothing answers anywhere
     result = in_a_terminal(setup_sh(clone), env)
-    assert result.returncode == 1
+    assert result.returncode == 0, result.stdout + result.stderr
     log = called.read_text(encoding="utf-8")
-    assert "brew services" not in log and "open -a Ollama" in log
-    assert "Ollama does not answer yet" in result.stderr and "open the Ollama app" in result.stderr
+    assert "ollama" not in log.replace("local_assistant", "") and "open " not in log and "curl" not in log
+    assert "uv run --quiet python -m local_assistant.setup" in log
+    script = (ROOT / "scripts" / "setup.sh").read_text(encoding="utf-8")
+    assert "brew services" not in script and "open -a Ollama" not in script
 
 
 def test_a_signal_cli_of_another_version_is_refused(tmp_path: Path) -> None:
@@ -723,6 +723,22 @@ def test_estia_usage_names_every_command_with_the_full_sudo_path(tmp_path: Path)
     assert "--dry-run (first)" in done.stderr  # the notes at the end of the header are shown too
 
 
+@pytest.mark.parametrize("started_as", ["./estia", "estia", "../scripts/estia"])
+def test_estia_usage_reads_its_own_header_when_started_by_a_relative_path(tmp_path: Path, started_as: str) -> None:
+    """SEC7: the script goes to / before anything else (her user cannot enter your folders); its usage still finds
+    its own header when it was started by a path relative to the folder you were in."""
+    done = subprocess.run(
+        ["/bin/bash", started_as, "--dry-run", "nothing"],
+        cwd=ROOT / "scripts",
+        env={"ESTIA_TEST_ROOT": NO_TREE, "PATH": "/usr/bin:/bin", "ESTIA_ROOT": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == 2 and "awk" not in done.stderr, done.stderr
+    assert "--dry-run (first)" in done.stderr and "/usr/bin/sudo /usr/local/estia/bin/estia doctor" in done.stderr
+
+
 def test_estia_doctor_hands_her_doctor_your_sudo_rules_as_root_lists_them(tmp_path: Path) -> None:
     """Her user cannot read sudo's rules: root lists yours (sudo -l -U, no password for root) and her doctor reads the
     list from stdin, so passwordless sudo counts against the hardened level in her own user too."""
@@ -1095,6 +1111,23 @@ def test_rollback_and_remove_old_after_the_move_run_from_the_root_owned_tools(tm
     assert ".venv/bin/python" not in log.read_text()  # never your checkout's Python as root
 
 
+@pytest.mark.parametrize(("root_part", "code"), [(0, 3), (1, 1), (3, 1)], ids=["share-fails", "move-fails", "move-3"])
+def test_only_a_failed_share_after_the_move_ends_the_script_with_its_own_code(
+    tmp_path: Path, root_part: int, code: int
+) -> None:
+    """SEC1 re-check: setup goes on past a failed share only on the share's own exit code (3); a move that fails, in
+    any way, ends 1, so setup never reads it as moved (a failed restore can leave her service file in place)."""
+    stubs, log, _ = owner_stubs(tmp_path)
+    root_sudo(tmp_path / "root", f'echo "sudo $*" >> "{log}"; exit {root_part}')
+    marker = tmp_path / "root/usr/local/estia/migration.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(json.dumps({"projects_root": str(tmp_path / "elsewhere/projects")}), encoding="utf-8")
+    (tmp_path / "home").mkdir()
+    done = run_script("migrate-to-own-user.sh", env=owner_env(tmp_path, stubs))
+    assert done.returncode == code, done.stdout + done.stderr
+    assert ("her projects folder is not shared yet" in done.stderr) is (code == 3)
+
+
 def test_after_the_move_the_migration_stops_before_any_sudo(tmp_path: Path) -> None:
     """Run again after the move, it would run your checkout's Python as root: it stops first and names the deploy."""
     stubs, log, _ = owner_stubs(tmp_path)
@@ -1220,7 +1253,9 @@ def test_the_documents_helper_is_built_and_tested() -> None:
     # documents are an extra: a failed build (an older Swift) is said, and the bridge still starts
     assert f"{build} ||" in run and "Swift 6.0 or later" in run[run.index(build) :].splitlines()[0]
     assert verify.index(build) < verify.index("export DOCUMENTS_HELPER_REQUIRED=1") < verify.index("uv run pytest -q")
-    assert verify.index("uv run pytest -q") < verify.index("(cd tools/documents && swift test --quiet)")
+    # one test at a time, as the helper reads: parallel Vision tests deadlocked a 4-core Mac (Vision's own queue
+    # waits for a thread of Swift's pool, all of them in Vision), fresh-install test, 16 Oct
+    assert verify.index("uv run pytest -q") < verify.index("(cd tools/documents && swift test --quiet --no-parallel)")
 
 
 def test_every_python_helper_is_synced_tested_and_built() -> None:

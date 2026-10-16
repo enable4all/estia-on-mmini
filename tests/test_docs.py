@@ -62,6 +62,8 @@ def test_the_notices_credit_the_fonts_and_name_no_brand_we_do_not_use() -> None:
     brand = (ROOT / "docs" / "brand" / "source" / "README.md").read_text(encoding="utf-8")
     for text in (notices, brand):
         assert "Manrope ExtraBold" in text and "Shippori Mincho B1" in text and "SIL Open Font License 1.1" in text
+    shippori = next(line for line in notices.splitlines() if line.startswith("| Shippori Mincho B1"))
+    assert "`docs/brand/letters/`" in shippori  # the letter avatars are drawn from it too (review, 15 Oct)
 
 
 def test_the_tagline_is_a_thinking_partner_living_at_home() -> None:
@@ -218,6 +220,56 @@ def test_the_compare_then_trust_steps_stay_in_section_7() -> None:
     assert "listIdentities" in row and "trust -v" in row and "only if they match" in row
     assert "/usr/bin/sudo /usr/local/estia/bin/estia signal listIdentities" in row  # as her, from /, the bridge stopped
     assert "/usr/bin/sudo /usr/local/estia/bin/estia signal trust -v" in row
+
+
+UPDATE_ORDER = (
+    "An update that changes the tools root runs takes three steps, in this order: "
+    "`/usr/bin/sudo /usr/local/estia/bin/estia-deploy`, then "
+    "`/usr/bin/sudo /usr/local/estia/bin/estia-deploy --update-tools`, then "
+    "`/usr/bin/sudo /usr/local/estia/bin/estia-deploy` again."
+)
+OLD_LOGS = "a program of her account could make root write into a file it names"  # ownuser.LOGS_IN_HER_FOLDER's words
+
+
+def test_the_update_order_comes_first_and_the_old_log_layout_is_a_known_gap() -> None:
+    """FULL1: an install from before /var/log/estia keeps the output launchd opens as root in her own folder until the
+    tools' update and one more deploy. The order leads the update notes (setup_assistant.md and GUIDE.md), the
+    consequence is said in the same words as doctor's ✗, and SECURITY.md keeps it a known gap until doctor shows ✓."""
+    from local_assistant import ownuser
+
+    assert OLD_LOGS in ownuser.LOGS_IN_HER_FOLDER
+    updates = prose(ROOT / "setup_assistant.md").split("**Updates** come from your checkout", 1)[1]
+    first = updates.split("`estia-deploy` first shows the commits", 1)[0].split("```")[-1].strip()  # after the fence
+    assert first.startswith(UPDATE_ORDER) and OLD_LOGS in first
+    guide = GUIDE.read_text(encoding="utf-8").split("\n### Updates\n", 1)[1].split("\n#", 1)[0]
+    assert prose_text(guide).startswith(UPDATE_ORDER) and OLD_LOGS in prose_text(guide)
+    gaps = prose(ROOT / "SECURITY.md").split("Known accepted gaps", 1)[1]
+    gap = gaps.split("launchd opens her services' two output files", 1)[1].split(" - ", 1)[0]
+    assert OLD_LOGS in gap and "until `/usr/bin/sudo /usr/local/estia/bin/estia doctor` shows ✓ Services" in gap
+    assert UPDATE_ORDER in gap
+
+
+def test_the_new_pin_step_leaves_her_stopped_until_her_devices_are_checked() -> None:
+    """FULL3: step 1 stops her; step 7's `--new-pin` starts her again only when she ran before it, so she stays
+    stopped through step 8 (her linked devices, read while she is stopped), whose end starts her."""
+    steps = prose(ROOT / "SECURITY.md").split("If the Mac is compromised", 1)[1].split("Known accepted gaps", 1)[0]
+    first, rest = steps.split("2. Re-register", 1)
+    pin, devices = rest.split("7. Registration Lock PIN", 1)[1].split("8. Check your own phone", 1)
+    assert "finish steps 2 to 8 first" in first
+    assert "She stays stopped after it: it starts her again only when she was running before it" in pin
+    assert devices.rstrip().endswith("Then start her: `/usr/bin/sudo /usr/local/estia/bin/estia start`.")
+
+
+def test_the_sudo_gap_names_a_sign_in_that_lasts_too_long() -> None:
+    """FULL4: doctor and the security step name a timestamp_timeout above 5 minutes or below 0; the gap says so."""
+    gaps = prose(ROOT / "SECURITY.md").split("Known accepted gaps", 1)[1]
+    assert "one admin sign-in lasts longer than 5 minutes or never ends (`timestamp_timeout`)" in gaps
+
+
+def prose_text(text: str) -> str:
+    """`prose` for a piece of a file."""
+    lines = (re.sub(r"^\s*(#+|-)?\s*", "", line) for line in text.splitlines())
+    return " ".join(line for line in lines if line)
 
 
 def test_the_guide_covers_the_move_deploy_rollback_and_security_step() -> None:
@@ -1098,8 +1150,8 @@ SITE_README = (
     "No pronunciation scoring",
     "- **Only the devices she knows.**",
     "- **An emergency stop on your phone.**",
-    "`/lock` stops her answers and her calls until `/unlock` comes from the same device after a short wait. It holds "
-    "after a restart and needs no Mac.",
+    "`/lock` stops everything at once (answers, messages she starts, calls and reminders) until `/unlock` from the same "
+    "device, 10 minutes later at the earliest. It holds after a restart and needs no Mac.",
     "- **Her own account on the Mac.**",
     "She runs as `_estia`, a hidden macOS account with no password and no login.",
     "as long as no admin rule skips the password",
@@ -1160,8 +1212,10 @@ SITE_README = (
     "Run `scripts/mail-login.sh <address>` again",
     "Log in to the Mac remotely (SSH) and run `/usr/bin/sudo /usr/local/estia/bin/estia check`, then "
     "`/usr/bin/sudo /usr/local/estia/bin/estia logs`.",
-    "Start it with `brew services start ollama`",
-    "The AI model (Gemma, run by the Ollama app)",
+    # owner, 15 Oct (only Ollama's official build): was "Start it with `brew services start ollama`" and "The AI model
+    # (Gemma, run by the Ollama app)"; changed on purpose, the site follows
+    "Start it with `/usr/bin/sudo /bin/launchctl kickstart -k system/com.local-assistant.ollama`",
+    "The AI model (Gemma, run by Ollama)",
     "Signal, for your messages and calls (end-to-end encrypted)",
     "Ollama's web search and Brave Search",
     "Web pages: links you send her, and the top result of a Brave search",
@@ -1291,6 +1345,9 @@ SITE_SECURITY = (
     "CalDAV is untested live with iCloud, Fastmail and Nextcloud",
     "a PDF that exploits a flaw in PDFKit or Vision could run code as her, with her keys and data.",
     "can be opened by her account once it knows the name",
+    # owner, 15 Oct: Gemma 12B failed some safety tests twice; the site says so too
+    "A Mac with 16 or 24 GB of memory gets the smaller model, Gemma 4 12B (`gemma4:12b-mlx`), which failed some of her safety tests",
+    "32 GB with Gemma 26B is the tested setup.",
 )
 SITE_SETUP = (  # setup_assistant.md (was SITE_GUIDE: GUIDE.md is the README's body now)
     "When a release changes a root-run tool (`scripts/estia`, `scripts/estia-deploy`, `deploy.py`, `ownuser.py`, "
@@ -1729,14 +1786,18 @@ def test_the_ai_guide_is_a_hand_over_to_the_persons_own_terminal() -> None:
 
 
 def test_the_ai_guide_says_what_a_new_install_has_and_how_she_keeps_running() -> None:
-    """No voice and no rollback on a new install; sleep, power failures, Ollama at login, FileVault (8, 50, 57)."""
+    """No voice and no rollback on a new install; sleep, power failures, Ollama's own service, FileVault (8, 50, 57)."""
     guide = prose(ROOT / "SETUP-WITH-YOUR-AI.md")
     assert "A new install has her service, without voice" in guide
     assert "/usr/bin/sudo /usr/bin/pmset -a sleep 0 autorestart 1" in guide
     assert "/usr/bin/sudo /usr/bin/fdesetup authrestart" in guide
-    assert "Ollama starts at login" in guide and "Doctor's Power line" in guide
+    assert "Ollama starts with the Mac" in guide and "Doctor's Power line" in guide
     readme = prose(GUIDE)
-    assert "Ollama starts only when you log in, so after a restart she answers once someone has logged in" in readme
+    assert (
+        "Ollama starts with the Mac too, as its own background service, so after a restart she answers without a login"
+        in readme
+    )
+    assert "log in" not in guide.split("Ollama starts with the Mac", 1)[1].split("FileVault", 1)[0]
 
 
 def test_the_ai_guide_names_every_one_time_code_as_a_secret() -> None:
@@ -1785,9 +1846,9 @@ def test_the_guide_says_each_update_builds_her_voice_service_when_it_changed() -
 README_LINES = 120
 SHELL_FENCE = re.compile(r"(sh|bash|shell|zsh)\b")  # the site's test for a block of commands
 COMMAND_LINE = re.compile(r"(?:[A-Z_][A-Z0-9_]*=\S*\s+)*(?:~/|\./|/)?[a-z][\w.+-]*(?:/[\w.+-]+)*(?:\s|$)")
-INSTALL_TIME = (
-    "ownloads and builds take about 30 minutes on a 100 Mbit/s line, most of it the model download (18.7 GB); about 15 minutes on a Mac with 16 "
-    "or 24 GB of memory, where the model is 8.0 GB."
+INSTALL_TIME = (  # the -mlx builds (owner, 15 Oct): 18.3 GB and 7.7 GB, from 18.7 GB and 8.0 GB
+    "ownloads and builds take about 30 minutes on a 100 Mbit/s line, most of it the model download (18.3 GB); about 15 "
+    "minutes on a Mac with 16 or 24 GB of memory, where the model is 7.7 GB."
 )
 VOICE_TIME = (
     "Voice adds about 15 minutes while her voice loads, after its build and a 1.7 GB download (about 4 minutes)."
@@ -1965,12 +2026,86 @@ def test_the_install_time_is_said_the_same_on_the_front_page_and_in_the_guide() 
         assert INSTALL_TIME in text and VOICE_TIME in text
     assert "](GUIDE.md#how-long-it-takes)" in readme
     big, small = choose_model(32), choose_model(16)
-    assert big and small and (big.tag, small.tag) == ("gemma4:26b", "gemma4:12b")
+    assert big and small and (big.tag, small.tag) == ("gemma4:26b-mlx", "gemma4:12b-mlx")
     table = GUIDE.read_text(encoding="utf-8").split("\n### How long it takes\n", 1)[1].split("\n## ", 1)[0]
-    assert "`gemma4:26b`, 18.7 GB | About 25 minutes | Computed from the size |" in table
-    assert "`gemma4:12b`, 8.0 GB | About 11 minutes | Computed from the size |" in table
+    assert "`gemma4:26b-mlx`, 18.3 GB | About 25 minutes | Computed from the size |" in table
+    assert "`gemma4:12b-mlx`, 7.7 GB | About 10 minutes | Computed from the size |" in table
+    assert (
+        "| signal-cli and uv from Homebrew, when missing: 60 MB | About 5 seconds | Computed from the size |" in table
+    )
+    assert "Ollama's official build from GitHub, when no official one runs yet: 168 MB | About 15 seconds |" in table
     assert "| About 15 minutes | Measured live, 13 Oct |" in table  # the Neural Engine (AGENTS.md, Gotchas)
     rows = [line for line in table.splitlines() if line.startswith("| ") and not line.startswith("| Step ")]
     sources = {"Measured", "Measured live, 13 Oct", "Computed from the size", "Not measured"}
     assert rows and all(row.rstrip(" |").rsplit("| ", 1)[1] in sources for row in rows), rows
     assert "your own typing" in guide.lower() and "typing" not in readme.lower()
+
+
+@pytest.mark.parametrize("name", ["README.md", *INSTALL_DOCS, "AGENTS.md", "SECURITY.md"])
+def test_no_doc_installs_or_starts_homebrews_ollama_or_pulls_a_bare_gemma_tag(name: str) -> None:
+    """Owner, 15 Oct: only Ollama's official build, and the explicit -mlx tags (the bare ones are lists)."""
+    text = (ROOT / name).read_text(encoding="utf-8")
+    for gone in ("brew install signal-cli ollama", "brew services start ollama", "open -a Ollama", "the Ollama app;"):
+        assert gone not in text, (name, gone)
+    assert not re.search(r"pull gemma4:(?:26|12)b(?![-\w])|FROM gemma4:(?:26|12)b(?![-\w])", text), name
+
+
+def test_the_ollama_docs_say_what_the_code_does() -> None:
+    """Review, 15 Oct: an update runs in place (no bootout first), a booted-out service comes back with bootstrap, the
+    log is yours (no sudo to empty it), removal takes the PATH line too, and the app's quit works over SSH."""
+    guide = (ROOT / "setup_assistant.md").read_text(encoding="utf-8")
+    row = next(line for line in guide.splitlines() if line.startswith("| Ollama | "))
+    assert (
+        "/usr/bin/sudo /bin/launchctl bootstrap system /Library/LaunchDaemons/com.local-assistant.ollama.plist" in row
+    )
+    assert "bootout system/com.local-assistant.ollama`, then `scripts/install-ollama.sh" not in row
+    assert "sudo /usr/bin/truncate" not in row and "`/usr/bin/truncate -s 0 /var/log/estia/ollama.log`" in row
+    assert "`opt/ollama/current` in `~/.zprofile`" in row
+    assert "osascript -e 'quit app \"Ollama\"'" in guide
+    assert "only new ones find `ollama`" in (ROOT / "GUIDE.md").read_text(encoding="utf-8")
+    for name in ("setup_assistant.md", "SETUP-WITH-YOUR-AI.md", "AGENTS.md"):
+        text = " ".join((ROOT / name).read_text(encoding="utf-8").split())
+        assert "setup refuses both" not in text and "the Ollama app stops setup with the fix" not in text, name
+        assert "bootout system/com.local-assistant.ollama` first" not in text, name
+
+
+# owner, 15 Oct: Gemma 12B failed some safety tests twice (SECURITY.md, known gaps): every doc that names the model on
+# 16 and 24 GB says so in SECURITY.md's words, and none says it is not yet tested (review, 15 Oct)
+SMALL_MODEL = "Gemma 4 12B (`gemma4:12b-mlx`), which failed some of her safety tests (15 Oct, run twice"
+TESTED_SETUP = "32 GB with Gemma 26B is the tested setup."
+# what code still holds back with the smaller model, the limit inside the claim (SEC4 re-check, 16 Oct): SECURITY.md
+# and setup's line in the same words ("ask first" in backticks there, in quotes in the terminal)
+SMALL_MODEL_HOLDS = (
+    "Code still refuses facts from an audio file and still makes a device change wait for your yes after an audio "
+    "file, for an `ask first` device and in a message that is not about devices, but 32 GB with Gemma 26B is the "
+    "tested setup."
+)
+
+
+def test_the_small_model_failed_some_safety_tests_in_every_doc_in_the_same_words() -> None:
+    from local_assistant import prompts
+
+    root = Path(__file__).resolve().parents[1]
+    for name in ("SECURITY.md", "GUIDE.md", "setup_assistant.md"):
+        flat = site_flat(root / name)
+        assert SMALL_MODEL in flat and TESTED_SETUP in flat, name
+    assert SMALL_MODEL_HOLDS in site_flat(root / "SECURITY.md")
+    assert SMALL_MODEL_HOLDS.replace("`ask first`", '"ask first"') in " ".join(prompts.SETUP_SMALLER_MODEL.split())
+    assert "each device change" not in site_flat(root / "SECURITY.md")
+    for name in ("README.md", "GUIDE.md", "setup_assistant.md", "SETUP-WITH-YOUR-AI.md", "SECURITY.md"):
+        flat = site_flat(root / name)
+        assert "not yet tested with her test set" not in flat, name
+    readme = site_flat(root / "README.md").split("**1. A Mac and a number.**", 1)[1].split("**2.", 1)[0]
+    assert TESTED_SETUP in readme and "failed some of her safety tests" in readme
+    requirements = site_flat(root / "GUIDE.md").split("## Requirements", 1)[1].split("## ", 1)[0]
+    assert "failed some of her safety tests" in requirements and TESTED_SETUP in requirements
+    briefing = site_flat(root / "SETUP-WITH-YOUR-AI.md").split("**The model download:**", 1)[1].split("- **", 1)[0]
+    assert "failed some of her safety tests" in briefing and TESTED_SETUP in briefing
+
+
+def test_the_ai_guide_names_ports_as_readme_and_security_do() -> None:
+    """Ollama and her voice service listen on the Mac itself: "no open port" or "no listening ports" made an AI that
+    checks with lsof see a contradiction (review, 15 Oct). The guide says what README and SECURITY.md say."""
+    flat = site_flat(Path(__file__).resolve().parents[1] / "SETUP-WITH-YOUR-AI.md")
+    assert "no open port" not in flat and "no listening ports" not in flat
+    assert "no port reachable from other machines" in flat and "the bridge opens no port" in flat

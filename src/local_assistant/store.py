@@ -6,10 +6,13 @@ Spec section 4. Full-text search uses FTS5 (external content tables kept in sync
 
 from __future__ import annotations
 
+import itertools
+import math
 import re
 import sqlite3
 import time
-from collections.abc import Iterator
+import unicodedata
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -33,7 +36,7 @@ ConversationKind = Literal["chat", "practice"]
 DocSource = Literal["folder", "signal"]  # found in the documents folder, or saved there from a Signal message
 COUNTED: tuple[InitiativeOutcome, ...] = ("sending", "sent", "unknown")  # what counts toward the caps
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 13
 
 SCHEMA_V1 = """
 CREATE TABLE conversations (
@@ -363,6 +366,21 @@ END;
 ALTER TABLE attachments ADD COLUMN filename TEXT NOT NULL DEFAULT '';
 """
 
+# v12: the reader that read each file (documents.INDEX_VERSION): a fix to the reader changes neither a file's size nor
+# its change time, so a file an older reader did not read whole is read again. Rows from before, and rows an older
+# release writes after a rollback (its insert names no reader), are reader 1: the reader before Foundation's home was
+# set (15 Oct), under which scanned pages were skipped in her own user.
+MIGRATION_V12 = """
+ALTER TABLE doc_files ADD COLUMN reader INTEGER NOT NULL DEFAULT 1;
+"""
+
+# v13: the profile in two parts (owner, 16 Oct): a fact moved out of the user's part to make room is kept in her
+# notes with its origin (source_kind) as it was, so "you asked" stays "you asked", learning still never changes it, and
+# a fact from a page stays out of the messages she starts. 0 for every fact before: none had been moved.
+MIGRATION_V13 = """
+ALTER TABLE profile_facts ADD COLUMN in_notes INTEGER NOT NULL DEFAULT 0;
+"""
+
 # v11: the evening note (/evening) in the initiative log, as kind 'evening'. SQLite cannot change a CHECK, so the table
 # is made again with it: every row and its id kept, its indexes too. Nothing refers to the log, so nothing else moves.
 MIGRATION_V11 = """
@@ -529,6 +547,7 @@ class Fact:
     source_message_id: int | None
     source_document_id: int | None
     created_at: str
+    in_notes: bool = False  # moved out of the user's part into her notes, its origin kept (schema v13)
 
 
 @dataclass(frozen=True)
@@ -564,7 +583,8 @@ class DocPage:
 @dataclass(frozen=True)
 class DocFile:
     """A PDF of the documents folder in her index: its path in the folder, size and change time (the key), the pages
-    read, the pages skipped with why, and why it could not be read at all ("" when it was)."""
+    read, the pages skipped with why, why it could not be read at all ("" when it was), and the reader that read it
+    (documents.INDEX_VERSION; 1 for rows from before v12)."""
 
     id: int
     path: str
@@ -576,6 +596,7 @@ class DocFile:
     source: DocSource
     announced: bool
     found_at: str
+    reader: int = 1
 
 
 @dataclass(frozen=True)
@@ -830,7 +851,47 @@ def _doc_file(row: sqlite3.Row) -> DocFile:
         source=row["source"],
         announced=bool(row["announced"]),
         found_at=row["found_at"],
+        reader=row["reader"],
     )
+
+
+COMMON_MIN_PAGES = 10  # from this many pages on, a word on more than half of them says nothing in a documents search
+QUERY_WORDS = 12  # a documents search's words at most (each is one index lookup)
+RANKED_PAGES = 1_000  # bm25's order is read for this many pages at most (the last tie-break)
+
+
+def fold(text: str) -> str:
+    """Lower case without accents, for comparing words in Python (names, notes). Never for the index's MATCH: its
+    unicode61 tokenizer removes accents from Latin letters only, so a folded Greek, Cyrillic й or kana word finds
+    nothing there."""
+    decomposed = unicodedata.normalize("NFKD", text.casefold())
+    return "".join(char for char in decomposed if not unicodedata.combining(char))
+
+
+def name_words(path: str) -> set[str]:
+    """A document's name as words (its file name without .pdf; folders not), folded; numbers left out (the date a
+    sent PDF's name starts with, "2026-10-14 lease.pdf", names nothing)."""
+    return {word for word in re.findall(r"[^\W_]+", fold(Path(path).stem)) if not word.isdecimal()}
+
+
+def _rarity(holding: int, out_of: int) -> float:
+    """BM25's weight for a word `holding` of `out_of` pages (or names) have: rare words weigh most, never below 0."""
+    return math.log(1 + (out_of - holding + 0.5) / (holding + 0.5))
+
+
+def _query_words(query: str) -> list[str]:
+    """A documents search's words as typed (the index folds them as it folded the pages): two characters or more,
+    or a number ("article 7"); each once (by its folded form), in order, at most `QUERY_WORDS`."""
+    seen: dict[str, str] = {}
+    for word in re.findall(r"[^\W_]+", query):
+        if (len(word) > 1 or word.isdecimal()) and fold(word) not in seen:
+            seen[fold(word)] = word
+    return list(seen.values())[:QUERY_WORDS]
+
+
+def _in(column: str, ids: Sequence[int]) -> str:
+    """` AND column IN (?, …)` for that many ids (never an empty list: `IN ()` is no match)."""
+    return f" AND {column} IN ({', '.join('?' * len(ids))})" if ids else " AND 0"
 
 
 def _fts_terms(query: str) -> str:
@@ -847,6 +908,7 @@ def _fact(row: sqlite3.Row) -> Fact:
         source_message_id=row["source_message_id"],
         source_document_id=row["source_document_id"],
         created_at=row["created_at"],
+        in_notes=bool(row["in_notes"]),
     )
 
 
@@ -922,6 +984,12 @@ class Store:
             self._conn.executescript(f"BEGIN;\n{MIGRATION_V10}\nPRAGMA user_version = 10;\nCOMMIT;")
         if version < 11:
             self._conn.executescript(f"BEGIN;\n{MIGRATION_V11}\nPRAGMA user_version = 11;\nCOMMIT;")
+        if version < 12:
+            self._conn.executescript(f"BEGIN;\n{MIGRATION_V12}\nPRAGMA user_version = 12;\nCOMMIT;")
+        if version < 13:  # the column only where it is missing (a database copied back to an older version has it)
+            columns = {row[1] for row in self._conn.execute("PRAGMA table_info(profile_facts)")}
+            script = MIGRATION_V13 if "in_notes" not in columns else ""
+            self._conn.executescript(f"BEGIN;\n{script}\nPRAGMA user_version = 13;\nCOMMIT;")
 
     def close(self) -> None:
         self._conn.close()
@@ -1333,9 +1401,26 @@ class Store:
         """/fix: the fact in the user's own words, from now on theirs ("remember")."""
         with self.tx():
             self._conn.execute(
-                "UPDATE profile_facts SET text = ?, source_kind = 'remember', source_message_id = ?,"
+                "UPDATE profile_facts SET text = ?, source_kind = 'remember', in_notes = 0, source_message_id = ?,"
                 " source_document_id = NULL, updated_at = ? WHERE id = ?",
                 (text, source_message_id, utc_now(), fact_id),
+            )
+
+    def demote_fact(self, fact_id: int) -> None:
+        """A user's fact moved into her notes (their part of the profile was full): kept with its origin, no longer
+        always sent."""
+        with self.tx():
+            self._conn.execute(
+                "UPDATE profile_facts SET in_notes = 1, updated_at = ? WHERE id = ?", (utc_now(), fact_id)
+            )
+
+    def promote_fact(self, fact_id: int, source_message_id: int | None) -> None:
+        """A note the user asked to remember: from now on theirs ("remember"), in their part."""
+        with self.tx():
+            self._conn.execute(
+                "UPDATE profile_facts SET source_kind = 'remember', in_notes = 0, source_message_id = ?,"
+                " source_document_id = NULL, updated_at = ? WHERE id = ?",
+                (source_message_id, utc_now(), fact_id),
             )
 
     def delete_fact(self, fact_id: int) -> None:
@@ -1462,9 +1547,11 @@ class Store:
         source: DocSource = "folder",
         announced: bool = False,
         found_at: str | None = None,
+        reader: int = 1,
     ) -> int:
         """A file read (or not readable: `error`) and its pages, in one transaction; a file already indexed at this
-        path keeps its number, source, when it was found and whether it was announced, and gets its new text."""
+        path keeps its number, source, when it was found and whether it was announced, and gets its new text.
+        `reader`: the reader that read it (documents.INDEX_VERSION)."""
         now = utc_now()
         skipped_text = ",".join(f"{number}:{why}" for number, why in skipped)
         with self.tx():
@@ -1472,7 +1559,7 @@ class Store:
             if row is None:
                 cursor = self._conn.execute(
                     "INSERT INTO doc_files (path, size, mtime_ns, pages, skipped, error, source, announced, found_at,"
-                    " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " reader, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         path,
                         size,
@@ -1483,6 +1570,7 @@ class Store:
                         source,
                         int(announced),
                         found_at or now,
+                        reader,
                         now,
                         now,
                     ),
@@ -1492,9 +1580,9 @@ class Store:
                 file_id = int(row["id"])
                 self._conn.execute("DELETE FROM doc_pages WHERE file_id = ?", (file_id,))
                 self._conn.execute(
-                    "UPDATE doc_files SET size = ?, mtime_ns = ?, pages = ?, skipped = ?, error = ?, updated_at = ?"
-                    " WHERE id = ?",
-                    (size, mtime_ns, page_count, skipped_text, error, now, file_id),
+                    "UPDATE doc_files SET size = ?, mtime_ns = ?, pages = ?, skipped = ?, error = ?, reader = ?,"
+                    " updated_at = ? WHERE id = ?",
+                    (size, mtime_ns, page_count, skipped_text, error, reader, now, file_id),
                 )
             self._conn.executemany(
                 "INSERT INTO doc_pages (file_id, page, ocr, text, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -1542,18 +1630,93 @@ class Store:
             self._conn.execute("INSERT INTO doc_pages_fts (doc_pages_fts) VALUES ('optimize')")
         return count
 
-    def search_doc_pages(self, query: str, limit: int = 6) -> list[DocHit]:
-        """Pages matching any of the query's words, best first, each with the words around the match."""
-        match = _fts_terms(query)
-        if not match:
+    def search_doc_pages(self, query: str, limit: int = 6, *, file_ids: Sequence[int] | None = None) -> list[DocHit]:
+        """Pages matching the query's words, best first, each with the words around its best match (owner, 16 Oct:
+        "section B5 from the Practice Exam" found the syllabus first). Each word goes to the index as typed, so FTS5
+        reads it as it read the pages (unicode61 keeps Greek accents, й and voiced kana: folding them here found
+        nothing). In order:
+        - a word on more than half the pages ("the", "from") says nothing, from `COMMON_MIN_PAGES` pages on (each
+          word's pages are counted first; only the others are read);
+        - the query words in some names and not all name the documents whose names hold the most of them, when
+          those all hold the same ones ("practice exam"): their pages get the words' weight and the words are not
+          looked for in the text; one word each of different names ("insurance", "deductible") names nothing;
+        - each other word adds to the pages that hold it, the more the fewer pages do ("b5"), and two of them side
+          by side on a page ("article 7") add their weight again;
+        - ties: more query words in the document's name, then the name with the fewest other words (the exam
+          before "… Exam - Answer Sheet"), then FTS5's bm25.
+        `file_ids`: only these documents' pages (no naming then)."""
+        terms = _query_words(query)
+        if not terms:
             return []
-        rows = self._conn.execute(
-            "SELECT p.file_id, f.path, p.page, snippet(doc_pages_fts, 0, '', '', ' … ', 64) AS passage"
-            " FROM doc_pages_fts JOIN doc_pages p ON p.id = doc_pages_fts.rowid JOIN doc_files f ON f.id = p.file_id"
-            " WHERE doc_pages_fts MATCH ? ORDER BY bm25(doc_pages_fts) LIMIT ?",
-            (match, limit),
-        ).fetchall()
-        return [DocHit(row["file_id"], row["path"], row["page"], row["passage"]) for row in rows]
+        scope, args = ("", ()) if file_ids is None else (_in("p.file_id", file_ids), tuple(file_ids))
+        join = "FROM doc_pages_fts JOIN doc_pages p ON p.id = doc_pages_fts.rowid WHERE doc_pages_fts MATCH ?"
+        total = self._conn.execute(f"SELECT count(*) FROM doc_pages p WHERE 1 = 1{scope}", args).fetchone()[0]
+        held = {t: self._conn.execute(f"SELECT count(*) {join}{scope}", (f'"{t}"', *args)).fetchone()[0] for t in terms}
+        present = [t for t in terms if held[t]]
+        if not present:
+            return []
+        common = {t for t in present if total >= COMMON_MIN_PAGES and held[t] * 2 > total}
+        rare = [t for t in present if t not in common]
+        names = {} if file_ids is not None else self._doc_name_words()
+        # every query word in some names (also one no page holds: "insurance" of "Car insurance policy.pdf")
+        name_words = {
+            t for t in terms if t not in common and 0 < sum(fold(t) in words for words in names.values()) < len(names)
+        }
+        # the names holding the most of those words name the document, when they all hold the same ones ("Practice
+        # Exam": the exam and its answer sheet; a stray "from" of "Lecture 2 - From telemetry" changes nothing); one
+        # word each of different names ("insurance", "deductible") names nothing
+        held_in = {fid: frozenset(t for t in name_words if fold(t) in words) for fid, words in names.items()}
+        most = max((len(found) for found in held_in.values()), default=0)
+        leaders = {found for found in held_in.values() if most and len(found) == most}
+        naming = set(next(iter(leaders))) if len(leaders) == 1 else set()
+        content = [t for t in rare if t not in naming] or rare or present  # only common words: they are what is left
+        on: dict[str, dict[int, int]] = {}  # word -> {page row id: its file id}
+        for term in content:
+            rows = self._conn.execute(f"SELECT p.id, p.file_id {join}{scope}", (f'"{term}"', *args)).fetchall()
+            on[term] = {row[0]: row[1] for row in rows}
+        weight = {t: _rarity(held[t], total) for t in content}
+        boost = {t: _rarity(sum(fold(t) in words for words in names.values()), len(names)) for t in naming}
+        file_of: dict[int, int] = {}
+        for term in content:
+            file_of.update(on[term])
+        together: dict[int, float] = {}  # two words side by side ("article 7"): their weight again
+        for first, second in itertools.pairwise(content):
+            phrase = self._conn.execute(f"SELECT p.id {join}{scope}", (f'"{first} {second}"', *args)).fetchall()
+            for (page_id,) in phrase:
+                together[page_id] = together.get(page_id, 0.0) + weight[first] + weight[second]
+        match = " OR ".join(f'"{t}"' for t in content)
+        ranked = self._conn.execute(
+            f"SELECT p.id {join}{scope} ORDER BY bm25(doc_pages_fts) LIMIT {RANKED_PAGES}", (match, *args)
+        )
+        rank = {row[0]: n for n, row in enumerate(ranked)}
+        asked = {fold(t) for t in terms}
+
+        def order(page_id: int) -> tuple[float, int, int, int]:
+            words = names.get(file_of[page_id], set())
+            found = sum(weight[t] for t in content if page_id in on[t]) + together.get(page_id, 0.0)
+            found += sum(boost[t] for t in naming if fold(t) in words)
+            return (-round(found, 9), -len(asked & words), len(words - asked), rank.get(page_id, RANKED_PAGES))
+
+        hits: list[DocHit] = []
+        for page_id in sorted(file_of, key=order)[:limit]:
+            # the passage around the page's rarest words ("B5"), not around a frequent one ("from") near its top
+            mine = [t for t in content if page_id in on[t]]
+            best = max(weight[t] for t in mine)
+            here = " OR ".join(f'"{t}"' for t in mine if weight[t] * 2 >= best)
+            row = self._conn.execute(
+                "SELECT p.file_id, f.path, p.page, snippet(doc_pages_fts, 0, '', '', ' … ', 64) AS passage"
+                " FROM doc_pages_fts JOIN doc_pages p ON p.id = doc_pages_fts.rowid JOIN doc_files f ON f.id = p.file_id"
+                " WHERE doc_pages_fts MATCH ? AND doc_pages_fts.rowid = ?",
+                (here, page_id),
+            ).fetchone()
+            if row is not None:
+                hits.append(DocHit(row["file_id"], row["path"], row["page"], row["passage"]))
+        return hits
+
+    def _doc_name_words(self) -> dict[int, set[str]]:
+        """Each read document's name words (file id -> words), as `name_words` gives them."""
+        rows = self._conn.execute("SELECT id, path FROM doc_files WHERE error = ''").fetchall()
+        return {row["id"]: name_words(row["path"]) for row in rows}
 
     def unannounced_doc_files(self) -> list[DocFile]:
         """Files found in the folder that no note named yet, oldest first."""

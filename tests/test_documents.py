@@ -8,6 +8,7 @@ import errno
 import json
 import logging
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -16,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from local_assistant import documents as docs
+from local_assistant import prompts
 from local_assistant.documents import (
     LOOKED_KEY,
     DocumentError,
@@ -165,6 +167,35 @@ async def test_the_warm_up_prepares_vision_once_with_fixed_arguments(tmp_path: P
     assert not await Helper((str(tmp_path / "no-helper"),), 10.0).warm()
 
 
+async def test_a_failed_warm_up_is_the_parts_warning_until_vision_reads_again(
+    tmp_path: Path, state: Path, status: PartStatus
+) -> None:
+    """Live, 15 Oct: under her account every warm-up failed in under 0.3 s and only bridge.log said so. A failed
+    warm-up is the documents part's warning (doctor and /status show "!"); a warm-up that works, or a page Vision
+    read, ends it; a text page read says nothing about Vision."""
+    state.write_text(json.dumps({"warm": {"ok": False, "error": "unreadable"}}))
+    helper = Helper((sys.executable, str(FAKE), str(state)), 10.0, status=status)
+    assert not await helper.warm()
+    assert status.snapshot()["documents"].warning == "ocr_unavailable"
+    state.write_text(json.dumps({}))
+    await helper.read(pdf(tmp_path / "text.pdf", "Pets are allowed."))
+    assert status.snapshot()["documents"].warning == "ocr_unavailable"
+    scan = {"ok": True, "pages": [{"n": 1, "text": "Boiler", "ocr": True}], "skipped": [], "page_count": 1}
+    state.write_text(json.dumps({"scan.pdf": scan}))
+    await helper.read(pdf(tmp_path / "scan.pdf", "x"))
+    assert status.snapshot()["documents"].warning == ""
+    state.write_text(json.dumps({"warm": {"ok": False, "error": "timeout"}}))  # the helper's own time limit
+    assert not await helper.warm()
+    assert status.snapshot()["documents"].warning == "ocr_unavailable"
+    state.write_text(json.dumps({}))
+    assert await helper.warm()
+    assert status.snapshot()["documents"].warning == ""
+    missing = PartStatus(None)
+    assert not await Helper((str(tmp_path / "no-helper"),), 10.0, status=missing).warm()
+    assert missing.snapshot()["documents"].reason == "helper_missing"  # a failure (✗), not a warning
+    assert missing.snapshot()["documents"].warning == ""
+
+
 # the look
 
 
@@ -283,6 +314,58 @@ async def test_a_document_that_timed_out_is_tried_again_once_after_a_start(
     await restarted.look()
     assert len(calls(state)) == 2
     assert [(file.path, file.error, file.pages) for file in store.doc_files()] == [("scan.pdf", "", 1)]
+
+
+async def test_a_file_an_older_reader_did_not_read_whole_is_read_again_once(
+    documents: Documents, folder: Path, state: Path, store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fix to the reader changes neither a file's size nor its change time (15 Oct: scanned pages were skipped under
+    her account until Foundation got its home): a file an older reader (INDEX_VERSION) did not read whole, pages
+    skipped or the file unreadable, is read again once; one it read whole, or could not read for a reason of the
+    file's own, is not."""
+    assert docs.INDEX_VERSION == 2  # bumped for Foundation's home (15 Oct)
+    skipped = {"ok": True, "pages": [], "skipped": [{"n": 1, "why": "unreadable"}], "page_count": 1}
+    answers = {"scan.pdf": skipped, "broken.pdf": {"ok": False, "error": "unreadable"}}
+    state.write_text(json.dumps(answers | {"secret.pdf": {"ok": False, "error": "encrypted"}}))
+    for name in ("scan.pdf", "broken.pdf", "secret.pdf", "lease.pdf"):
+        pdf(folder / name, "Boiler manual")
+    monkeypatch.setattr(docs, "INDEX_VERSION", 1)
+    await documents.look()
+    assert len(calls(state)) == 4
+    monkeypatch.setattr(docs, "INDEX_VERSION", 2)
+    state.write_text(json.dumps({"secret.pdf": {"ok": False, "error": "encrypted"}}))  # the new reader reads them
+    look = await documents.look()
+    assert sorted(Path(call[1]).name for call in calls(state)[4:]) == ["broken.pdf", "scan.pdf"]
+    assert look.read == 2 and look.found == ()  # read again is not new
+    await documents.look()
+    assert len(calls(state)) == 6
+    files = {file.path: file for file in store.doc_files()}
+    assert (files["scan.pdf"].pages, files["scan.pdf"].skipped, files["scan.pdf"].reader) == (1, (), 2)
+    assert (files["broken.pdf"].error, files["secret.pdf"].error) == ("", "encrypted")
+
+
+async def test_a_page_vision_failed_on_is_read_again_once_after_a_start(
+    store: Store, folder: Path, state: Path, status: PartStatus, documents: Documents
+) -> None:
+    """Vision failing on a page (the helper's "ocr_failed", apart from a page that cannot be read) is the part's
+    warning, and the file is read again once after each start, after the warm-up, like a timeout."""
+    failed = {"ok": True, "pages": [], "skipped": [{"n": 1, "why": "ocr_failed"}], "page_count": 1}
+    state.write_text(json.dumps({"scan.pdf": failed}))
+    pdf(folder / "scan.pdf", "x")
+    await documents.look()
+    await documents.look()
+    assert len(calls(state)) == 1
+    assert status.snapshot()["documents"].warning == "ocr_unavailable"
+    assert "text recognition failed on this Mac" in documents.read_text("scan.pdf", 1)
+    read = {"ok": True, "pages": [{"n": 1, "text": "Boiler manual", "ocr": True}], "skipped": [], "page_count": 1}
+    state.write_text(json.dumps({"scan.pdf": read}))
+    helper = Helper((sys.executable, str(FAKE), str(state)), 10.0, status=status)
+    restarted = Documents(store, folder, helper, status=status, tz=TZ)
+    await restarted.look()
+    await restarted.look()
+    assert len(calls(state)) == 2
+    assert status.snapshot()["documents"].warning == ""
+    assert [(file.pages, file.skipped) for file in store.doc_files()] == [(1, ())]
 
 
 async def test_without_the_helper_nothing_is_indexed_and_the_next_look_tries_again(
@@ -500,6 +583,131 @@ async def test_a_document_is_found_by_its_number_its_name_or_words_of_it(documen
     assert documents.find("pdf") is None  # both: not taken
 
 
+# a section asked for by its label (owner, 16 Oct: "section B5 from the Practice Exam" came back half, or from the
+# answer sheet): made-up pages in the shape of that exam, its answer sheet and a syllabus that names the exam often
+COURSE = "Security Operations"  # every file's name starts with the course, as the owner's do
+EXAM_PDF = f"{COURSE} - Practice Exam.pdf"
+ANSWERS_PDF = f"{COURSE} - Practice Exam - Answer Sheet.pdf"
+SYLLABUS_PDF = f"{COURSE} - Course Syllabus.pdf"
+LECTURE_PDF = f"{COURSE} - Lecture 1.pdf"
+LECTURE = [  # real text: "the" and "from" on most pages
+    f"Lecture page {n}. Detection engineering turns the telemetry from the sensors into the alerts."
+    for n in range(1, 61)
+]
+SYLLABUS = [
+    f"Course syllabus page {n}. Reading list and weekly topics: what each week does and what the readings say."
+    for n in range(1, 13)
+]
+SYLLABUS[3] = (
+    "Course syllabus page 4. Exam preparation section: the practice exam, and practice questions from each section "
+    "of the exam."
+)
+SYLLABUS[4] = "Course syllabus page 5. The final section: practice for the exam with the practice exam."
+EXAM = [
+    "Practice examination 1. Part Content Points. B1 Operating model 14. B5 Incident response and crisis 15.",
+    *[f"Practice examination {n}. Part A question {n} on the case." for n in range(2, 9)],
+    "Practice examination 9. Task B4 hunting questions on the gaps in Exhibit 3, and who decides. Task B5 — "
+    "Incident response and crisis (15 points). Assume the account was reset ten days ago.",
+    "Practice examination 10. 07:05 A ransom note appears. Questions: a) Declare the crisis. b) Decide on payment.",
+]
+ANSWERS = [
+    *[f"Answer sheet {n}. Marking for the tasks." for n in range(1, 8)],
+    "Answer sheet 8. Task B5 — Incident response and crisis (15 points). Sub-question Points Earns the points.",
+]
+
+
+async def exam_folder(documents: Documents, folder: Path) -> None:
+    pdf(folder / "Course" / LECTURE_PDF, *LECTURE)
+    pdf(folder / "Course" / SYLLABUS_PDF, *SYLLABUS)
+    pdf(folder / "Course" / EXAM_PDF, *EXAM)
+    pdf(folder / "Course" / ANSWERS_PDF, *ANSWERS)
+    await documents.look()
+
+
+def passages(text: str) -> list[tuple[str, int]]:
+    """Each passage's document name and page, in the order search_documents gives them."""
+    return [(Path(name).name, int(page)) for name, page in re.findall(r'\[\d+\] "([^"]+)", page (\d+):', text)]
+
+
+async def test_a_section_label_outranks_words_on_most_pages(documents: Documents, folder: Path) -> None:
+    """The syllabus's pages full of "practice", "exam" and "section" came before every B5 page: the rare label leads,
+    then the document the words name best (the exam before its answer sheet: fewer other words in its name)."""
+    await exam_folder(documents, folder)
+    found = passages(documents.search_text("section B5 from the Practice Exam"))
+    assert sorted(found[:2]) == [(EXAM_PDF, 1), (EXAM_PDF, 9)] and found[2] == (ANSWERS_PDF, 8), found
+    page_9 = next(line for line in documents.search_text("B5").splitlines() if f'"Course/{EXAM_PDF}", page 9' in line)
+    assert "Task B5" in page_9  # the passage holds the label itself
+
+
+async def test_words_of_another_documents_name_never_push_the_label_out(documents: Documents, folder: Path) -> None:
+    """ "Task B5 Incident response and crisis" also names "Lecture 5 - Incident Response": its pages may come, but
+    after the pages that hold the label (a name helps its pages; it never outweighs the rarest word)."""
+    await exam_folder(documents, folder)
+    pdf(
+        folder / "Course" / f"{COURSE} - Lecture 5 - Incident Response.pdf",
+        *[f"Slide {n}. Escalation of the incident to a crisis, and who decides on the response." for n in range(1, 31)],
+    )
+    await documents.look()
+    found = passages(documents.search_text("Task B5 Incident response and crisis"))
+    assert {name for name, _page in found[:3]} == {EXAM_PDF, ANSWERS_PDF} and len(found) == 6, found
+
+
+async def test_a_question_about_one_documents_words_is_asked_in_that_document(
+    documents: Documents, folder: Path
+) -> None:
+    """ "What does the syllabus say about the exam?": unscoped, "syllabus" and "exam" both name files and are not looked
+    for in the text; with document="syllabus" (her rules: when they name one), "exam" is its words and leads."""
+    await exam_folder(documents, folder)
+    found = passages(documents.search_text("exam", document="syllabus"))
+    assert sorted(found) == [(SYLLABUS_PDF, 4), (SYLLABUS_PDF, 5)], found
+
+
+async def test_a_passage_or_read_that_ends_with_its_page_says_the_next_one_follows(
+    documents: Documents, folder: Path
+) -> None:
+    """Gemma took page 9's passage for all of B5 (eval, 16 Oct): a passage that reaches its page's end, and a read
+    that stops before the document's last page, say which page follows (code's words, not the document's)."""
+    await exam_folder(documents, folder)
+    page_9 = next(line for line in documents.search_text("B5").splitlines() if f'{EXAM_PDF}", page 9' in line)
+    assert page_9.endswith(prompts.DOCUMENT_GOES_ON.format(next=10))
+    assert documents.read_text("Practice Exam", 9).endswith(prompts.DOCUMENT_GOES_ON.format(next=10))
+    assert prompts.DOCUMENT_GOES_ON.format(next=11) not in documents.read_text("Practice Exam", 9, 10)  # the last
+
+
+async def test_search_can_be_kept_to_one_document(documents: Documents, folder: Path) -> None:
+    await exam_folder(documents, folder)
+    assert passages(documents.search_text("B5", document="Practice Exam")) == [(EXAM_PDF, 1), (EXAM_PDF, 9)]
+    assert "No document" in documents.search_text("B5", document="tax return")
+
+
+async def test_a_name_two_documents_fit_means_the_one_with_fewest_other_words(
+    documents: Documents, folder: Path
+) -> None:
+    """ "Practice Exam" fits the exam and its answer sheet: the exam, whose name has fewer other words; a tie is no
+    match."""
+    await exam_folder(documents, folder)
+    pdf(folder / "Lecture 1 - Detection.pdf", "x")
+    pdf(folder / "Lecture 2 - Response.pdf", "x")
+    await documents.look()
+    for asked, name in (("Practice Exam", EXAM_PDF), ("practice exam answer sheet", ANSWERS_PDF)):
+        found = documents.find(asked)
+        assert found is not None and Path(found.path).name == name, asked
+    assert documents.find("Lecture") is None
+
+
+async def test_read_gives_up_to_three_pages_in_one_call(documents: Documents, folder: Path) -> None:
+    """A section that goes on past its page: page 9 to 10 in one read, each page named; at most three pages."""
+    await exam_folder(documents, folder)
+    both = documents.read_text("Practice Exam", 9, 10)
+    assert both.index("page 9 of 10") < both.index("Task B5") < both.index("page 10 of 10") < both.index("ransom note")
+    three = documents.read_text("Course Syllabus", 2, 9)
+    assert [int(n) for n in re.findall(r"Course syllabus page (\d+)\.", three)] == [2, 3, 4]
+    assert "page 5" in three.splitlines()[-1]  # where to read on
+    assert documents.read_text("Practice Exam", 10, 12).count("page 10 of 10") == 1  # never past the last page
+    with pytest.raises(ValueError, match="last_page"):
+        documents.read_text("Practice Exam", 9, 8)
+
+
 async def test_more_than_five_new_documents_are_counted(documents: Documents, folder: Path) -> None:
     await documents.look()
     for number in range(7):
@@ -687,3 +895,77 @@ def test_a_folder_in_a_home_other_than_estia_kb_is_told_apart() -> None:
     assert not_estia_kb(Path("/Users/alex/estia-kb/sub"))
     assert not not_estia_kb(Path("/Users/alex/Estia-KB"))
     assert not not_estia_kb(Path("/private/var/folders/xy/T/Estia-KB"))  # not in a home: the share's own words
+
+
+# review, 16 Oct: words outside Latin script, two files of one name, words that name other files, a one-digit label
+
+
+@pytest.mark.parametrize(
+    ("page", "query"),
+    [
+        ("Μίσθωση: τα κατοικίδια επιτρέπονται με άδεια.", "κατοικίδια άδεια"),
+        ("Договор: новый адрес и любой платёж.", "новый любой"),
+        ("반려동물은 계약서에 따라 허용됩니다.", "반려동물은 계약서에"),
+        ("ペットのガイドです。", "ペットのガイドです"),
+        ("Die Straße und das Café.", "Straße Café"),
+    ],
+)
+async def test_words_outside_latin_script_are_found_as_the_index_holds_them(
+    documents: Documents, folder: Path, page: str, query: str
+) -> None:
+    """The query goes to the index as the page went in (lower case only): her own folding, which strips Greek
+    accents, й and voiced kana, is for comparing names only (the index keeps those marks)."""
+    pdf(folder / "contract.pdf", "Cover page.", page)
+    pdf(folder / "other.pdf", "Nothing here.")
+    await documents.look()
+    assert passages(documents.search_text(query))[:1] == [("contract.pdf", 2)]
+
+
+async def test_two_files_of_one_name_are_both_searched_and_a_read_names_both(
+    documents: Documents, folder: Path
+) -> None:
+    """Two leases sent on two days ("2026-10-14 lease.pdf", "2026-10-15 lease.pdf") fit "lease" alike."""
+    pdf(folder / "2026-10-14 lease.pdf", "Old lease. Pets: no.")
+    pdf(folder / "2026-10-15 lease.pdf", "New lease. Pets: one cat.")
+    pdf(folder / "school letter.pdf", "Pets: the class hamster.")
+    await documents.look()
+    found = {name for name, _page in passages(documents.search_text("pets", document="lease"))}
+    assert found == {"2026-10-14 lease.pdf", "2026-10-15 lease.pdf"}
+    several = documents.read_text("lease", 1)
+    assert "2026-10-14 lease.pdf" in several and "2026-10-15 lease.pdf" in several and "school" not in several
+
+
+async def test_words_of_different_names_are_still_looked_for_in_the_text(documents: Documents, folder: Path) -> None:
+    """ "insurance deductible amount": "insurance" and "deductible" name two different files, so neither names the
+    document asked about; the policy's own page with the deductible leads."""
+    pdf(folder / "Car insurance policy.pdf", "Cover.", "Cover terms.", "The deductible is EUR 500 per claim.")
+    pdf(folder / "Deductible receipts.pdf", "Receipt 1: dentist.", "Receipt 2: glasses.")
+    pdf(folder / "Bank statement.pdf", "Balance and amount due.")
+    await documents.look()
+    assert passages(documents.search_text("insurance deductible amount"))[0] == ("Car insurance policy.pdf", 3)
+
+
+async def test_the_date_of_a_sent_file_is_no_name_word(documents: Documents, folder: Path) -> None:
+    pdf(folder / "lease.pdf", "Section 1 Rent.", "Section 10 Pets: one cat.")
+    pdf(folder / "2026-10-14 school letter.pdf", "Section A: the trip.", "Section B: the fee.")
+    await documents.look()
+    assert passages(documents.search_text("section 10"))[0] == ("lease.pdf", 2)
+
+
+async def test_a_one_digit_label_is_looked_for_with_its_word(documents: Documents, folder: Path) -> None:
+    """ "article 7", the rules' own example: the page where the two words stand together leads, never just any page
+    with "article" (each page here also holds a 7 elsewhere)."""
+    pages = [f"Article {n}. Terms of part {n}, signed 7 May." for n in range(1, 13)]
+    pdf(folder / "contract.pdf", *pages)
+    await documents.look()
+    assert passages(documents.search_text("article 7"))[0] == ("contract.pdf", 7)
+
+
+async def test_a_passage_shows_the_rarest_word_not_a_frequent_one_near_the_top(
+    documents: Documents, folder: Path
+) -> None:
+    top = " ".join(f"Row {n} from the list." for n in range(40))
+    pdf(folder / "exam.pdf", f"{top} Task B5 is about the crisis.", *[f"Page {n} from the course." for n in range(9)])
+    await documents.look()
+    first = documents.search_text("B5 from the exam").splitlines()[1]
+    assert "Task B5" in first

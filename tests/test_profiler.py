@@ -40,9 +40,14 @@ def op(action: str, fact_id: int = 0, text_: str = "", source_message_id: int = 
 
 
 def make(
-    store: Store, gemma: FakeGemma, clock: Clock | None = None, max_chars: int = 6_000, window_tokens: int = 12_000
+    store: Store,
+    gemma: FakeGemma,
+    clock: Clock | None = None,
+    max_chars: int = 4_000,
+    window_tokens: int = 12_000,
+    notes_max_chars: int = 12_000,
 ) -> tuple[Profile, ContextBuilder, Profiler]:
-    profile = Profile(store, max_chars=max_chars)
+    profile = Profile(store, max_chars=max_chars, notes_max_chars=notes_max_chars)
     context = ContextBuilder(store, profile, TZ, window_tokens=window_tokens)
     profiler = Profiler(
         store, profile, context, gemma, TZ, window_tokens=window_tokens, poll_seconds=0.01, clock=clock or Clock()
@@ -126,7 +131,7 @@ async def test_over_the_cap_asks_for_one_merged_batch(store: Store) -> None:
         ops(op("add", text_="The user has two daughters.", source_message_id=message)),
         ops(op("remove", fact_id=1), op("add", text_="The user has two daughters.", source_message_id=message)),
     )
-    profile, _, profiler = make(store, gemma, max_chars=50)
+    profile, _, profiler = make(store, gemma, notes_max_chars=50)  # learning writes her notes: their limit
     profile.add("The user lives in Amsterdam, NL.", source_kind="chat")
     assert await profiler.learn() == 2
     assert [f.text for f in profile.facts()] == ["The user has two daughters."]
@@ -185,8 +190,8 @@ async def test_consolidate_makes_room_for_a_remembered_fact(store: Store) -> Non
     gemma = FakeGemma(
         ops(op("replace", fact_id=1, text_="Lives in Amsterdam."), op("add", text_="The user is allergic to nuts."))
     )
-    profile, _, profiler = make(store, gemma, max_chars=60)
-    profile.add("The user lives in Amsterdam, Netherlands.", source_kind="chat")
+    profile, _, profiler = make(store, gemma, max_chars=60)  # the user's part: 41 + 29 is 70
+    profile.add("The user lives in Amsterdam, Netherlands.", source_kind="remember")
     result = await profiler.consolidate_for("The user is allergic to nuts.", message, "remember", None)
     assert result.changed
     assert [f.text for f in profile.facts()] == ["Lives in Amsterdam.", "The user is allergic to nuts."]
@@ -201,7 +206,8 @@ async def test_learning_after_new_refreshes_the_snapshot_of_a_fresh_conversation
     context.refresh_snapshot()
     store.start_new_conversation()
     await profiler.run_once()
-    assert "Miso" in context.snapshot()
+    assert context.snapshot().endswith(prompts.NOTES_IN_SNAPSHOT.format(count=1))  # a note: counted in her prompt
+    assert "Miso" in context._profile.notes_block("How is Miso?")  # and given with a message about it
 
 
 async def test_summary_still_runs_when_learning_fails(store: Store) -> None:

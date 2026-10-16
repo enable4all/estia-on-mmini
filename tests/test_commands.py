@@ -134,7 +134,7 @@ def test_help_groups_the_commands_under_bold_headings() -> None:
 async def test_new_starts_a_conversation_and_queues_learning(store: Store) -> None:
     profile, context, commands, calls = make(store)
     before = store.current_conversation().id
-    profile.add("The user likes tea.", source_kind="chat")
+    profile.add("The user likes tea.", source_kind="remember")
     reply = await commands.handle(command(store, "/new"))
     assert reply.startswith("New conversation started.") and "(1 facts)" in reply
     assert calls == ["learn"]
@@ -148,10 +148,11 @@ async def test_profile_lists_facts_with_their_source(store: Store) -> None:
     profile.add("The user likes tea.", source_kind="remember")
     listing = await commands.handle(command(store, "/profile", T0 + 1))
     lines = listing.splitlines()
-    assert lines[0] == "**Your profile** (19 of 6,000 characters)"
+    assert lines[0] == "**Your profile** (19 of 4,000 characters, always known)"
     assert lines[1] == ""
     assert lines[2].startswith("#1 The user likes tea. (you asked, ")  # no category: no headings
-    assert lines[-2:] == ["", "Correct one with /fix N new text, or remove it with /forget N."]
+    assert lines[-2:] == ["", prompts.PROFILE_FOOTER]
+    assert "Notes from your chats" not in listing  # none yet: no section
 
 
 async def test_profile_groups_facts_under_their_category(store: Store) -> None:
@@ -164,20 +165,24 @@ async def test_profile_groups_facts_under_their_category(store: Store) -> None:
     profile.add("Work: The user cycles to work.", source_kind="chat")
     listing = await commands.handle(command(store, "/profile"))
     day = listing.split("(you asked, ")[1].split(")")[0]
-    assert listing == (
-        "**Your profile** (131 of 6,000 characters)\n"
+    assert listing == (  # the user's own facts, then the notes from chats, each with its fill level
+        "**Your profile** (82 of 4,000 characters, always known)\n"
         "\n"
         "**About**\n"
         f"#2 The user's name is Alex Example. (you asked, {day})\n"
         "\n"
         "**Work**\n"
         f"#1 The user works as a product designer. (from a link, {day})\n"
+        "\n"
+        "**Notes from your chats** (49 of 12,000 characters; the ones that may matter come with your message)\n"
+        "\n"
+        "**Work**\n"
         f"#4 The user cycles to work. (learned from chat, {day})\n"
         "\n"
         "**Other**\n"
         f"#3 The user likes tea. (learned from chat, {day})\n"
         "\n"
-        "Correct one with /fix N new text, or remove it with /forget N."
+        "Correct one with /fix N new text (a note you fix becomes yours), or remove it with /forget N."
     )
 
 
@@ -194,7 +199,7 @@ async def test_fix_keeps_the_category_the_listing_shows_as_a_heading(store: Stor
 
 async def test_forget_by_number_refreshes_the_snapshot(store: Store) -> None:
     profile, context, commands, _ = make(store)
-    profile.add("The user lives in Rotterdam.", source_kind="chat")
+    profile.add("The user lives in Rotterdam.", source_kind="remember")
     assert "Rotterdam" in context.refresh_snapshot()
     assert await commands.handle(command(store, "/forget 1")) == "Forgotten: #1 The user lives in Rotterdam."
     assert profile.facts() == [] and "Rotterdam" not in context.snapshot()
@@ -221,7 +226,7 @@ async def test_status_lists_the_numbers(store: Store) -> None:
         "Signal connection restarts: 1",
         "",
         "**Memory**",
-        "Profile: 1 facts, 0% full",
+        "Profile: 0 facts of yours, 0% full; 1 notes from chats, 0% full",
         "Last learning run: 8 Oct 2026 10:15",
         "History: 42 messages, database 2.5 MB",
     ]
@@ -408,7 +413,7 @@ async def test_fix_corrects_a_fact_in_place_in_the_users_own_words(store: Store)
     profile, context, commands, _ = make(store)
     profile.add("Work: The user works at Acme.", source_kind="chat")
     profile.add("The user likes tea.", source_kind="chat")
-    assert "Acme" in context.refresh_snapshot()
+    assert "Acme" not in context.refresh_snapshot()  # a note from chats: not in every prompt
     message = command(store, "/fix 1 Work: The user works at Example Corp.")
     assert await commands.handle(message) == "Fixed: #1 Work: The user works at Example Corp."
     fixed, other = profile.facts()
@@ -441,8 +446,8 @@ async def test_fix_takes_any_case_and_a_hash(store: Store) -> None:
 async def test_fix_usage_misses_and_refusals(store: Store) -> None:
     profile = Profile(store, max_chars=60)
     commands = Commands(store, profile, ContextBuilder(store, profile, TZ), TZ, status, lambda: None)
-    profile.add("The user likes tea.", source_kind="chat")
-    profile.add("The user lives in Utrecht.", source_kind="chat")
+    profile.add("The user likes tea.", source_kind="remember")
+    profile.add("The user lives in Utrecht.", source_kind="remember")
     replies = [
         await commands.handle(command(store, text, T0 + i))
         for i, text in enumerate(
@@ -466,12 +471,12 @@ async def test_fix_usage_misses_and_refusals(store: Store) -> None:
         "No profile fact #9. See /profile.",
         "Not fixed: looks like an instruction, not a fact.",
         "Not fixed: too long (301 > 300 characters).",
-        "Not fixed: the profile would be 13 characters over its limit.",
+        "Not fixed: your part of the profile would be 13 characters over its limit.",
         "Not fixed: fact #2 already says that.",
     ]
     assert [(f.text, f.source_kind) for f in profile.facts()] == [
-        ("The user likes tea.", "chat"),
-        ("The user lives in Utrecht.", "chat"),
+        ("The user likes tea.", "remember"),
+        ("The user lives in Utrecht.", "remember"),
     ]
     assert [c.action for c in store.changes(1)] == ["add"]
 

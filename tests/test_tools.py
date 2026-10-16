@@ -146,10 +146,12 @@ async def test_remember_duplicate_and_unsafe(store: Store) -> None:
 
 async def test_remember_over_the_cap_consolidates(store: Store) -> None:
     profile, tools, _ = make(store, max_chars=30)
-    profile.add("The user lives in Amsterdam.", source_kind="chat")
+    profile.add("The user lives in Amsterdam.", source_kind="remember")  # the user's part: full
     seen: list[tuple[str, int | None, SourceKind, int | None]] = []
 
-    async def consolidate(fact: str, source: int | None, kind: SourceKind, document: int | None) -> ApplyResult:
+    async def consolidate(
+        fact: str, source: int | None, kind: SourceKind, document: int | None, allowed: str | None = None
+    ) -> ApplyResult:
         seen.append((fact, source, kind, document))
         return ApplyResult(added=[7])
 

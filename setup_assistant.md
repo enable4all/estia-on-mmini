@@ -49,44 +49,113 @@ git clone https://github.com/enable4all/estia-on-mmini.git ~/estia && cd ~/estia
 
 From here on, `<repo>` is that folder. Homebrew sends anonymous usage reports (analytics) unless told not to:
 `scripts/setup.sh` runs every brew command with `HOMEBREW_NO_ANALYTICS=1`, and by hand `brew analytics off` turns them
-off for every brew command from then on, yours included. Install the tools and start Ollama:
+off for every brew command from then on, yours included. Install the tools, then Ollama's official build:
 
 ```sh
 brew analytics off                  # no usage reports to Homebrew
-brew install signal-cli ollama uv
+brew install signal-cli uv
 uv python install 3.13
-brew services start ollama          # Ollama in the background; it starts again at each login (see 2.8)
 uv sync --frozen                    # the bridge's environment (Python 3.13)
 (cd tools/youtube && uv sync --frozen)  # the YouTube helper's own environment (YouTube links, always on)
+scripts/install-ollama.sh --dry-run # every step it would take; nothing is installed
+scripts/install-ollama.sh           # Ollama's official build, checked, always on (your Mac password once)
 ```
 
 `uv sync` uses the bridge's standard-library runtime; there are no runtime dependencies to install. The YouTube
 helper has its own environment, as the device and calendar helpers do; `scripts/run.sh` and every deploy build it too.
 
+Ollama comes only as its official build, never Homebrew's: Homebrew's lacks `libollama_xgrammar.dylib`, the library
+that keeps answers to a fixed form (JSON schema) on Ollama's engine for Apple silicon (MLX), and she needs it.
+`scripts/install-ollama.sh` is setup's Ollama step on its own:
+
+- An Ollama that already answers at 127.0.0.1:11434 is kept when it is the official build: signed by Ollama's
+  developer ID (`3MU9H2V9Y9`), with Apple's Developer ID certificate for that team (checked with `codesign -R`: the
+  team's name alone is something anyone can put in a signature), the program and every library and metallib in its
+  folder; version 0.33.1 or later (the first with that fixed form on MLX); `mlx_metal_v3/libollama_xgrammar.dylib`
+  and `mlx_metal_v4/libollama_xgrammar.dylib` next to it; reachable only from the Mac itself; and run by your own
+  account. Ollama has no login, so one that other machines reach (`OLLAMA_HOST=0.0.0.0`) stops it, with the setting
+  that closes it; one that another account of this Mac runs stops it too (that account would control her answers),
+  and so does another program or account that listens on its port too (the Mac itself has two addresses for that
+  port, so a second Ollama can sit beside yours); doctor shows either with a ✗.
+- A kept Ollama of another version than 0.40.4 gets a "!": it works, but she is tested on 0.40.4. Setup's own service
+  (below) is updated in place instead: the new version is downloaded and checked while the old one keeps answering,
+  then `~/opt/ollama/current` points at it and the service starts again (a few seconds without answers); if the new
+  one does not answer within 60 seconds, `current` points back at the old folder and the old one starts again. At
+  0.40.4, its service file is written again when it is not the one this version of setup writes (an update changed
+  it), and the service starts again; doctor shows such a file with a "!" until then. A kept Ollama that no
+  background service starts with the Mac gets a "!" too.
+- Homebrew's Ollama or the Ollama app answering stops it, with why and the fix, which you run. So does Homebrew's
+  background service for Ollama (`brew services`, `~/Library/LaunchAgents/homebrew.mxcl.ollama.plist`) or a login item
+  of the app's, even when the official build answers: either can take the address first after a login. Homebrew's:
+  `brew services stop ollama`, then `brew uninstall ollama` (the models in `~/.ollama` stay). The app updates itself,
+  starts only when someone logs in on the Mac's screen, and stops any other Ollama when its own cannot start: quit it
+  (`osascript -e 'quit app "Ollama"'` works over SSH too) and move it to the Trash. What the app leaves behind is
+  untested: its login item (System Settings, General, Login Items) and the command `/usr/local/bin/ollama`, which
+  point at the app that is gone; remove them too if they are there. Homebrew's Ollama installed but neither running
+  nor set up as a service is named with "!", and never used.
+- Nothing answering and another background service that runs Ollama in place (your own, such as one from an earlier
+  install of Ollama, also one that starts it through a shell or `env`): it stops, and names that service with the
+  commands that start it again (`/usr/bin/sudo /bin/launchctl kickstart -k system/<label>`). Two always-on services
+  for the same program would fight over the address forever.
+- Each of these stops a first install. Run again once she is set up (her config is in place, or she runs in her
+  own user), setup shows it as a "!" with its fix and goes on with the other steps; it downloads no model through an
+  Ollama it refused. An Ollama that someone other than you may control stops every run: another account's, one whose
+  program cannot be found or whose account cannot be read, one that shares its port, one that other machines reach,
+  or one whose folder does not check out (signatures, Apple's notarization). `scripts/install-ollama.sh` always stops.
+- Otherwise version 0.40.4 (`ollama-darwin.tgz`, 168 MB) is downloaded from GitHub, over HTTPS only (never with the
+  settings in your `~/.curlrc`; a download that stalls for a minute stops), into a new empty folder and checked
+  before anything is installed: its fingerprint (sha256, pinned in `src/local_assistant/ollama_build.py`), every
+  program, library and metallib with `codesign --verify --strict -R` against Apple's Developer ID certificate for
+  Ollama's team, `ollama` with Apple's notarization check (`spctl`), and both libraries. One failed check and nothing
+  is installed.
+- It goes into `~/opt/ollama/v0.40.4`, with `~/opt/ollama/current` pointing at it and that folder added to new
+  Terminal windows (`~/.zprofile`): no admin rights for these. Your home folder is read from the Mac's list of users,
+  never from the shell's `HOME` setting, and setup stops before anything runs as root when a folder on the way to the
+  program (your home, `~/opt`, `~/opt/ollama`, the version's folder) or the program itself is not yours alone.
+- Its background service, `/Library/LaunchDaemons/com.local-assistant.ollama.plist` (admin rights: your Mac password
+  once), runs it as you from the Mac's start, without a login, reachable only from the Mac itself (127.0.0.1:11434):
+  one model loaded at a time, one request at a time, kept loaded 2 hours after the last one. The service file reaches
+  root on its input, never through a file a program of yours could swap. Its log, `/var/log/estia/ollama.log`, is
+  made yours and readable only by you before the service starts (as root, launchd would make one every account can
+  read).
+
+Known gaps: that log is emptied only when setup or `scripts/install-ollama.sh` runs and finds it over 10 MB (a line
+per request), or by you without admin rights: `/usr/bin/truncate -s 0 /var/log/estia/ollama.log`; while the model
+stays loaded, Ollama's MLX engine keeps up to 8 GB more memory for earlier conversations, untested here without the
+developer's own memory watchdog and untested on 16 and 24 GB Macs; a newer Ollama comes only with an Estia update that
+changes the pin, after the tests pass on it. Updates, rollback and removal are in 7. Operations.
+
 ### 2.2 Model (once)
 
-Estia talks to a model served by Ollama. The setup was developed with Gemma 4 26B (`gemma4:26b`), which supports the
-tool calls the bridge needs.
+Estia talks to a model served by Ollama. The setup was developed with Gemma 4 26B in its build for Apple silicon
+(`gemma4:26b-mlx`, for Ollama's MLX engine), which supports the tool calls the bridge needs. Name the `-mlx` tag in
+full: since Ollama 0.40.0 the bare `gemma4:26b` is a list, and what it downloads depends on the Ollama version (on 0.40.x
+an untested build). Both `-mlx` builds need Ollama 0.33.1 or later.
 
-The download is large: about 18 GB for `gemma4:26b`, and the [tag page](https://ollama.com/library/gemma4) lists the exact
-size. It can take an hour or more on a slow line, so run it with `caffeinate -i`, which keeps the Mac awake meanwhile. If
+The download is large: 18.3 GB for `gemma4:26b-mlx`, and the [tag page](https://ollama.com/library/gemma4) lists the
+exact size. It can take an hour or more on a slow line, so run it with `caffeinate -i`, which keeps the Mac awake meanwhile. If
 it stops, run the same command again: Ollama picks up where it left off.
 
+The commands below run `ollama` by name: `scripts/install-ollama.sh` adds it for new Terminal windows only, so open a
+new one first (or type `~/opt/ollama/current/ollama` in its place).
+
 ```sh
-caffeinate -i ollama pull gemma4:26b
-ollama list                         # the tag and its size
+caffeinate -i ollama pull gemma4:26b-mlx
+ollama list                         # the tag, its ID (f0fc7e0ae494: the tested build; setup checks it) and its size
 ```
 
 Memory: while loaded, the model needs about 18 to 20 GB, so this guide assumes a Mac with 32 GB. On 16 or 24 GB, use
-`gemma4:12b` (about 8 GB), as `scripts/setup.sh` does there: in the commands below in place of `gemma4:26b`, with
-`num_ctx 16384` on 16 GB. Its answers will be weaker.
+`gemma4:12b-mlx` (7.7 GB, ID `ded7a2735003`), as `scripts/setup.sh` does there: in the commands below in place of
+`gemma4:26b-mlx`, with `num_ctx 16384` on 16 GB. Its answers will be weaker. A Mac with 16 or 24 GB of memory gets the
+smaller model, Gemma 4 12B (`gemma4:12b-mlx`), which failed some of her safety tests (15 Oct, run twice; SECURITY.md,
+known gaps): setup says what failed and downloads it only on a yes. 32 GB with Gemma 26B is the tested setup.
 
 Then give the model the name the code uses, with a larger context window. Ollama's default window is small on many setups,
 and Ollama cuts a longer prompt without a word. Estia sends about 12,000 tokens of history, so a small window would lose
 the start of a long chat:
 
 ```sh
-mf="$(mktemp)" && printf 'FROM gemma4:26b\nPARAMETER num_ctx 32768\n' > "$mf" && ollama create local-worker -f "$mf"; rm -f "$mf"
+mf="$(mktemp)" && printf 'FROM gemma4:26b-mlx\nPARAMETER num_ctx 32768\n' > "$mf" && ollama create local-worker -f "$mf"; rm -f "$mf"
 ```
 
 Leave `model` out of the config (2.4), and Estia uses `local-worker`. After your first message, `ollama ps` shows the
@@ -101,8 +170,9 @@ check sees a cloud model, no message goes to it: answers pause, a note from the 
 that cannot be read changes nothing. `local-worker`, made above from a downloaded model, is local. To also notice another
 model put in under the same name, pin its digest with `model_digest` (`config.example.toml`).
 
-Some tags also come as an Apple silicon (MLX) build. If `ollama ps` shows far more memory than expected, stop the model
-with `ollama stop <tag>`.
+While it stays loaded, the MLX build keeps earlier conversations in memory (up to 8 GB more). If `ollama ps` shows far
+more memory than expected, `ollama stop <tag>` frees it; the next message loads it again (a few seconds). Doctor's
+"Model build" line names a Gemma 4 model that is not one of the two `-mlx` builds, with the step to one.
 
 ### 2.3 Signal number (once)
 
@@ -164,7 +234,8 @@ sets the PIN as her own user, and starts her again (2.10). The lock lapses after
 The bridge sets the bot's profile name to her name and "(AI)" on its first start: "Estia (AI)", or with the config's
 `name` (2.4) that name, set again after a rename. It sets her profile picture the same way, from the config's `avatar`
 (2.4): when it is left out, Estia's e., or with another name its first letter, a to z, with the orange full stop
-("t." for ours, Tiffany; any other first letter keeps the e.); your own picture when it names one; none with `avatar = ""`. The picture is sent
+("t." for ours, Tiffany; accents left out, so Ángela gets an a.; a first letter outside a to z even then, such as
+Greek or Chinese, keeps the e.); your own picture when it names one; none with `avatar = ""`. The picture is sent
 once, and again only after the file changes; if the file cannot be used or Signal refuses it, the log says so and the
 next start tries again. The move into her own user copies your picture into her config folder (2.7, step 5).
 
@@ -265,7 +336,8 @@ folder (times and fixed reasons only); doctor only reads that file. A fix that s
 address or helper (the scripts doctor names), or a calendar's name or a Hue light's id corrected in `config.toml`, turns
 the line ○ "set up again, not tested yet" until the bridge next uses the part (still failing, it is ✗ again). After any
 other fix (a device back on, a service running again), and to get ✓, use the part once (ask Estia something that needs
-it).
+it). The Documents line can also be ! "working, last read 14:05; since 09:12: scanned pages not read (text recognition
+failed)": text pages are still read; the line names the next step.
 
 ```sh
 cd <repo> && scripts/run.sh
@@ -425,6 +497,14 @@ cd <repo> && git pull
 /usr/bin/sudo /usr/local/estia/bin/estia-deploy           # or: /usr/bin/sudo /usr/local/estia/bin/estia-deploy <repo>
 ```
 
+An update that changes the tools root runs takes three steps, in this order:
+`/usr/bin/sudo /usr/local/estia/bin/estia-deploy`, then
+`/usr/bin/sudo /usr/local/estia/bin/estia-deploy --update-tools`, then
+`/usr/bin/sudo /usr/local/estia/bin/estia-deploy` again. The first deploy says when the tools differ; the second puts
+them to use. An install whose services still write their output into her own folder needs these three steps once:
+launchd (the Mac's service starter) opens that output as root, so a program of her account could make root write into
+a file it names. Doctor shows ✗ Services until it is done.
+
 `estia-deploy` first shows the commits since the live one and the files they change, and asks: read the list, it runs
 as her, with her data. Root (the Mac's all-powerful admin account) runs only its own tools in `/usr/local/estia/tools` (their own Python, the deploy code,
 the service templates), never a release or your checkout. The build runs as you, at the release's final path (its own
@@ -493,12 +573,11 @@ A Mac that sleeps, or stays off after a power cut, stops Estia too. Three settin
   display is off" and "Start up automatically after a power failure". On the command line, `/usr/bin/sudo /usr/bin/pmset -a sleep 0 autorestart 1`
   does the same. It needs `sudo` because power settings are system-wide, and only root may change them.
   Doctor's Power line shows ! when the Mac sleeps or stays off after a power failure, with this command.
-- **Ollama starts at login.** `brew services start ollama` runs Ollama as a login item of your user, so it starts only
-  after you log in. The bridge starts at boot without you, but it cannot answer without Ollama: every message gets "Estia
-  isn't available right now". Either turn on automatic login for your user (System Settings → Users & Groups; not available
-  with FileVault on), or log in once after each restart. The trade-off: automatic login lets anyone at the Mac into your
-  account after a restart (the security step shows it as !), and without it she answers "isn't available" after every
-  restart until someone logs in.
+- **Ollama starts with the Mac.** Its background service (`com.local-assistant.ollama`, from setup or
+  `scripts/install-ollama.sh`, 2.1) starts at boot without a login, as hers does, so no automatic login is needed (the
+  security step shows automatic login as !). An Ollama started another way (Homebrew's `brew services`, the Ollama app)
+  starts only after a login; setup stops while either is set up. An official Ollama it keeps that no background
+  service starts with the Mac gets a "!" from setup.
 - **FileVault.** With FileVault on, someone has to type the password after each restart, and automatic login is not
   possible. For a planned restart, `/usr/bin/sudo /usr/bin/fdesetup authrestart` restarts the Mac without that prompt; it asks for your password.
 
@@ -1264,8 +1343,12 @@ extra_checks = [
 
 Estia reads the git repositories directly in one folder of this Mac, read-only, at one of three levels. Off without
 `[projects]`: most people need none of it. `scripts/setup.sh` asks "Should she see projects on this Mac? Most people:
-no." when it writes the config, and `scripts/setup.sh --extras` asks again later: the folder (it must exist; your home
-itself is refused) and the level. Nothing is sniffed: no folder is read before you name it.
+no." when it writes the config, and `scripts/setup.sh --extras` asks again later: the folder and the level. The folder
+follows the share's rules: it must exist, your home itself and a symbolic link (the folder or one on the way) are
+refused, and one outside your home is taken but never shared by the move: you give `_estia` read access to it
+yourself (setup says so). A move whose last step, that share, fails still counts: setup says she runs in her own user,
+names the share's command and goes on to the security step. Nothing is sniffed: no folder is read before you name
+it.
 
 ```toml
 [projects]
@@ -1387,8 +1470,9 @@ it at 75 s. PDFKit gives a text page's text, in about 1 ms. A page with no text 
 inch and read by Vision's text recognition on the Mac, in about 0.3 s, in Estia's 11 languages with Vision's own
 detection. A PDF is read by Apple's PDFKit and Vision in a helper program that runs as her account: a PDF made to attack
 the reader reaches only that program and her account, never yours. Gemma is not used in the look, the reading, the
-index or the note: it only answers questions, with `search_documents` (the best passages, with document and page) and
-`read_document` (one page, at most 6,000 characters).
+index or the note: it only answers questions, with `search_documents` (the best passages, with document and page;
+words on most pages are left out, words of a document's name add to its pages; `document` keeps it to one) and
+`read_document` (one page, or up to three with `last_page` for a section that goes on; at most 6,000 characters a page).
 
 **Limits:** 25 MB and 300 pages a document; 60 seconds to read it; one document at a time. A file over 25 MB never
 reaches the helper. 60 seconds hold about 190 full scanned pages: a longer scan ends in a timeout, and nothing of it is
@@ -1396,6 +1480,10 @@ read. A PDF that cannot be read is listed by `/docs` with the reason: "it is not
 only an owner password, which limits printing or copying, is read, as in Preview), "it is over 25 MB", "it has over 300
 pages", "reading it took over 60 seconds" or "its text cannot be read". It is not read again until the file changes; a
 timeout is tried once more after each start. A page that cannot be read is skipped, and she says so when asked about it.
+A scanned page that text recognition failed on (not the page itself) is skipped too, and its PDF is read again once
+after each start. A fix to the reader changes neither a file's size nor its change time, so each file keeps which
+reader read it: after an update with a new reader, a PDF the old one did not read whole (pages skipped, or its text
+unreadable) is read again once. The update of 15 Oct is one: scanned pages skipped in her own user are read again.
 
 **What the layout gives** (measured on a Mac mini with macOS 27, on synthetic pages; `tools/documents/README.md`):
 
@@ -1411,7 +1499,9 @@ timeout is tried once more after each start. A page that cannot be read is skipp
 **First scan after an update.** macOS prepares Vision's model the first time a new build of the helper reads a scan: 50
 to 70 seconds. The bridge runs the helper's warm-up 30 s after each start, as her, so a scan read after it does not
 time out; a scan sent before the warm-up ends may time out and is read again at her next look. Whether the
-preparation carries across users or restarts is untested.
+preparation carries across users or restarts is untested. A warm-up that fails makes the Documents line in doctor and
+`/status` ! "scanned pages not read (text recognition failed)" until text recognition works again (a later warm-up, or a
+scanned page read); text pages are still read.
 
 **A PDF sent on Signal**, from an allowed account (sent as a PDF, and its first bytes, `%PDF-`, agree): saved into the
 folder itself, never into a folder of its own, under a clean name with the date ("2026-10-14 lease.pdf": only letters,
@@ -1520,7 +1610,7 @@ calls say only the words, never a crossed-out one.
 | `/fix N new text` | Correct fact N in place: same number, the text checked like a "remember" fact, and from then on it counts as yours ("you asked"). The change log keeps the old text |
 | `/forget N` · `/forget words` | Remove fact N, or the facts containing the words (asks for a number if several match). Takes effect at once |
 | `/learn <link>` | Learn about you from a page (e.g. your public LinkedIn profile): the bridge reads it, one structured model call takes out the facts about you, and you get the exact list of what was saved and what was already known. A YouTube link gets "/learn does not read YouTube links: it keeps what it reads, and a video's captions are never kept. Send the link without /learn for a summary." |
-| `/status` | Model loaded or not, waiting messages, profile fill, last learning run, history size, Signal restarts, and a line per part that is turned on: working (last read), set up but not tested yet, or failing with the fix |
+| `/status` | Model loaded or not, waiting messages, profile fill, last learning run, history size, Signal restarts, and a line per part that is turned on: working (last read), set up but not tested yet, failing with the fix, or ! working but not all of it (Documents: scanned pages not read) with the fix |
 | `/voice` · `/voice auto\|on\|off` · `/voice echo on\|off` | Spoken answers: for voice notes (auto, default), always, or never; the transcript echo (off by default) |
 | `/soul` | The style file in use (`soul.md`, its text without the `#` lines; with `[chat]` and `[call]` lines, what texts get and what calls get), or why none is and the built-in style in use (hearth or playful) and the other; with the line added in code turned off (`calm_on_worry = false`), it says so |
 | `/language` · `/language <name or code>` | The 11 languages with the current one marked; switch with a code or a name in English or in the language itself (`/language nl`, `/language dutch`, `/language nederlands`) |
@@ -1614,7 +1704,8 @@ In normal messages:
   time); at level `docs` also the documents, at level `code` also the source code, read and searched (`project_search`).
   A misheard name is matched to the nearest project, or she asks "Do you mean …?" (section 3, Projects).
 - "What does my lease say about pets?" (with Documents on) → `search_documents` (the best passages, with the document
-  and the page) and `read_document` (one page). The folder is looked at first, so a PDF put there a minute ago is found.
+  and the page) and `read_document` (one page, or up to three for a section that goes on). The folder is looked at
+  first, so a PDF put there a minute ago is found.
   She answers only from what they return and names the document and the page; with nothing found she says so. A
   document's text is outside text, as a page's is: no fact saved or forgotten, no reminder, no web search or Google
   Maps in that answer, and device changes wait for your yes. The tool log keeps a stub, and later answers never see
@@ -1951,8 +2042,8 @@ Notes you may see:
 | `conversations` | One row per conversation (`/new` to `/new`) with its summary and summary point; `kind` is `chat`, or `practice` for a `/babble` session (schema v8) |
 | `messages` | Every message in and out, its status and its place in the conversation (`seq`); for an incoming one, the sender's device that sent it (`source_device`, schema v9) |
 | `documents` | Pages learned from links (full text, searchable); your PDFs are in `doc_files` and `doc_pages` |
-| `doc_files`, `doc_pages` | With `[documents]`: each PDF in `~/Estia-KB` (its place in the folder, size and change time, pages, the pages skipped, why it could not be read, whether it came from Signal and was announced; numbers never reused) and each page's text, in a full-text index. A PDF taken out of the folder loses its rows at the next look; `[privacy] keep_days` leaves them alone; a new share starts them afresh (schema v10) |
-| `profile_facts` | The live profile |
+| `doc_files`, `doc_pages` | With `[documents]`: each PDF in `~/Estia-KB` (its place in the folder, size and change time, pages, the pages skipped, why it could not be read, whether it came from Signal and was announced; numbers never reused) and each page's text, in a full-text index. A PDF taken out of the folder loses its rows at the next look; `[privacy] keep_days` leaves them alone; a new share starts them afresh (schema v10; v12 adds which reader read each PDF) |
+| `profile_facts` | The live profile, in two parts: your own facts and her notes (`in_notes`, schema v13: a fact moved into the notes to make room keeps where it came from). A release from before the two parts, put back by a rollback, reads both as one 6,000-character profile and may delete facts to fit it: say no "remember that …" until the next deploy |
 | `profile_changes` | Every add, replace and remove, with the reason and the message it came from |
 | `tool_calls` | Every tool call Gemma made (audit) |
 | `mail_messages` | Mail headers of the configured mailboxes (sender, recipients, subject, date, read, Focused/Other), Gemma's label and one-line summary, answered time; no bodies; deleted after 30 days (schema v4) |
@@ -1963,9 +2054,11 @@ Notes you may see:
 | `reminders` | Your reminders: your words, the local time as meant and its time zone, the next time in UTC, repeat, call, status, the note of the current firing and a fixed outcome word (sent, late, no_answer …). Done and cancelled ones are deleted after 30 days (schema v7) |
 | `followups`, `initiative_log` | Check-ins she may send (your words, at most 120 characters, the message they came from, due and expiry times; deleted 30 days after they close) and a log of the messages she starts: kind, day, outcome, a fixed reason word, the message, reply and `/quiet` times, never text (kept a year). `messages.footer` keeps the line the code adds to them (schema v7) |
 
-- **What Gemma sees:** rules, then the profile snapshot, the summary, recent messages (about 12,000 tokens, with earlier tool
-  calls replayed in short form), and your new message with its local time. Fixed parts come first, so Ollama can reuse its
-  cache. Notes (profile changes, busy, offline) are never part of it.
+- **What Gemma sees:** rules, then the profile snapshot (your part only, up to 4,000 characters), the summary, recent
+  messages (about 12,000 tokens, with earlier tool calls replayed in short form), and your new message with its local time,
+  preceded by her notes that may matter for it (at most 1,500 characters of her 12,000: shared rarer words first, then the
+  newest; never on a `/babble` turn). Fixed parts come first, so Ollama can reuse its cache. The bridge's notices (profile
+  changes, busy, offline) are never part of it.
 - **Summaries:** when recent messages pass about 12,000 tokens, the older half is summarised in the background. Above 20,000
   tokens the oldest messages are dropped without a summary (an emergency, logged).
 - **Snapshot:** the profile Gemma sees changes only at `/new`, after a summary, after a forget or a `/fix` and at start.
@@ -1988,8 +2081,8 @@ Notes you may see:
    ruff (lint and format), mypy in strict mode, and
    pytest, with a fake signal-cli, a fake voice service, a fake device helper and a scripted fake Gemma. Before pytest
    it builds the documents helper: one test has the bridge read PDFs with it (text pages and a scanned page). The
-   helpers have their own suites: `cd tools/voice && swift test` (Swift Testing), `cd tools/documents && swift test`
-   (Swift Testing, offline; verify.sh runs it too; the first scanned page of a new build waits about a minute while
+   helpers have their own suites: `cd tools/voice && swift test` (Swift Testing), `cd tools/documents && swift test --no-parallel`
+   (Swift Testing, offline, one test at a time; verify.sh runs it too; the first scanned page of a new build waits about a minute while
    macOS prepares its text recognition), `cd tools/tapo && uv run pytest -q`,
    `cd tools/ical && uv run pytest -q` and `cd tools/youtube && uv run pytest -q` (recorded YouTube answers, no
    network).
@@ -2049,6 +2142,7 @@ Notes you may see:
 | Answers paused: a cloud model | A note "Answers are paused: Ollama lists the model … as a cloud model …": her model's name in Ollama points to a model on Ollama's servers. `/usr/bin/sudo /usr/local/estia/bin/estia doctor` shows ✗ on its Model line with the fix (a model downloaded to the Mac, 2.2, then a restart). A note says when answers are back |
 | Voice service | `curl -s http://127.0.0.1:8150/health`. Restart: `/usr/bin/sudo /bin/launchctl kickstart -k system/com.local-assistant.voice`. Each update builds her voice service again when `tools/voice` changed. Doctor and `/status` show "another program holds its address: nothing sent" when a program not hers took its address, with the commands that find it and start hers again. After an install, a move or a macOS update the first start takes up to about 15 minutes (Neural Engine compile); with `[calls]` she texts once it is ready |
 | Upgrade | `git pull && uv sync --frozen && (cd tools/tapo && uv sync --frozen) && (cd tools/ical && uv sync --frozen) && (cd tools/youtube && uv sync --frozen)`, then restart (an install that runs as you). In her own user: `git pull` in your checkout, then `/usr/bin/sudo /usr/local/estia/bin/estia-deploy`: a new release owned by root, switched, restarted and checked within 120 s, switched back on a failure (2.7). Each update builds her voice service again when `tools/voice` changed. |
+| Ollama | `curl -s http://127.0.0.1:11434/api/version` shows its version. Restart: `/usr/bin/sudo /bin/launchctl kickstart -k system/com.local-assistant.ollama`; when launchctl says it cannot find the service (it is not loaded), `/usr/bin/sudo /bin/launchctl bootstrap system /Library/LaunchDaemons/com.local-assistant.ollama.plist`. After an Estia update that changes its pin or its service file: `scripts/install-ollama.sh` (a changed service file is written again and the service starts again; the new version downloaded and checked into a new folder in `~/opt/ollama` while the old one keeps answering; then `current` points at it and the service starts again; if the new one does not answer, `current` points back at the old one and it starts again). Back to the older one by hand: `ln -sfn ~/opt/ollama/v<old> ~/opt/ollama/current`, then the restart. Its log, `/var/log/estia/ollama.log`, is yours: setup empties it above 10 MB, and so does `/usr/bin/truncate -s 0 /var/log/estia/ollama.log` (no admin rights). Remove: `/usr/bin/sudo /bin/launchctl bootout system/com.local-assistant.ollama`, `/usr/bin/sudo /bin/rm /Library/LaunchDaemons/com.local-assistant.ollama.plist`, delete `~/opt/ollama` (the models stay in `~/.ollama`), and delete the line with `opt/ollama/current` in `~/.zprofile` |
 | Upgrade signal-cli | Homebrew's signal-cli about monthly (`brew upgrade signal-cli`); releases older than three months may stop working, so read the release notes first. Calls need the JVM build to match Homebrew's version: `tools/call-tunnel/install-signal-cli-jvm.sh <new version>`, point `[calls] signal_cli` at the new folder, pin with `brew unpin signal-cli && brew upgrade signal-cli && brew pin signal-cli`, restart, and make a test call. Undo: the old folder and the old config line still work with the old version. In her own user, `/usr/bin/sudo /usr/local/estia/bin/estia-deploy` then copies Homebrew's new signal-cli (and the new JVM build from `<repo>/vendor`) into her release |
 | Calls | Call the bot from Signal (phone or linked device). `/usr/bin/sudo /usr/local/estia/bin/estia doctor` shows Calls ✓ and `/usr/bin/sudo /usr/local/estia/bin/estia check` shows `signal-cli: running`; "How's the Mac?" covers calls too. A call that never answers: `/usr/bin/sudo /usr/local/estia/bin/estia logs -n 5000 \| grep -i call`. A call that rings out with the note "I can't take calls yet: my voice is still loading …" means her voice is still loading: wait for "My voice is ready: you can call me now." (3, Calls, "While her voice loads"); `/usr/bin/sudo /usr/local/estia/bin/estia logs -n 5000 \| grep "voice ready"` shows when it went. What stopped her, per call: `/usr/bin/sudo /usr/local/estia/bin/estia logs -n 5000 \| grep "calls: barge-in"` (the counts per rule; see 3, Calls) |
 | Safety number changed | Replies stop and doctor and `/status` show ✗. Never trust a new key blindly: a SIM swap of your number looks exactly like this. On the Mac, `/usr/bin/sudo /usr/local/estia/bin/estia signal listIdentities -n <your ACI>` (it stops the bridge, runs her signal-cli as her, then starts her again; before her own user, stop the bridge and run `signal-cli -Djava.net.preferIPv4Stack=true -a <bot-number> listIdentities -n <your ACI>`), compare its safety number with the one your phone shows (Signal, the chat with Estia, View safety number), and only if they match: `/usr/bin/sudo /usr/local/estia/bin/estia signal trust -v <safety number> <your ACI>`. Turn on Registration Lock (a Signal PIN) for your own account and Estia's (2.3, 2.10), so a SIM swap alone cannot take either over. With `[calls]` on, the wrapper uses her JVM build (the flag goes in `JAVA_OPTS`) |
@@ -2059,7 +2153,7 @@ Notes you may see:
 | A new device is held | "A message came from a new linked device N and was held." Yours: send `/devices ok N` from your phone. Not yours: remove it in Signal → Settings → Linked devices, then turn on Registration Lock for your number |
 | The move failed | Her old setup comes back (on a first install nothing is installed). Keep the ✗ line: it names what failed. Fix that, run `scripts/migrate-to-own-user.sh --dry-run` again, then `scripts/install-daemon.sh` |
 | YouTube | Nothing to set up: always on with `read_link`. `/usr/bin/sudo /usr/local/estia/bin/estia doctor` shows a YouTube line: its last read (working, set up but not tested yet, or failing with the fix), then youtube-transcript-api's version in brackets; `/status` shows the same line without the version. "refused by the service": YouTube blocks this Mac for a while after many requests or a bot check; wait. "unreadable answer": YouTube changed; a newer pinned version of `tools/youtube` may be needed. Every video said to have no captions or to be private or removed, while `/status` shows YouTube working: YouTube may have changed too (SECURITY.md, known gaps); try a video you know has captions. "! … the YouTube helper is not set up": before her own user, run `cd tools/youtube && uv sync --frozen`. In her own user, run `/usr/bin/sudo /usr/local/estia/bin/estia-deploy`; if it says the root-run tools differ, read the diff, run `/usr/bin/sudo /usr/local/estia/bin/estia-deploy --update-tools`, then run `/usr/bin/sudo /usr/local/estia/bin/estia-deploy` again. `/usr/bin/sudo /usr/local/estia/bin/estia logs -n 5000 \| grep youtube` has outcome codes, character counts and times, never the video or its title |
-| Documents | With `[documents]`, `/usr/bin/sudo /usr/local/estia/bin/estia doctor` shows a Documents line: the helper built, the folder shared and readable, then her last look (section 3, Documents); `/status` shows the last look. `/docs` lists what she has and why a PDF cannot be read. Share again: `scripts/share-documents.sh` as you (`--dry-run` first; no admin rights); take it back: `scripts/share-documents.sh --revoke`. "macOS refuses it (operation not permitted)": the folder is in Documents, Desktop or Downloads, which macOS guards; use `~/Estia-KB` (section 3, Documents). "the documents helper is not built": in her own user `/usr/bin/sudo /usr/local/estia/bin/estia-deploy` (after `/usr/bin/sudo /usr/local/estia/bin/estia-deploy --update-tools` when it says the root-run tools differ); before, `cd tools/documents && swift build -c release`. A scan over about 190 full pages ends in a timeout: split it, and take the original out of the folder. `/usr/bin/sudo /usr/local/estia/bin/estia logs -n 5000 \| grep documents` has counts, codes and times, never a document's name or text |
+| Documents | With `[documents]`, `/usr/bin/sudo /usr/local/estia/bin/estia doctor` shows a Documents line: the helper built, the folder shared and readable, then her last look (section 3, Documents); `/status` shows the last look. `/docs` lists what she has and why a PDF cannot be read. Share again: `scripts/share-documents.sh` as you (`--dry-run` first; no admin rights); take it back: `scripts/share-documents.sh --revoke`. "macOS refuses it (operation not permitted)": the folder is in Documents, Desktop or Downloads, which macOS guards; use `~/Estia-KB` (section 3, Documents). "the documents helper is not built": in her own user `/usr/bin/sudo /usr/local/estia/bin/estia-deploy` (after `/usr/bin/sudo /usr/local/estia/bin/estia-deploy --update-tools` when it says the root-run tools differ); before, `cd tools/documents && swift build -c release`. A scan over about 190 full pages ends in a timeout: split it, and take the original out of the folder. "! … scanned pages not read (text recognition failed)": text pages are still read; restart her (`/usr/bin/sudo /usr/local/estia/bin/estia restart`), which tries text recognition again, and look for the warm-up in her log. `/usr/bin/sudo /usr/local/estia/bin/estia logs -n 5000 \| grep documents` has counts, codes and times, never a document's name or text |
 | Backup | Not set up yet: the database and her Signal account (`/var/estia/Library/Application Support/local-assistant`, `/var/estia/.local/share/signal-cli`) have no backup |
 
 ## 8. Security

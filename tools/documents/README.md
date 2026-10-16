@@ -10,7 +10,7 @@ documents-helper read <absolute path to a PDF> --max-pages 300 --max-seconds 60
 
 One JSON line on stdout. Exit 0 with `"ok": true`, exit 1 otherwise.
 
-- Read: `{"ok": true, "pages": [{"n": 1, "text": "…", "ocr": false}, …], "skipped": [{"n": 7, "why": "unreadable"}], "page_count": N}`. Every page is in `pages` or in `skipped`, in page order. `ocr` is true when Vision read the page. A blank page is in `pages` with empty text. A page's text has line feeds only (also for U+2028, U+2029 and U+0085, which JSON leaves unescaped), no NUL, other control characters as spaces (tabs stay), and at most 20,000 characters, as the bridge keeps it: 300 pages always fit the bridge's 32 MiB limit.
+- Read: `{"ok": true, "pages": [{"n": 1, "text": "…", "ocr": false}, …], "skipped": [{"n": 7, "why": "unreadable"}], "page_count": N}`. Every page is in `pages` or in `skipped`, in page order. A page is skipped as `unreadable` when it cannot be drawn or read, and as `ocr_failed` when Vision itself failed on it (text recognition failing, not the page: with `/var/empty` as Foundation's home every scan fails at once); the bridge reads a document with an `ocr_failed` page again after each start. `ocr` is true when Vision read the page. A blank page is in `pages` with empty text. A page's text has line feeds only (also for U+2028, U+2029 and U+0085, which JSON leaves unescaped), no NUL, other control characters as spaces (tabs stay), and at most 20,000 characters, as the bridge keeps it: 300 pages always fit the bridge's 32 MiB limit.
 - Not read: `{"ok": false, "error": "<code>"}`:
   - `not_pdf`: no PDF header in the first 1024 bytes.
   - `encrypted`: the PDF opens only with a password. A PDF with only an owner password (limits on printing or copying) opens without one and is read, as in Preview.
@@ -59,7 +59,8 @@ macOS prepares Vision's model for the Neural Engine the first time a new build o
 
 ```
 cd tools/documents
-swift test                      # offline; the first run of a new build waits for Vision's model (see above)
+swift test --no-parallel        # offline; one at a time (scans read at once deadlock Vision on a 4-core Mac);
+                                # the first run of a new build waits for Vision's model (see above)
 swift build -c release          # .build/…/Release/documents-helper
 ```
 

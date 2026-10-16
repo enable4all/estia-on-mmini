@@ -429,6 +429,7 @@ def test_the_log_takes_the_evening_note_and_an_older_database_moves_up(tmp_path:
         ALTER TABLE before RENAME TO initiative_log;
         CREATE INDEX initiative_log_day ON initiative_log (local_day);
         CREATE INDEX initiative_log_message ON initiative_log (message_id);
+        ALTER TABLE doc_files DROP COLUMN reader;
         PRAGMA user_version = 10;
         COMMIT;"""
     )
@@ -439,7 +440,7 @@ def test_the_log_takes_the_evening_note_and_an_older_database_moves_up(tmp_path:
         )
     conn.close()
     store = Store.open(path)
-    assert SCHEMA_VERSION == 11 and store._conn.execute("PRAGMA user_version").fetchone()[0] == 11
+    assert store._conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION >= 11
     assert [(e.id, e.kind, e.outcome) for e in store.initiative_entries()] == [(1, "lookback", "sent")]
     store.log_initiative("evening", "2026-10-14", "sent", at="2026-10-14T19:00:00+00:00")
     assert [e.kind for e in store.initiative_entries()] == ["lookback", "evening"]
@@ -454,12 +455,16 @@ def test_the_log_takes_the_evening_note_and_an_older_database_moves_up(tmp_path:
 # off rule's "name the command in full" and hearth's friend line; 4e882e0's: chat b1940795…, call 3f41dfa0…,
 # /initiative on bc353f30…): this harness's install (the defaults, hardened): the chat's and a call's system prompt and
 # her tools, then the chat's with /initiative on
+# 16 Oct, the profile in two parts: her rules as before, the profile's header says 4,000 (its own part); chat
+# 7a8cd927…, call e355cbf5… before (owner, 15 Oct: asking for a joke counts)
 BEFORE_EVENING_SHA256 = {
-    "chat": "7a8cd927a99cde34af9d08c0a7b0a7c89587118d84b6407b68ec21e91cb28693",
-    "call": "e355cbf5c5a4f16fb85e766e631d1a5dc3852ae7ddbc3c51ebf5b322f77a8382",  # owner, 15 Oct: asking for a joke counts
+    "chat": "2b726b0fae5bf3a6206d42ba4e50e579e631565545efbe9abbad00d198af1f26",
+    "call": "399fc23f2155d12c0c042f631d4f7da81b4053211611f7bcada975fd2cf15fdf",
     "tools": "42afa6769c213febcdab193788d983d0543a8158c28f83d3215c5176ee06b7ae",
 }
-BEFORE_EVENING_INITIATIVE_ON_SHA256 = "22bef8cf4f093e9f08942838b974e0dd064b0613977e6464518bc1f499e4b69c"
+BEFORE_EVENING_INITIATIVE_ON_SHA256 = (
+    "f4731c563b4487dcc3b52b83121c0bb5b993d64b50f45208854f775297250d9a"  # 22bef8cf… before 16 Oct
+)
 # the evening note inside the line of the messages she starts, never a line of its own: a line of its own took
 # video_auto from 8 of 8 to 3 of 8, this from 8 of 8 to 7 of 8 (15 Oct, run in turn, a fresh prefix each run). It says
 # "on" and names /evening off: "evening note at 21:00" read as off with the rest, and asked to stop it she claimed she

@@ -678,6 +678,56 @@ def test_control_characters_in_commit_subjects_are_not_printed(tmp_path: Path) -
     assert not any("\x1b" in line for line in said)
 
 
+@pytest.mark.parametrize("hidden", ["\n", "\t", "\r", "\x1b", "\x9b", "‮", "⁦", "​", "﻿", " ", " "])
+def test_a_cleaned_field_stays_on_its_line_with_nothing_hidden(hidden: str) -> None:
+    """FULL2: an owner-written name printed to root's terminal never starts a line, moves the cursor, turns text
+    around (bidi overrides) or hides a character (zero-width): each is a "?"."""
+    assert deploy.clean(f"vendor/a{hidden}b") == "vendor/a?b"
+
+
+def test_a_cleaned_field_keeps_ordinary_letters() -> None:
+    assert deploy.clean("~/estia-checkout ő, Ω, 李 (0.14.9+1)") == "~/estia-checkout ő, Ω, 李 (0.14.9+1)"
+
+
+def test_a_vendor_item_with_an_escape_or_a_newline_in_its_name_stops_the_deploy(tmp_path: Path) -> None:
+    """FULL2: a program of the owner's account names a folder in vendor/ so that the review prints a fake line and
+    hides the rest. Only names like signal-cli-0.14.9-jvm/signal-cli-0.14.9 are taken: anything else stops the deploy
+    before the question, named in escaped form, nothing built or switched."""
+    root, repo, clock = tmp_path / "root", checkout(tmp_path), Clock()
+    jvm_vendor(repo)
+    planted = repo / "vendor/signal-cli-0\n  (nothing else changes)\x1b[8m-jvm/signal-cli-0/bin/signal-cli"
+    planted.parent.mkdir(parents=True)
+    planted.write_text("#!/bin/sh\n")
+    said: list[str] = []
+    asked: list[str] = []
+    run = deployment(root, repo, FakeMac(root), clock, health=False, said=said)
+
+    def yes(question: str) -> bool:
+        asked.append(question)
+        return True
+
+    run.confirm = yes
+    assert run.run() == 1
+    shown = "\n".join(said)
+    assert "\x1b" not in shown and "\n  (nothing else changes)" not in shown
+    assert r"'signal-cli-0\n  (nothing else changes)\x1b[8m-jvm/signal-cli-0'" in shown, shown
+    assert "deploy stopped, nothing switched" in shown
+    assert not asked and not (root / "usr/local/estia/current").exists()
+
+
+def test_the_checkout_and_where_her_programs_come_from_are_printed_cleaned(tmp_path: Path) -> None:
+    """FULL2: the checkout's own path is the owner's to name: the first release's line and the vendor review's
+    "(from …)" show it on one line, without escape sequences."""
+    root, clock = tmp_path / "root", Clock()
+    repo = checkout(tmp_path).rename(tmp_path / "estia\n✓ nothing else changes\x1b[8m")
+    jvm_vendor(repo)
+    said: list[str] = []
+    assert deployment(root, repo, FakeMac(root), clock, health=False, said=said, confirm=False).run() == 1
+    shown = "\n".join(said)
+    assert "\x1b" not in shown and "\n✓ nothing else changes" not in shown
+    assert "First release from " in shown and shown.count("estia?✓ nothing else changes?[8m") >= 2, shown
+
+
 def installed_plists(root: Path, *, voice: bool = False) -> Path:
     folder = root / "Library/LaunchDaemons"
     folder.mkdir(parents=True, exist_ok=True)

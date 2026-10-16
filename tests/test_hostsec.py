@@ -284,6 +284,68 @@ def test_defaults_that_skip_or_share_your_password_are_named(default: str, named
     assert named in hostsec.sudo_listing(command_specific).text
 
 
+@pytest.mark.parametrize(
+    ("default", "named"),
+    [
+        ("timestamp_timeout=-1", "one sudo sign-in never ends in that Terminal window (timestamp_timeout=-1)"),
+        ("timestamp_timeout = -5", "one sudo sign-in never ends in that Terminal window (timestamp_timeout=-5)"),
+        (
+            "timestamp_timeout=30",
+            "one sudo sign-in lasts 30 minutes in that Terminal window, not 5 (timestamp_timeout=30)",
+        ),
+        (
+            'timestamp_timeout="7.5"',
+            "one sudo sign-in lasts 7.5 minutes in that Terminal window, not 5 (timestamp_timeout=7.5)",
+        ),
+    ],
+)
+def test_a_sudo_sign_in_that_lasts_longer_than_5_minutes_is_named(default: str, named: str) -> None:
+    """FULL4: with timestamp_timeout negative, one sudo sign-in never ends, and above sudo's 5 minutes it lasts
+    longer: any later program in that Terminal window becomes root without the password. A warning, so the Mac is
+    not called hardened."""
+    listing = MACOS_LISTING.replace("env_reset,", f"env_reset, {default},")
+    check = hostsec.sudo_listing(listing)
+    assert check.status == "warn" and named in check.text, check.text
+    assert "any program you run can become root" in check.text and check.fix == hostsec.SUDO_FIX
+
+
+@pytest.mark.parametrize("default", ["timestamp_timeout=0", "timestamp_timeout=5", "timestamp_timeout=2.5"])
+def test_a_sudo_sign_in_of_5_minutes_or_less_is_fine(default: str) -> None:
+    listing = MACOS_LISTING.replace("env_reset,", f"env_reset, {default},")
+    assert hostsec.sudo_listing(listing).status == "ok"
+
+
+def test_the_last_timestamp_timeout_listed_counts_as_sudo_reads_it() -> None:
+    longer = MACOS_LISTING.replace("env_reset,", "env_reset, timestamp_timeout=5, timestamp_timeout=-1,")
+    assert "never ends" in hostsec.sudo_listing(longer).text
+    shorter = MACOS_LISTING.replace("env_reset,", "env_reset, timestamp_timeout=-1, timestamp_timeout=5,")
+    assert hostsec.sudo_listing(shorter).status == "ok"
+
+
+def test_a_tools_tail_is_cleaned_like_the_deploys_fields() -> None:
+    """FULL2 re-check: a build's tail reaches root's terminal in the deploy's lines; escape sequences, bidi overrides
+    and zero-width characters are "?"s there, as in deploy.clean (now hostsec.clean, one rule)."""
+    tail = hostsec.tail("first\nerror: \x1b[8mhidden\u202e\u200bend\t.\n")
+    assert tail == "first / error: ?[8mhidden??end?."
+    from local_assistant import deploy
+
+    assert deploy.clean is hostsec.clean
+
+
+def test_a_command_specific_timeout_never_hides_the_one_for_every_command() -> None:
+    """Re-check of FULL4: `Defaults!/usr/bin/true timestamp_timeout=0` after a global -1 changes only that command's
+    sign-in; every other command's still never ends. A command-specific long one counts on its own too."""
+    specific = "\nRunas and Command-specific defaults for alex:\n    Defaults!/usr/bin/true timestamp_timeout=0\n"
+    hidden = MACOS_LISTING.replace("env_reset,", "env_reset, timestamp_timeout=-1,") + specific
+    check = hostsec.sudo_listing(hidden)
+    assert check.status == "warn" and "never ends" in check.text, check.text
+    longer = (
+        MACOS_LISTING + "\nRunas and Command-specific defaults for alex:\n    Defaults!/bin/sh timestamp_timeout=60\n"
+    )
+    assert "lasts 60 minutes" in hostsec.sudo_listing(longer).text
+    assert hostsec.sudo_listing(MACOS_LISTING + specific).status == "ok"
+
+
 def test_a_listing_that_is_not_sudos_is_not_read() -> None:
     for listing in ("", "sudo: unable to resolve host\n"):
         check = hostsec.sudo_listing(listing)

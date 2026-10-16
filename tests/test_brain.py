@@ -49,6 +49,36 @@ async def test_plain_answer(store: Store) -> None:
     assert call["messages"][-1] == {"role": "user", "content": "[Thu 8 Oct 2026 09:32] hello Gemma"}
 
 
+async def test_an_answer_that_read_document_pages_may_be_long_enough_for_them(store: Store, tmp_path: Path) -> None:
+    """A section given in full (owner, 16 Oct: B5 across two pages, about 3,600 characters) was cut mid-sentence at
+    reply_max_tokens (600): after read_document, her answer may take DOCUMENT_REPLY_TOKENS; before it, and on a
+    call, the usual cap."""
+    import sys
+
+    from local_assistant.brain import DOCUMENT_REPLY_TOKENS
+    from local_assistant.documents import Documents, Helper
+    from tests.test_documents import FAKE, pdf
+
+    folder = tmp_path / "Estia-KB"
+    pdf(folder / "exam.pdf", "Task B5. Part one.", "Part two.")
+    documents = Documents(store, folder, Helper((sys.executable, str(FAKE), str(tmp_path / "h.json")), 10.0), tz=TZ)
+    profile = Profile(store)
+    tools = Tools(store, profile, TZ, no_fetch, documents=documents)
+    gemma = FakeGemma(tool("read_document", document="exam", page=1, last_page=2), text("Task B5. Part one. Part two."))
+    brain = Brain(gemma, ContextBuilder(store, profile, TZ), tools)
+    await brain.answer(store.current_conversation(), incoming(store, "Give me B5 from the exam"))
+    assert [call["max_tokens"] for call in gemma.calls] == [
+        600,
+        DOCUMENT_REPLY_TOKENS,
+    ] and DOCUMENT_REPLY_TOKENS >= 1500
+    gemma.add(tool("read_document", document="exam", page=1), text("Part one."))
+    conv = store.current_conversation()
+    on_call = store.add_incoming(conv.id, ME, T0 + 60_000, "text", "[call] read me B5")
+    assert on_call is not None
+    await brain.answer(conv, store.message(on_call), max_tokens=220)
+    assert [call["max_tokens"] for call in gemma.calls[2:]] == [220, 220]
+
+
 async def test_tool_loop_runs_tools_then_answers(store: Store) -> None:
     gemma = FakeGemma(tool("remember", fact="The user likes tea."), text("Noted: you like tea."))
     profile, _, brain = make(store, gemma)
@@ -93,7 +123,7 @@ async def test_two_empty_answers_give_the_confused_note(store: Store) -> None:
 async def test_forget_refreshes_the_snapshot(store: Store) -> None:
     gemma = FakeGemma(tool("forget", fact="1"), text("Done, I forgot it."))
     profile, context, brain = make(store, gemma)
-    profile.add("The user lives in Rotterdam.", source_kind="chat")
+    profile.add("The user lives in Rotterdam.", source_kind="remember")
     assert "Rotterdam" in context.refresh_snapshot()
     await brain.answer(store.current_conversation(), incoming(store, "forget where I live"))
     assert "Rotterdam" not in context.snapshot()

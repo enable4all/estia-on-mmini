@@ -43,16 +43,35 @@ ACI = "11111111-2222-4333-8444-555555555555"
 @pytest.mark.parametrize(
     ("memory_gb", "tag", "context"),
     [
-        (16, "gemma4:12b", 16384),  # Mac mini M4, 16 GB
-        (24, "gemma4:12b", 32768),  # 24 GB: the 26b would not fit next to macOS and the voice models
-        (32, "gemma4:26b", 32768),  # the tested setup
-        (48, "gemma4:26b", 65536),
-        (64, "gemma4:26b", 65536),
+        (16, "gemma4:12b-mlx", 16384),  # Mac mini M4, 16 GB
+        (24, "gemma4:12b-mlx", 32768),  # 24 GB: the 26b would not fit next to macOS and the voice models
+        (32, "gemma4:26b-mlx", 32768),  # the tested setup
+        (48, "gemma4:26b-mlx", 65536),
+        (64, "gemma4:26b-mlx", 65536),
     ],
 )
 def test_the_model_fits_the_macs_memory(memory_gb: float, tag: str, context: int) -> None:
     choice = choose_model(memory_gb)
     assert choice is not None and (choice.tag, choice.num_ctx) == (tag, context)
+
+
+def test_the_models_are_the_mlx_builds_pinned_by_digest_with_the_ollama_they_need() -> None:
+    """Owner, 15 Oct: the explicit -mlx tags, never the bare ones (lists whose pick depends on Ollama's version); each
+    needs Ollama 0.33.1 or later (JSON-schema output on the MLX engine). The 12b's line claims no tests until the
+    owner's tests on this Mac pass."""
+    big, small = choose_model(32), choose_model(16)
+    assert big is not None and small is not None
+    assert (big.tag, big.digest[:12], small.tag, small.digest[:12]) == (
+        "gemma4:26b-mlx",
+        "f0fc7e0ae494",
+        "gemma4:12b-mlx",
+        "ded7a2735003",
+    )
+    assert all(len(choice.digest) == 64 for choice in (big, small))
+    assert big.ollama == small.ollama == "0.33.1"
+    assert "the tested model" in big.note and "the tested model" not in small.note
+    # owner, 15 Oct: 12B failed some safety tests twice; setup says so on a line of its own and asks first (model())
+    assert big.tested and not small.tested and "failed" not in small.note
 
 
 def test_a_mac_with_8_gb_is_too_small() -> None:
@@ -62,7 +81,7 @@ def test_a_mac_with_8_gb_is_too_small() -> None:
 def test_the_modelfile_gives_the_alias_its_context() -> None:
     choice = choose_model(32)
     assert choice is not None
-    assert modelfile(choice) == "FROM gemma4:26b\nPARAMETER num_ctx 32768\n"
+    assert modelfile(choice) == "FROM gemma4:26b-mlx\nPARAMETER num_ctx 32768\n"
 
 
 def envelope(source: str, name: str, text: str | None, *, uuid: str = ACI) -> str:
@@ -418,6 +437,24 @@ def test_setup_ends_with_what_done_means(
     assert "welcome" in last and "no ✗" in last and "Reply to it" in last
 
 
+def test_ctrl_c_at_a_question_stops_setup_with_one_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Ctrl-C at a question (seen in a fresh-install test, 16 Oct): one plain line on how to go on and the shell's
+    usual 130, never Python's traceback."""
+    from local_assistant import setup
+
+    def ctrl_c(self: Wizard) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(Wizard, "ollama", ctrl_c)
+    assert setup.main(["--config", str(tmp_path / "config.toml")]) == 130
+    captured = capsys.readouterr()
+    assert captured.out.strip().splitlines()[-1] == prompts.SETUP_STOPPED
+    assert "Traceback" not in captured.out + captured.err
+    assert "scripts/setup.sh" in prompts.SETUP_STOPPED and "skipped" in prompts.SETUP_STOPPED
+
+
 def test_setup_says_the_configured_name(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -433,7 +470,7 @@ def test_setup_says_the_configured_name(
     path.chmod(0o600)
     assert setup.main(["--dry-run", "--config", str(path)]) == 0
     out = capsys.readouterr().out
-    assert out.startswith("Tiffany setup: the model, her Signal number") and "Tiffany's welcome" in out
+    assert out.startswith("Tiffany setup: Ollama, the model, her Signal number") and "Tiffany's welcome" in out
     assert "Estia" not in out
     path.unlink()
     monkeypatch.setattr("shutil.which", lambda name: None)
@@ -1041,6 +1078,55 @@ def test_setup_writes_the_folder_and_level_named(
     assert "✓ Projects: ~/work, level docs" in out
 
 
+@pytest.mark.parametrize("where", ["the-folder", "on-the-way", "outside-on-the-way"])
+def test_a_projects_folder_reached_through_a_link_is_asked_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], where: str
+) -> None:
+    """The share refuses a link (its entry would land on the target): setup asks the folder by the share's rules, so
+    a first install never records one the move cannot share."""
+    home = tmp_path / "home"
+    (home / "real/projects").mkdir(parents=True)
+    (tmp_path / "srv/projects").mkdir(parents=True)
+    (home / "dev").symlink_to(home / "real/projects")
+    (home / "linked").symlink_to(home / "real")
+    (tmp_path / "srv-link").symlink_to(tmp_path / "srv")
+    monkeypatch.setenv("HOME", str(home))
+    typed = {
+        "the-folder": "~/dev",
+        "on-the-way": "~/linked/projects",
+        "outside-on-the-way": str(tmp_path / "srv-link/projects"),
+    }
+    wizard, _asked = projects_wizard(tmp_path, monkeypatch, ["y", typed[where], "~/real/projects", "docs"])
+    wizard.config(BOT, ACI)
+    out = capsys.readouterr().out
+    if where == "the-folder":
+        assert f"{home / 'dev'} is a symbolic link: name the folder it leads to. Type another one" in out
+    else:
+        shown = home / "linked/projects" if where == "on-the-way" else tmp_path / "srv-link/projects"
+        assert f"A folder on the way to {shown} is a symbolic link. Type another one" in out
+    cfg = parse_config(tomllib.loads(wizard.config_path.read_text(encoding="utf-8")))
+    assert cfg.projects_root == home / "real/projects" and "✓ Projects: ~/real/projects, level docs" in out
+
+
+def test_a_first_install_with_a_projects_folder_outside_your_home_says_it_is_opened_by_hand(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    elsewhere = tmp_path / "srv" / "projects"
+    elsewhere.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    wizard, _asked = projects_wizard(tmp_path, monkeypatch, ["y", str(elsewhere), "docs"])
+    wizard.config(BOT, ACI)
+    out = capsys.readouterr().out
+    assert (
+        f"{elsewhere} is outside your home, so scripts/share-projects.sh does not share it: give _estia read access "
+        "to it yourself"
+    ) in out
+    cfg = parse_config(tomllib.loads(wizard.config_path.read_text(encoding="utf-8")))
+    assert cfg.projects_root == elsewhere
+
+
 def test_a_dry_run_shows_the_projects_question_and_asks_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1410,23 +1496,202 @@ def test_the_documented_by_hand_route_reads_a_long_line_with_the_line_mode_off()
 # ------------------------------------------------------------------ a step that failed stops setup (findings 10, 59)
 
 
+def ollama_has_pulled(monkeypatch: pytest.MonkeyPatch, digests: dict[str, str] | None = None) -> None:
+    """Ollama's list after the pull: both MLX builds with their tested digests (or the ones given)."""
+    from local_assistant.setup import GEMMA_12B, GEMMA_12B_DIGEST, GEMMA_26B, GEMMA_26B_DIGEST
+
+    listed = digests or {GEMMA_26B: GEMMA_26B_DIGEST, GEMMA_12B: GEMMA_12B_DIGEST}
+
+    def get_json(self: doctor.Probe, url: str) -> object:
+        return {"models": [{"name": name, "digest": digest} for name, digest in listed.items()]}
+
+    monkeypatch.setattr(doctor.Probe, "get_json", get_json)
+    monkeypatch.setattr("local_assistant.setup.memory_gb", lambda: 32.0)
+
+
 def test_a_failed_ollama_create_stops_setup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     ran: list[list[str]] = []
+    wizard = Wizard(tmp_path / "config.toml", dry_run=False)
+    create = [wizard.ollama_program, "create"]
 
     def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         ran.append(command)
-        return subprocess.CompletedProcess(command, 1 if command[:2] == ["ollama", "create"] else 0, "", "")
+        return subprocess.CompletedProcess(command, 1 if command[:2] == create else 0, "", "")
 
     monkeypatch.setattr("local_assistant.setup.REPO", tmp_path)
-    wizard = Wizard(tmp_path / "config.toml", dry_run=False)
     monkeypatch.setattr(wizard, "run", run)
+    ollama_has_pulled(monkeypatch)
     with pytest.raises(SystemExit, match="local-worker was not made"):
         wizard.model()
-    assert ran[-1][:2] == ["ollama", "create"]
+    assert ran[-1][:2] == create
     assert "✓ Model" not in capsys.readouterr().out
     assert not (tmp_path / ".local-worker.Modelfile").exists()
+
+
+def test_the_model_is_pulled_by_its_mlx_tag_with_the_ollama_in_use_and_checked_by_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ran: list[list[str]] = []
+    monkeypatch.setattr("local_assistant.setup.REPO", tmp_path)
+    wizard = Wizard(tmp_path / "config.toml", dry_run=False)
+    wizard.ollama_program = "/opt/example/ollama"  # the one the Ollama step kept or installed
+    monkeypatch.setattr(wizard, "run", recorder(ran))
+    ollama_has_pulled(monkeypatch)
+    wizard.model()
+    assert ran[0] == ["caffeinate", "-i", "/opt/example/ollama", "pull", "gemma4:26b-mlx"]
+    assert ran[1][:3] == ["/opt/example/ollama", "create", "local-worker"]
+    out = capsys.readouterr().out
+    assert "Model: gemma4:26b-mlx for this Mac's 32 GB" in out and "needs Ollama 0.33.1 or later" in out
+    assert "✓ Model: local-worker = gemma4:26b-mlx" in out
+
+
+def smaller_mac(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, memory: float, answer: str, *, dry: bool = False
+) -> tuple[Wizard, list[list[str]], list[str]]:
+    """The model step on a Mac with `memory` GB, the person answering `answer`: what ran and what was asked."""
+    ran: list[list[str]] = []
+    asked: list[str] = []
+
+    def type_answer(prompt: str = "") -> str:
+        asked.append(prompt)
+        return answer
+
+    monkeypatch.setattr("local_assistant.setup.REPO", tmp_path)
+    wizard = Wizard(tmp_path / "config.toml", dry_run=dry)
+    monkeypatch.setattr(wizard, "run", recorder(ran))
+    ollama_has_pulled(monkeypatch)
+    monkeypatch.setattr("local_assistant.setup.memory_gb", lambda: memory)
+    monkeypatch.setattr("builtins.input", refuse if dry else type_answer)
+    return wizard, ran, asked
+
+
+@pytest.mark.parametrize("memory", [16.0, 24.0])
+def test_on_16_and_24_gb_setup_says_what_12b_failed_and_asks_before_the_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], memory: float
+) -> None:
+    """Owner, 15 Oct: setup still picks 12B there, but the person reads what failed, in plain words, on a line of its
+    own, and only a yes starts the 8 GB download."""
+    wizard, ran, asked = smaller_mac(tmp_path, monkeypatch, memory, "y")
+    wizard.model()
+    assert asked == ["Go on with the smaller model? [y/N] "]
+    assert ran[0][3:] == ["pull", "gemma4:12b-mlx"]
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    model = next(line for line in lines if line.startswith("Model: gemma4:12b-mlx"))
+    assert "failed" not in model and "SECURITY.md" not in model
+    warning = next(line for line in lines if line.startswith("! Gemma 4 12B"))
+    assert "a forwarded audio file with planted instructions" in warning and "on a call" in warning
+    assert (  # the limit inside the claim (SEC4 re-check): a direct "turn off the lamp" switches at once
+        'still makes a device change wait for your yes after an audio file, for an "ask first" device and in a '
+        "message that is not about devices" in warning
+    )
+    assert "each device change" not in warning
+    assert warning.endswith("32 GB with Gemma 26B is the tested setup.")
+    assert (
+        lines.index(model)
+        < lines.index(warning)
+        < next(i for i, line in enumerate(lines) if "The download can take a while" in line)
+    )
+
+
+@pytest.mark.parametrize("answer", ["", "n"], ids=["enter", "no"])
+def test_no_to_the_smaller_model_downloads_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], answer: str
+) -> None:
+    wizard, ran, _asked = smaller_mac(tmp_path, monkeypatch, 16.0, answer)
+    with pytest.raises(SystemExit, match="Nothing was downloaded"):
+        wizard.model()
+    assert ran == [] and "The download can take a while" not in capsys.readouterr().out
+
+
+def test_a_dry_run_shows_the_smaller_models_question_and_asks_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    wizard, ran, _asked = smaller_mac(tmp_path, monkeypatch, 16.0, "", dry=True)
+    wizard.model()
+    out = capsys.readouterr().out
+    assert (
+        "! Gemma 4 12B" in out and '(dry run: asks "Go on with the smaller model? [y/N]"; only y downloads it)' in out
+    )
+    assert ran[0][3:] == ["pull", "gemma4:12b-mlx"]  # shown as it would run after a yes
+
+
+def test_the_tested_model_asks_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    wizard, ran, _asked = smaller_mac(tmp_path, monkeypatch, 32.0, "", dry=False)
+    monkeypatch.setattr("builtins.input", refuse)
+    wizard.model()
+    assert ran[0][3:] == ["pull", "gemma4:26b-mlx"] and "smaller model" not in capsys.readouterr().out
+
+
+def test_the_ai_briefing_names_the_smaller_model_question() -> None:
+    briefing = (Path(__file__).resolve().parents[1] / "SETUP-WITH-YOUR-AI.md").read_text(encoding="utf-8")
+    briefing = briefing.split("## 3. The briefing", 1)[1].split("\n## ", 1)[0]
+    model = briefing.split("**The model download:**", 1)[1].split("\n", 1)[0]
+    assert '**"Go on with the smaller model?"**' in model and "16 or 24 GB" in model
+    assert "only y downloads it" in model
+
+
+def test_a_pulled_model_with_another_digest_is_never_made_into_local_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The registry changed the tag since the tests: setup says so and makes nothing from it."""
+    ran: list[list[str]] = []
+    monkeypatch.setattr("local_assistant.setup.REPO", tmp_path)
+    wizard = Wizard(tmp_path / "config.toml", dry_run=False)
+    monkeypatch.setattr(wizard, "run", recorder(ran))
+    ollama_has_pulled(monkeypatch, {"gemma4:26b-mlx": "ab" * 32})
+    with pytest.raises(SystemExit, match="came down as abababababab, not the tested build f0fc7e0ae494"):
+        wizard.model()
+    assert len(ran) == 1 and ran[0][3:] == ["pull", "gemma4:26b-mlx"]  # pulled, nothing made from it
+    assert not (tmp_path / ".local-worker.Modelfile").exists()
+
+
+def test_the_ollama_step_comes_first_and_off_the_live_mac_only_prints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Under a test's root nothing is read or run: the step shows the download, the checks and the service."""
+    for target in ("builtins.input", "local_assistant.setup.read_hidden", "subprocess.run", "subprocess.Popen"):
+        monkeypatch.setattr(target, refuse)
+    monkeypatch.setattr("local_assistant.ollama_build.owner_home", lambda: tmp_path / "home")
+    monkeypatch.setattr("local_assistant.setup.memory_gb", lambda: 32.0)
+    wizard = Wizard(tmp_path / "config.toml", dry_run=False)
+    wizard.ollama()
+    out = capsys.readouterr().out
+    assert "Ollama: its official build 0.40.4" in out and "/usr/bin/curl -q -fL" in out
+    assert (
+        "/usr/bin/sudo /bin/launchctl bootstrap system /Library/LaunchDaemons/com.local-assistant.ollama.plist" in out
+    )
+    assert wizard.ollama_program == str(tmp_path / "home/opt/ollama/current/ollama")
+    assert not (tmp_path / "home").exists()
+
+
+def test_setup_runs_the_ollama_step_before_the_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    order: list[str] = []
+    monkeypatch.setattr("local_assistant.setup.has_terminal", lambda: True)
+
+    def model(self: Wizard) -> None:
+        order.append("model")
+        raise SystemExit(3)
+
+    monkeypatch.setattr(Wizard, "ollama", lambda self: order.append("ollama"))
+    monkeypatch.setattr(Wizard, "model", model)
+    with pytest.raises(SystemExit):
+        main(["--config", str(tmp_path / "config.toml")])
+    assert order == ["ollama", "model"]
+
+
+def test_a_mac_too_small_stops_before_ollama_is_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("local_assistant.setup.memory_gb", lambda: 8.0)
+    with pytest.raises(SystemExit):
+        Wizard(tmp_path / "config.toml", dry_run=False).ollama()
+    out = capsys.readouterr().out
+    assert "This Mac has 8 GB of memory. Estia needs 16 GB or more." in out and "curl" not in out
 
 
 def test_a_failed_move_stops_before_the_security_step_and_the_extras(
@@ -1443,6 +1708,60 @@ def test_a_failed_move_stops_before_the_security_step_and_the_extras(
     assert main(["--config", str(path)]) == 1
     out = capsys.readouterr().out
     assert "The move did not finish" in out and "scripts/migrate-to-own-user.sh --dry-run" in out
+
+
+def test_a_move_that_succeeds_while_the_share_fails_goes_on_to_the_security_step(
+    no_system_paths: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The move script ends 3 when only its last step, the projects share, fails (a folder outside your home):
+    she runs in her own user, so setup says only the share failed, with its command, and goes on."""
+    from local_assistant import setup
+
+    path = tmp_path / "config.toml"
+    path.write_text(GOOD, encoding="utf-8")
+    path.chmod(0o600)
+    reached: list[str] = []
+    monkeypatch.setattr(Wizard, "model", lambda self: None)
+    monkeypatch.setattr(Wizard, "security", lambda self: reached.append("security"))
+    monkeypatch.setattr(Wizard, "extras", lambda self: reached.append("extras"))
+    monkeypatch.setattr(Wizard, "personality", lambda self: None)
+    monkeypatch.setattr(Wizard, "check", lambda self: 0)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+    monkeypatch.setattr("time.sleep", lambda seconds: None)
+
+    def run(self: Wizard, command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        her_own_user(no_system_paths)  # the move went through: her service file names _estia; then the share failed
+        return subprocess.CompletedProcess(command, 3, "", "")
+
+    monkeypatch.setattr(Wizard, "run", run)
+    assert main(["--config", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "The move did not finish" not in out and reached == ["security", "extras"]
+    assert "✓ Always on: Estia runs in her own user _estia. Only her projects folder is not shared yet" in out
+    assert f"then run {setup.REPO / 'scripts' / 'share-projects.sh'}" in out
+
+
+def test_a_failed_move_whose_restore_left_her_service_file_still_stops(
+    no_system_paths: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """SEC1 re-check: a move that fails and whose restore fails too can leave her service file naming _estia.
+    Only the share's own exit code (3) means she was moved: any other failure stops setup before the security step."""
+    path = tmp_path / "config.toml"
+    path.write_text(GOOD, encoding="utf-8")
+    path.chmod(0o600)
+    monkeypatch.setattr(Wizard, "model", lambda self: None)
+    for name in ("security", "extras", "check"):
+        monkeypatch.setattr(Wizard, name, refuse)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+
+    def run(self: Wizard, command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        her_own_user(no_system_paths)  # left behind by a restore that failed
+        return subprocess.CompletedProcess(command, 1, "", "")
+
+    monkeypatch.setattr(Wizard, "run", run)
+    assert main(["--config", str(path)]) == 1
+    out = capsys.readouterr().out
+    assert "The move did not finish" in out and "Only her projects folder is not shared yet" not in out
 
 
 # ------------------------------------------------------------------ only a verified number is offered (findings 20, 53)

@@ -26,7 +26,8 @@ fi
 if [[ -f tools/youtube/pyproject.toml ]]; then
   (cd tools/youtube && uv run --frozen -q pytest -q && uv run --frozen -q mypy)
 fi
-# and the documents helper's own tests (Swift Testing, offline; a new build's first scan waits for Vision's model)
+# and the documents helper's own tests (Swift Testing, offline; a new build's first scan waits for Vision's model),
+# one at a time as the helper reads: tests reading scans at once deadlocked a 4-core Mac in Vision (16 Oct)
 if [[ -f tools/documents/Package.swift ]]; then
-  (cd tools/documents && swift test --quiet)
+  (cd tools/documents && swift test --quiet --no-parallel)
 fi

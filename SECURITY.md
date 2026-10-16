@@ -69,7 +69,9 @@ The full threat model is in [setup_assistant.md, section 8](setup_assistant.md#8
 - A change to your copy of the code goes live only through an update, `/usr/bin/sudo /usr/local/estia/bin/estia-deploy`,
   which shows the list of changes and the files they touch and asks first. It also names each program she runs from
   outside git (signal-cli, the call helper, Java) that differs from the live release's, with the folder it comes from,
-  and stops when one changed after that question. Her voice service is built from the update's own code, never from a
+  and stops when one changed after that question, or when a folder of signal-cli's Java build has any name but
+  `signal-cli-<version>-jvm/signal-cli-<version>`. Each name and folder it shows stays on one line: a character that
+  could start a line, move the cursor or hide text is shown as "?". Her voice service is built from the update's own code, never from a
   build in your copy. Root runs only `/usr/local/estia/tools`
   (their own Python, the update code, the service templates), which change only with `--update-tools`, after showing
   what changed in them; the rollback runs from there too.
@@ -97,6 +99,13 @@ The full threat model is in [setup_assistant.md, section 8](setup_assistant.md#8
   Hugging Face), each checked against its fingerprint (sha256) at every start: a model with a changed or extra file
   is never loaded. Whisper's folder is then set aside (`<folder>.refused-<time>`, only the latest kept) and downloaded
   again at that version; changed again, listening stays off. Once downloaded, Whisper starts with no network.
+- Ollama is only its official build: setup downloads one fixed version (0.40.4) from GitHub and checks its fingerprint
+  (sha256), every program's signature (Apple's Developer ID certificate for Ollama's team, 3MU9H2V9Y9, not only the
+  team's name, which anyone can put in a signature) and Apple's notarization before anything is installed; one failed
+  check and nothing is installed. An Ollama that already answers is kept only when its program and every library next
+  to it pass the same signature check and it is reachable only from the Mac itself. Homebrew's Ollama and the Ollama
+  app are named with their fix, never used. It runs as you, reachable only from the Mac itself; its log is yours,
+  readable only by you.
 - Setup's secrets: the Signal captcha link, the SMS code and a Registration Lock PIN are typed hidden and go to
   signal-cli on its input (JSON-RPC), never as command-line arguments, which every user of the Mac can read; the
   commands on screen show placeholders. Setup runs Homebrew with its analytics off (`HOMEBREW_NO_ANALYTICS=1`).
@@ -184,7 +193,7 @@ passwords, the keys, the TP-Link login and the Hue Bridge's key. The same holds 
 her folders before the move into her own user: a copy taken then still works. In this order:
 
 1. Stop her: `/usr/bin/sudo /usr/local/estia/bin/estia stop`. She starts again at the next restart of the Mac, with
-   the copied keys still valid: finish steps 2 to 7 first.
+   the copied keys still valid: finish steps 2 to 8 first.
 2. Re-register her number from a clean machine (setup_assistant.md, 2.3): this logs out every copy of her Signal
    identity. Then compare her safety number on your phone and mark it verified.
 3. Microsoft: at mysignins.microsoft.com choose "Sign out everywhere" for each mailbox, then sign in again with
@@ -200,10 +209,12 @@ her folders before the move into her own user: a copy taken then still works. In
    factory reset of the bridge removes every key (its rooms and scenes too); then pair it again with
    `scripts/hue-pair.sh`.
 7. Registration Lock PIN: set a new one for her number with `scripts/harden.sh --new-pin` (also while the lock is on;
-   it stops her, sends signal-cli `setPin` through `jsonRpc` with the PIN on its input, and starts her), and keep it in
-   your password manager, off the Mac.
+   it sends signal-cli `setPin` through `jsonRpc` with the PIN on its input), and keep it in your password manager, off
+   the Mac. She stays stopped after it: it starts her again only when she was running before it (then it stops her for
+   the PIN and starts her after).
 8. Check your own phone: Signal, Linked devices; remove any device you do not know, then send her
    `/devices forget N` for it. Check hers: `/usr/bin/sudo /usr/local/estia/bin/estia signal listDevices` (only the Mac).
+   Then start her: `/usr/bin/sudo /usr/local/estia/bin/estia start`.
 
 ## Known accepted gaps
 
@@ -215,9 +226,16 @@ her folders before the move into her own user: a copy taken then still works. In
 - The call helper is built on an old version of WebRTC, the calling library (revision 7444f).
 - Prompt injection is reduced by code-level rules, not eliminated. A model can still be talked into a wrong answer.
   Device changes and profile changes have their own checks in code.
+- A Mac with 16 or 24 GB of memory gets the smaller model, Gemma 4 12B (`gemma4:12b-mlx`), which failed some of her
+  safety tests (15 Oct, run twice): after a forwarded audio file with planted instructions it tried to save facts and
+  switch a light (2 of 5 runs passed), and on a call it tried to switch a device before the question was answered (3 of
+  5). Gemma 4 26B, on 32 GB or more, passed both 5 of 5. Code still refuses facts from an audio file and still makes
+  a device change wait for your yes after an audio file, for an `ask first` device and in a message that is not about
+  devices, but 32 GB with Gemma 26B is the tested setup.
 - One user per Mac is assumed. Ollama, reachable only from the Mac itself (127.0.0.1:11434), is a trusted local
   service; on a Mac shared with other accounts, another user could start a look-alike service at the same address
-  first. The voice service (127.0.0.1:8150) runs as her: the bridge sends it audio and text only over a connection
+  first. Setup refuses an Ollama that another account runs, also one beside yours on the same port, and doctor shows
+  either with a ✗; the bridge itself does not check before each request. The voice service (127.0.0.1:8150) runs as her: the bridge sends it audio and text only over a connection
   that a program of her own account took, checked after the connection is made and before anything is sent (macOS's
   `lsof`, run as her, lists only her own programs). A program of yours, or of another account, that takes that
   address while her voice service is not running gets nothing, and its words never count as yours; her voice notes
@@ -274,8 +292,10 @@ her folders before the move into her own user: a copy taken then still works. In
   port. Her own user keeps her files and keys from your programs, not what she sends there.
 - Root, and any program that gets root, still reads everything. While an admin rule skips the password (`NOPASSWD`,
   in `/etc/sudoers` or `/etc/sudoers.d`), or one admin sign-in counts for every program of yours
-  (`timestamp_type=global`), every program you run gets root without it. Doctor and the security step read what sudo
-  lists for you, and the Mac is then not at the hardened level. In `/etc/sudoers.d` the security step removes such a rule.
+  (`timestamp_type=global`), or one admin sign-in lasts longer than 5 minutes or never ends (`timestamp_timeout`),
+  every program you run gets root without it (with a long sign-in, every later one in that Terminal window). Doctor and the security step read what sudo
+  lists for you, and the Mac is then not at the hardened level. Doctor run as you, before her own user, reads only the
+  rules (sudo lists the sign-in settings only after your password), so its hardened level does not cover them. In `/etc/sudoers.d` the security step removes such a rule.
   One in `/etc/sudoers` is shown with `visudo`, to remove by hand. An admin's password, caught once, is root. Every
   command after `/usr/bin/sudo` is named by its full path too (`/bin/launchctl`, not `launchctl`): sudo looks a bare name
   up in your Terminal's folders first.
@@ -304,7 +324,11 @@ her folders before the move into her own user: a copy taken then still works. In
   (docs/e2e-checklist.md, 113).
 - launchd opens her services' two output files (`launchd.log`, `voice.log`) as root. They are in `/var/log/estia`, a
   folder only root can change, so no link of hers is followed there. An install from before keeps them in her own
-  folder until `--update-tools` and one more update; doctor names it.
+  folder, where a program of her account could make root write into a file it names: a known gap on that Mac until
+  `/usr/bin/sudo /usr/local/estia/bin/estia doctor` shows ✓ Services. An update that changes the tools root runs takes
+  three steps, in this order: `/usr/bin/sudo /usr/local/estia/bin/estia-deploy`, then
+  `/usr/bin/sudo /usr/local/estia/bin/estia-deploy --update-tools`, then
+  `/usr/bin/sudo /usr/local/estia/bin/estia-deploy` again.
 - A value typed on a `/usr/bin/sudo …` command line lands in sudo's log, which admins can read: `estia secret set` refuses one,
   but the log keeps it; change that key.
 - A linked device's number is trusted until the device is silent for 14 days or `/devices forget N`: a device linked
@@ -335,9 +359,11 @@ her folders before the move into her own user: a copy taken then still works. In
   like), and says so. A projects folder deeper than your home's first level (`~/code/work`) passes her through each
   folder on the way too (`~/code`), whatever its own mode: the projects share names what each of those folders holds
   that every account may open, with the same `chmod o-rwx`; doctor does not look there.
-- With a flaw in PDFKit or Vision, her account could also leave files of any kind in `~/Estia-KB`. A `.command`
-  file or an app made on the Mac carries no download mark, so Gatekeeper does not check it when opened: open only PDFs
-  from that folder.
+- Any compromise of her account could also leave files of any kind in `~/Estia-KB`: a PDF that exploits a flaw in
+  PDFKit or Vision, or a flaw in signal-cli (which reads every sender's messages) or in the call helper (which starts
+  for every incoming call). A `.command` file or an app made on the Mac carries no download mark, so Gatekeeper
+  (macOS's check of downloaded apps) does not check it when opened, and nothing looks for such a file there yet: open
+  only PDFs from that folder.
 - The documents helper runs as her account without a sandbox of its own: a PDF that exploits a flaw in PDFKit or
   Vision could run code as her, with her keys and data. The helper opens no network connection in its own code and
   reads a scan with every connection denied (tested); running it under macOS's `sandbox-exec` with no network is

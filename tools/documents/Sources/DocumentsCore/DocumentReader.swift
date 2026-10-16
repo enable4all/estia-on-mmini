@@ -8,7 +8,7 @@ public protocol PageRecognizer {
 }
 
 /// One PDF, page by page: PDFKit's own text where a page has text, the recognizer where it has none. A page that
-/// fails is skipped and named; the document as a whole is refused only for the reasons in `ReadError`.
+/// fails is skipped and named (`PageFailure`); the document as a whole is refused only for the reasons in `ReadError`.
 public enum DocumentReader {
     public static func read(
         _ data: Data, maxPages: Int, deadline: ContinuousClock.Instant, recognizer: PageRecognizer
@@ -28,20 +28,35 @@ public enum DocumentReader {
             // each page's objects (a scan's picture is 8.7 MB) are let go after the page, not at the end
             switch autoreleasepool(invoking: { readPage(document.page(at: index), number: number, recognizer: recognizer) }) {
             case .success(let page): pages.append(page)
-            case .failure: skipped.append(Skipped(n: number, why: "unreadable"))
+            case .failure(let why): skipped.append(Skipped(n: number, why: why.rawValue))
             }
         }
         return Reading(pages: pages, skipped: skipped, pageCount: count)
     }
 
-    /// One page: its own text, or the recognizer's when it has none.
-    private static func readPage(_ page: PDFPage?, number: Int, recognizer: PageRecognizer) -> Result<Page, ReadError> {
+    /// One page: its own text, or the recognizer's when it has none. The recognizer's `ReadError.unreadable` is the
+    /// page's (it cannot be drawn); any other error is Vision's own: text recognition failed, not the page.
+    private static func readPage(_ page: PDFPage?, number: Int, recognizer: PageRecognizer) -> Result<Page, PageFailure> {
         guard let page else { return .failure(.unreadable) }
         let own = PageText.clean(page.string ?? "")
         if !own.isEmpty { return .success(Page(n: number, text: own, ocr: false)) }
-        guard let seen = try? recognizer.text(of: page, number: number) else { return .failure(.unreadable) }
-        return .success(Page(n: number, text: PageText.clean(seen), ocr: true))
+        do {
+            let seen = try recognizer.text(of: page, number: number)
+            return .success(Page(n: number, text: PageText.clean(seen), ocr: true))
+        } catch ReadError.unreadable {
+            return .failure(.unreadable)
+        } catch {
+            return .failure(.ocrFailed)
+        }
     }
+}
+
+/// Why a page was skipped: it cannot be read ("unreadable"), or Vision failed on it ("ocr_failed": live, 15 Oct, with
+/// /var/empty as Foundation's home every scan failed at once). The bridge reads a document with an "ocr_failed" page
+/// again after a start, and shows text recognition's warning.
+public enum PageFailure: String, Error, Sendable {
+    case unreadable
+    case ocrFailed = "ocr_failed"
 }
 
 /// A page's text as the bridge stores it: lines end with line feeds only (U+2028, U+2029 and U+0085 too: JSON leaves

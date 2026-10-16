@@ -49,6 +49,7 @@ from local_assistant.hostsec import (
     VENDOR,
     Check,
     Host,
+    clean,
     estia_root,
     signal_account,
     strays,
@@ -78,8 +79,12 @@ BRIDGE = "com.local-assistant.bridge"
 VOICE = "com.local-assistant.voice"
 LABELS = (BRIDGE, VOICE)
 STREAM_LOG = {BRIDGE: "launchd.log", VOICE: "voice.log"}  # each service's output file in STREAM_LOGS
-# her services' output in her own folder (an install from before STREAM_LOGS): the tools' update moves it
-LOGS_IN_HER_FOLDER = "its output is in her own folder, which launchd opens as root"
+# her services' output in her own folder (an install from before STREAM_LOGS): launchd opens it as root, so a link
+# of hers there leads root's writes anywhere; a ✗ until the tools' update and one more deploy move it
+LOGS_IN_HER_FOLDER = (
+    "its output is in her own folder, which launchd opens as root: "
+    "a program of her account could make root write into a file it names"
+)
 ROLLBACK_DAYS = 7
 # her group's number (dseditgroup -i): the highest one in 450-499 no user and no group has. sysadminctl is given it as
 # -UID too, but ignores -UID (and -home) for a role account on macOS 27: her account's own number is the one it picks
@@ -600,7 +605,7 @@ def _plists_check(root: Path, plists: Mapping[str, dict[str, Any] | None]) -> Ch
     if in_her_folder:  # an install from before /var/log/estia: the tools' update, then a deploy
         text = f"{' and '.join(in_her_folder)}: {LOGS_IN_HER_FOLDER}"
         fix = f"{DEPLOY_CMD} --update-tools (read the diff), then {DEPLOY_CMD}: it moves them to {STREAM_LOGS}"
-        return Check("plists", "warn", "Services", text, fix)
+        return Check("plists", "fail", "Services", text, fix)
     names = " and ".join(label.rsplit(".", 1)[1] for label, plist in plists.items() if plist is not None)
     return Check("plists", "ok", "Services", f"{names} run as {ROLE_USER} from {CURRENT}")
 
@@ -1081,15 +1086,22 @@ def owner_path(value: str, home: Path) -> Path | None:
     return path if path.is_absolute() else None
 
 
+CONFIG_LIMIT = 1_000_000  # bytes of a config root reads her number from: hers are a few KB
+
+
 def bot_number(config: Path) -> str | None:
-    """bot_number from a config (opened without following a link); None when there is none."""
+    """bot_number from a config (opened without following a link at its name, a regular file of at most
+    `CONFIG_LIMIT` bytes); None when there is none."""
     try:
-        fd = os.open(config, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open(config, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
         with os.fdopen(fd, "rb") as handle:
             if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
                 return None
-            data = tomllib.load(handle)
-    except (OSError, tomllib.TOMLDecodeError):
+            raw = handle.read(CONFIG_LIMIT + 1)
+        if len(raw) > CONFIG_LIMIT:
+            return None
+        data = tomllib.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         return None
     number = data.get("bot_number")
     return number if isinstance(number, str) and number else None
@@ -1255,19 +1267,25 @@ class Migration:
     # ---------------------------------------------------------------- before anything stops
 
     def preflight(self, labels: list[str]) -> list[str]:
-        """What would make the move fail, found before she is stopped."""
+        """What would make the move fail, found before she is stopped. Her folders are walked first (lstat, nothing
+        followed): with a link out of them (a folder on the way included) or a pipe, socket or device, nothing of
+        hers is read at all. A link made after that walk, before root reads her number and her Signal account (a
+        number and a yes or no come of those reads, each capped), is caught by the walk of her copy before she
+        starts."""
         problems: list[str] = []
+        real = Path(os.path.realpath(self.owner.home))
+        for old, _new in DATA_MAP:  # her copy must hold only her files: no link out, no pipe, socket or device
+            for path, what in strays(self.owner.home / old, real / old, skip=[self.owner.home / VENDOR]):
+                fix = "replace it with the files it leads to" if what == LINK_OUT else "delete it"
+                problems.append(f"{clean(str(path))}: {what}; {fix}, then run this again")  # a name you chose: cleaned
+        if problems:
+            return problems
         number = bot_number(self.owner.home / HER_CONFIG)
         if number is None:
             problems.append("no config in your home to move: set her up first (scripts/setup.sh)")
         elif not has_account(self.owner.home / ".local/share/signal-cli", number):
             problems.append("her number is not verified with Signal yet: scripts/setup.sh registers it")
         # her voice service: the release builds it from the commit's own sources (deploy.build_voice)
-        real = Path(os.path.realpath(self.owner.home))
-        for old, _new in DATA_MAP:  # her copy must hold only her files: no link out, no pipe, socket or device
-            for path, what in strays(self.owner.home / old, real / old, skip=[self.owner.home / VENDOR]):
-                fix = "replace it with the files it leads to" if what == LINK_OUT else "delete it"
-                problems.append(f"{path}: {what}; {fix}, then run this again")
         need = sum(_size(folder) for folder in self._old_folders()) + 3 * 2**30  # her data, plus about 3 GB of code
         try:
             free = shutil.disk_usage(self.root if self.root.exists() else self.root.parent).free
@@ -1590,7 +1608,7 @@ class Migration:
         if found:
             path, what = found[0]
             more = f" (and {len(found) - 1} more)" if len(found) > 1 else ""
-            raise RuntimeError(f"{HOME / path.relative_to(self.her_home)}: {what} in her copy{more}")
+            raise RuntimeError(f"{clean(str(HOME / path.relative_to(self.her_home)))}: {what} in her copy{more}")
 
     def _hold_old(self) -> None:
         """Her old folders with secrets leave your home for a folder only root reaches (a rename: nothing in them is
@@ -1739,7 +1757,7 @@ class Migration:
             code, out = self.host.run([*self._as(ROLE_USER), *self._defuse_argv(path, what)], cwd=Path("/"))
             done = "its execute bit taken off" if what == PROGRAM else "deleted"
             result = f"{done} as her" if code == 0 else f"not changed ({tail(out)})"
-            self.say(f"! {self._in_her_home(path)}: {what}; {result} before her newer data was copied back")
+            self.say(f"! {clean(str(self._in_her_home(path)))}: {what}; {result} before her newer data was copied back")
 
     def _overlay(self, owner: Owner) -> None:
         """What she saved since the move (her keys, messages and Signal sessions) on top of your old folders, read as
@@ -1752,7 +1770,7 @@ class Migration:
         problems = self._overlay_problems(present)
         if problems:
             path, what = problems[0]
-            raise RuntimeError(f"her newer data was not copied back ({self._in_her_home(path)}: {what})")
+            raise RuntimeError(f"her newer data was not copied back ({clean(str(self._in_her_home(path)))}: {what})")
         stale = self._stale_journals(present, owner)
         if stale:
             code, out = self.host.run([*self._as(owner.name), RM, "-f", "--", *map(str, stale)], cwd=Path("/"))
@@ -1942,15 +1960,15 @@ class Migration:
                 "folders, where your bridge would run, and your old services never start without it (your old Signal "
                 "sessions alone would break decryption):"
             )
-            for path, what in problems:
-                self.say(f"  {self._in_her_home(path)}: {what}")
+            for path, what in problems:  # names her account chose: cleaned for root's terminal
+                self.say(f"  {clean(str(self._in_her_home(path)))}: {what}")
             self.say(
                 f"Her account, or a program of yours before the move, put it there; if you did not, follow SECURITY.md, "
                 f'"If the Mac is compromised". Otherwise fix each as her, then run {ESTIA} rollback again:'
             )
             for path, what in problems:
                 fix = [SUDO, "-u", ROLE_USER, *self._defuse_argv(self._in_her_home(path), what)]
-                self.say(f"  {shlex.join(fix)}")
+                self.say(f"  {clean(shlex.join(fix))}")
             return 1
         stopped = [label for label in LABELS if self._installed(label)]
         with interruptions_ignored():  # a hang-up or a Ctrl-C never leaves her half way back

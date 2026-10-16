@@ -25,7 +25,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from local_assistant import doctor, harden, hostsec, ownuser, prompts
+from local_assistant import doctor, harden, hostsec, ollama_build, ownuser, prompts, share
 from local_assistant.config import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_NAME,
@@ -42,7 +42,8 @@ from local_assistant.hostsec import SUDO, estia_root
 from local_assistant.language import CODES, ENGLISH, find
 
 REPO = Path(__file__).resolve().parents[2]
-OLLAMA = "http://127.0.0.1:11434"  # where setup.sh starts Ollama
+SHARE_FAILED = 3  # scripts/migrate-to-own-user.sh: she was moved and only the projects share after it failed
+OLLAMA = ollama_build.BASE  # Ollama's official build, on this Mac only (the Ollama step keeps or installs it)
 IPV4 = "-Djava.net.preferIPv4Stack=true"  # registration goes through Java's HTTP client; hCaptcha is IPv4 only
 PLACEHOLDER_NUMBER = "+300000000000"
 PLACEHOLDER_ACI = "00000000-0000-0000-0000-000000000000"
@@ -70,19 +71,40 @@ _PROJECTS_LINES = (
 @dataclass(frozen=True)
 class ModelChoice:
     tag: str
+    digest: str  # the build's manifest digest (Ollama's list shows its first 12 digits as the ID): checked after a pull
     num_ctx: int  # the context window the local-worker alias gets
     note: str
+    ollama: str = ollama_build.MIN_TEXT  # the oldest Ollama it works with: JSON-schema output on the MLX engine
+    tested: bool = True  # passed her safety tests; False: setup says what failed and asks before the download
+
+
+# Gemma 4's builds for Apple silicon (MLX), by their explicit tags (owner, 15 Oct). Never the bare gemma4:26b or
+# gemma4:12b: since Ollama 0.40.0 they are lists, and what they download depends on the Ollama version (on 0.40.x the
+# untested 26b-nvfp4 build).
+GEMMA_26B = "gemma4:26b-mlx"
+GEMMA_26B_DIGEST = "f0fc7e0ae4947d382989b1f57db3d098a86b87c5b6e9523b9561ba81a2a64879"  # 18.3 GB, the live model
+GEMMA_12B = "gemma4:12b-mlx"
+GEMMA_12B_DIGEST = "ded7a27350032202d9e9b2a6071e8aa89959ab156771b5228f30863c741c4970"  # 7.7 GB
 
 
 def choose_model(memory_gb: float) -> ModelChoice | None:
     """The best model for this Mac's memory, or None below 16 GB. Gemma 4 26B (a mixture of experts, 4B active) is
     the tested one and fast on Apple silicon, but needs about 18 GB of the GPU's share; 12B fits next to macOS and the
-    voice models on 16 and 24 GB."""
+    voice models on 16 and 24 GB, but failed some of her safety tests (15 Oct, run twice; SECURITY.md, known gaps):
+    setup says what failed and asks first (`Wizard.model`). Both need Ollama 0.33.1 or later."""
     if memory_gb < 15:
         return None
     if memory_gb < 30:
-        return ModelChoice("gemma4:12b", 16_384 if memory_gb < 20 else 32_768, "about 8 GB download")
-    return ModelChoice("gemma4:26b", 32_768 if memory_gb < 44 else 65_536, "about 18 GB download; the tested model")
+        return ModelChoice(
+            GEMMA_12B, GEMMA_12B_DIGEST, 16_384 if memory_gb < 20 else 32_768, "about 8 GB download", tested=False
+        )
+    context = 32_768 if memory_gb < 44 else 65_536
+    return ModelChoice(GEMMA_26B, GEMMA_26B_DIGEST, context, "about 18 GB download; the tested model")
+
+
+def memory_gb() -> float:
+    """This Mac's memory in GB (GiB, as macOS counts it)."""
+    return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2**30
 
 
 def modelfile(choice: ModelChoice) -> str:
@@ -217,6 +239,26 @@ def _config_problem(text: str) -> str:
     except (tomllib.TOMLDecodeError, ConfigError) as exc:
         return str(exc)
     return ""
+
+
+def projects_refusal(folder: Path, home: Path) -> str | None:
+    """Why setup does not take this projects folder, by the share's rules (`share.refusal`: the move shares it with
+    her); None when it takes it. Inside your home: a folder of yours, reached without a symbolic link. Outside it:
+    no symbolic link either, the folder or one on the way; the share leaves such a folder to you
+    (`prompts.SETUP_PROJECTS_OUTSIDE`)."""
+    plain, top = Path(os.path.normpath(folder)), Path(os.path.normpath(home))
+    if plain.is_relative_to(top):
+        return share.refusal(plain, top, os.getuid())
+    if os.path.islink(plain):
+        return prompts.SETUP_PROJECTS_LINK.format(folder=folder)
+    if os.path.realpath(plain) != str(plain):
+        return prompts.SETUP_PROJECTS_LINK_ON_THE_WAY.format(folder=folder)
+    return None
+
+
+def outside_home(folder: Path, home: Path) -> bool:
+    """A projects folder the share does not share (it shares only folders in your home): opened to her by hand."""
+    return not Path(os.path.normpath(folder)).is_relative_to(Path(os.path.normpath(home)))
 
 
 @dataclass(frozen=True)
@@ -396,6 +438,12 @@ class Wizard:
         self.style = DEFAULT_STYLE  # her built-in style: the config's, once there is one, or the one chosen here
         self.style_asked = False  # the style question came already (the config step): the end asks it no more
         self.signal_cli = shutil.which("signal-cli") or "signal-cli"
+        # the Ollama step names the one in use; your home from the user database, as the service file's
+        self.ollama_program = str(ollama_build.owner_home() / "opt/ollama/current/ollama")
+        # a first install stops at an Ollama the step refuses; a re-run where she is set up (main says so) shows it
+        # as "!" and goes on, and the model step then pulls nothing
+        self.first_install = True
+        self.ollama_refused = False
         self.clock: Callable[[], float] = time.monotonic  # the wait for her voice at the end
         self.sleep: Callable[[float], None] = time.sleep
 
@@ -455,6 +503,30 @@ class Wizard:
             return True, ""
         return harden.json_rpc(argv, method, params, secrets=secrets, timeout=REGISTER_SECONDS)
 
+    # 0. Ollama's official build (owner, 15 Oct), before the model it runs
+    def ollama(self) -> None:
+        """Keep the official Ollama that answers, or install its pinned build, checked, always on (ollama_build);
+        anything else stops a first install with the fix the person runs. A re-run where she is set up already
+        (configured, or in her own user) shows that as "!" with its fix and goes on with the other steps, except an
+        Ollama that someone other than you may control (`ollama_build.endangers`): that stops every run. Off the live
+        Mac (a test's ESTIA_ROOT) it is only printed, as in a dry run."""
+        memory = memory_gb()
+        choice = choose_model(memory)
+        if choice is None:
+            self.say(prompts.SETUP_TOO_SMALL.format(memory=memory, name=self.name))
+            raise SystemExit(1)
+        tools = ollama_build.Tools(say=self.say)
+        home = ollama_build.owner_home()  # never $HOME: root's service file runs the program under it at every start
+        step = ollama_build.Install(tools, home, dry_run=self.dry_run or not tools.live, say=self.say)
+        try:
+            self.ollama_program = step.run(choice.num_ctx)
+        except ollama_build.Refusal as refused:
+            if self.first_install or refused.fatal:  # someone other than you may control it: every run stops
+                raise
+            self.say(ollama_build.warned(str(refused)))
+            self.say(prompts.SETUP_OLLAMA_GOES_ON)
+            self.ollama_refused = True
+
     # 1. the model
     def installed_models(self) -> set[str]:
         """Ollama's model names, read-only (the doctor's GET), so a dry run sees what a real run sees; empty when
@@ -466,23 +538,41 @@ class Wizard:
             return set()
 
     def model(self) -> None:
-        memory = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2**30
+        memory = memory_gb()
         if self.installed_models() & {"local-worker", "local-worker:latest"}:
             self.say("✓ Model: local-worker is there.")
             return
+        if self.ollama_refused:  # never a download through an Ollama setup refused
+            self.say(prompts.SETUP_MODEL_AFTER_OLLAMA)
+            return
         choice = choose_model(memory)
         if choice is None:
-            self.say(f"✗ This Mac has {memory:.0f} GB of memory. {self.name} needs 16 GB or more.")
+            self.say(prompts.SETUP_TOO_SMALL.format(memory=memory, name=self.name))
             raise SystemExit(1)
-        self.say(f"Model: {choice.tag} for this Mac's {memory:.0f} GB ({choice.note}).")
+        self.say(
+            f"Model: {choice.tag} for this Mac's {memory:.0f} GB ({choice.note}; needs Ollama {choice.ollama} or later)."
+        )
+        if not choice.tested:  # owner, 15 Oct: still picked, but said plainly and never downloaded without a yes
+            self.say(prompts.SETUP_SMALLER_MODEL)
+            if self.dry_run:
+                self.say(prompts.SETUP_SMALLER_MODEL_DRY_RUN.format(ask=prompts.SETUP_SMALLER_MODEL_ASK))
+            elif not self.yes(prompts.SETUP_SMALLER_MODEL_ASK):
+                raise SystemExit(prompts.SETUP_SMALLER_MODEL_NO)
         self.say("  The download can take a while; the Mac stays awake meanwhile. If it stops, run setup again.")
-        if self.run(["caffeinate", "-i", "ollama", "pull", choice.tag]).returncode != 0:
+        if self.run(["caffeinate", "-i", self.ollama_program, "pull", choice.tag]).returncode != 0:
             raise SystemExit("The download did not finish. Run scripts/setup.sh again to resume it.")
+        got = "" if self.dry_run else self.listed_digest(choice.tag)
+        if not self.dry_run and got != choice.digest:  # the tested build, by its digest: never one changed since
+            raise SystemExit(
+                prompts.SETUP_MODEL_OTHER_BUILD.format(
+                    tag=choice.tag, got=got[:12] or "no digest", want=choice.digest[:12]
+                )
+            )
         spec = REPO / ".local-worker.Modelfile"
         if not self.dry_run:
             spec.write_text(modelfile(choice), encoding="utf-8")
         try:
-            made = self.run(["ollama", "create", "local-worker", "-f", str(spec)]).returncode == 0
+            made = self.run([self.ollama_program, "create", "local-worker", "-f", str(spec)]).returncode == 0
         finally:
             if not self.dry_run:
                 spec.unlink(missing_ok=True)
@@ -711,12 +801,17 @@ class Wizard:
 
     def model_digest(self) -> str:
         """The digest Ollama lists for local-worker now (read-only); "" when it lists none."""
+        return self.listed_digest("local-worker:latest")
+
+    def listed_digest(self, name: str) -> str:
+        """The digest Ollama lists for a model now (read-only; a name without a tag is :latest); "" when none."""
+        names = {name, name.removesuffix(":latest")}
         try:
             listed = doctor.Probe().get_json(f"{OLLAMA}/api/tags").get("models", [])
         except (OSError, ValueError, AttributeError, TypeError):
             return ""
         for item in listed if isinstance(listed, list) else []:
-            if isinstance(item, dict) and item.get("name") in ("local-worker", "local-worker:latest"):
+            if isinstance(item, dict) and item.get("name") in names:
                 digest = str(item.get("digest") or "").lower().removeprefix("sha256:")
                 return digest if re.fullmatch(r"[0-9a-f]{64}", digest) else ""
         return ""
@@ -731,10 +826,15 @@ class Wizard:
         if not self.yes(prompts.SETUP_PROJECTS_ASK):
             return None
         where = self._projects_where()
-        return None if where is None else (where.typed, where.level)
+        if where is None:
+            return None
+        if outside_home(where.folder, Path.home()):  # the move's share leaves it to you
+            self.say(prompts.SETUP_PROJECTS_OUTSIDE.format(folder=where.folder))
+        return where.typed, where.level
 
     def _projects_where(self) -> _Where | None:
-        """The projects folder (it must exist, and not be your home itself; q or no terminal: none) and the level."""
+        """The projects folder (it must exist, not be your home itself, and pass the share's rules,
+        `projects_refusal`; q or no terminal: none) and the level."""
         while True:
             given = self.typed(prompts.SETUP_PROJECTS_FOLDER)
             if given is None or given.lower() == "q":  # no terminal: the default folder may be missing, never a loop
@@ -745,6 +845,8 @@ class Wizard:
                 self.say(prompts.SETUP_PROJECTS_HOME)
             elif not folder.is_dir():
                 self.say(prompts.SETUP_PROJECTS_NO_FOLDER.format(folder=folder))
+            elif (why := projects_refusal(folder, Path.home())) is not None:
+                self.say(prompts.SETUP_PROJECTS_REFUSED.format(why=why[:1].upper() + why[1:]))
             else:
                 break
         while True:
@@ -780,14 +882,13 @@ class Wizard:
         if where is None:
             return
         if mine:  # her ~ is /var/estia: her config names the folder by its absolute path
-            home = Path.home()
-            inside = where.folder != home and where.folder.is_relative_to(home)  # share-projects.sh shares only these
-            share = prompts.SETUP_PROJECTS_SHARE if inside else prompts.SETUP_PROJECTS_OUTSIDE
+            outside = outside_home(where.folder, Path.home())  # share-projects.sh shares only folders in your home
+            how = prompts.SETUP_PROJECTS_OUTSIDE if outside else prompts.SETUP_PROJECTS_SHARE
             self.say(
                 prompts.SETUP_PROJECTS_HERS.format(
                     root=json.dumps(str(where.folder), ensure_ascii=False),
                     level=where.level,
-                    share=share.format(folder=where.folder),
+                    share=how.format(folder=where.folder),
                 )
             )
             return
@@ -890,7 +991,10 @@ class Wizard:
 
     def always_on(self) -> bool:
         """Her own user: done already, the move (on a yes), or skipped. False only when the move failed: then setup
-        stops, before the security step and the extras."""
+        stops, before the security step and the extras. The move's script ends `SHARE_FAILED` (3) only when its last
+        step, the projects share, fails after the move: she runs in her own user then, so setup says so, with the
+        share's command, and goes on. Any other failure is the move's, even with her service file left in place (a
+        restore that failed too)."""
         if self.own_user():
             self.say(f"✓ Always on: as her own user {ownuser.ROLE_USER}, from {ownuser.CURRENT}.")
             return True
@@ -916,9 +1020,16 @@ class Wizard:
             self.say(prompts.SETUP_SSH_SCREEN)  # a dropped connection would stop the move halfway
         if not self.yes("Install it now?" if not legacy else "Move her into her own user now?"):
             return True
-        if self.run([move]).returncode != 0:
-            self.say(prompts.SETUP_MOVE_FAILED.format(move=move))
-            return False
+        code = self.run([move]).returncode
+        if code != 0:
+            if code != SHARE_FAILED or not self.own_user():
+                self.say(prompts.SETUP_MOVE_FAILED.format(move=move))
+                return False
+            self.say(
+                prompts.SETUP_SHARE_FAILED.format(
+                    name=self.name, user=ownuser.ROLE_USER, share=REPO / "scripts" / "share-projects.sh"
+                )
+            )
         return True
 
     # 5b. the Mac's security around her, then the phone
@@ -988,6 +1099,15 @@ class Wizard:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Setup; Ctrl-C at any point ends it with one line on how to go on (130, as the shell reports Ctrl-C)."""
+    try:
+        return run_setup(argv)
+    except KeyboardInterrupt:
+        print(f"\n{prompts.SETUP_STOPPED}", flush=True)
+        return 130
+
+
+def run_setup(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Set the assistant up step by step (safe to run again).")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="where the config goes")
     parser.add_argument(
@@ -1009,6 +1129,8 @@ def main(argv: list[str] | None = None) -> int:
             f"Setup: she runs as her own user {ownuser.ROLE_USER}; her config and data are readable only by that user,\n"
             "so setup reads them through /usr/bin/sudo /usr/local/estia/bin/estia and never writes them.\n"
         )
+        wizard.first_install = False
+        wizard.ollama()
         wizard.model()
         wizard.say(f"✓ Config, Signal number and your account: in her own user ({ownuser.HOME}).")
         wizard.always_on()
@@ -1029,7 +1151,9 @@ def main(argv: list[str] | None = None) -> int:
             wizard.style = cfg.personality_style
         except ConfigError as exc:
             problem = exc
-    wizard.say(f"{wizard.name} setup: the model, her Signal number, who may talk to her, the config, always on.\n")
+    wizard.say(
+        f"{wizard.name} setup: Ollama, the model, her Signal number, who may talk to her, the config, always on.\n"
+    )
     if problem is not None:
         wizard.say(f"✗ Config: {problem}")
         wizard.say(
@@ -1038,6 +1162,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     configured = cfg is not None and cfg.bot_number != PLACEHOLDER_NUMBER and PLACEHOLDER_ACI not in cfg.allowed_acis
+    wizard.first_install = not configured
+    wizard.ollama()
     wizard.model()
     if configured:
         wizard.say(f"✓ Config: {args.config} is set up (bot number and your account).")

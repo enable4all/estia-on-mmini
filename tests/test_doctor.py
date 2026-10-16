@@ -20,6 +20,7 @@ from local_assistant.doctor import Finding, Probe, exit_code, render, run
 from local_assistant.hostsec import Check
 from local_assistant.language import LANGUAGE_KEY
 from local_assistant.mail_auth import TokenStore
+from local_assistant.ollama_build import Listener
 from local_assistant.part_status import PartStatus, Reason
 from local_assistant.store import Store
 
@@ -61,6 +62,21 @@ class FakeProbe(Probe):
         self.versions_asked: list[str] = []
         self.home_open: tuple[list[Path], bool] = ([], True)  # what in your home every account may open; all read
         self.homes_opened: list[tuple[Path, set[Path]]] = []
+        self.ollama_at = ""  # the program listening on Ollama's port; "": none found
+        self.ollama_addresses: tuple[str, ...] = ("127.0.0.1.11434",)  # where it listens (netstat's local address)
+        self.ollama_uid: int | None = None  # the account that runs it (ps); None: not read
+        self.ollama_others: tuple[tuple[str, int | None], ...] = ()  # another program or account on its port too
+        self.ollama_ports: list[int] = []
+        self.ollama_service: str | None = None  # `launchctl print` of setup's Ollama service; None: could not be read
+
+    def ollama_listener(self, port: int) -> Listener:
+        self.ollama_ports.append(port)
+        if not self.ollama_at:
+            return Listener("")
+        return Listener(self.ollama_at, self.ollama_addresses, self.ollama_uid, self.ollama_others)
+
+    def ollama_launchd(self) -> str | None:
+        return self.ollama_service
 
     def power(self) -> str | None:
         return self.pmset
@@ -164,11 +180,12 @@ def test_a_config_error_is_shown(home: Path) -> None:
 
 
 def test_missing_tools_come_with_the_install_command(home: Path) -> None:
+    """Ollama is not one of Homebrew's tools here (owner, 15 Oct: only its official build): its own lines say."""
     probe = FakeProbe(home)
-    probe.tools = {"uv"}
+    probe.tools = set()
     tools = by_part(run(write_config(home, MINIMAL), probe))["Tools"]
-    assert tools.status == "fail" and "signal-cli" in tools.text and "ollama" in tools.text
-    assert tools.fix == "brew install signal-cli ollama"
+    assert tools.status == "fail" and "signal-cli" in tools.text and "ollama" not in tools.text
+    assert tools.fix == "brew install signal-cli uv"
 
 
 def test_only_a_mac_with_apple_silicon_will_do(home: Path) -> None:
@@ -186,7 +203,245 @@ def test_ollama_must_run_and_have_the_model(home: Path) -> None:
     assert by_part(run(path, probe))["Model"].status == "ok"
     del probe.answers["http://127.0.0.1:11434/api/tags"]
     down = by_part(run(path, probe))["Model"]
-    assert down.status == "fail" and "brew services start ollama" in down.fix
+    assert down.status == "fail" and "brew" not in down.fix
+    assert down.fix == "scripts/setup.sh (it installs Ollama's official build and starts it)"
+
+
+def test_ollama_down_with_setups_service_in_place_names_its_restart(home: Path) -> None:
+    from local_assistant import hostsec, ollama_build
+
+    daemon = hostsec.estia_root() / ollama_build.DAEMON.relative_to("/")
+    daemon.parent.mkdir(parents=True, exist_ok=True)
+    daemon.write_bytes(b"<plist/>")
+    probe = FakeProbe(home)
+    del probe.answers["http://127.0.0.1:11434/api/tags"]
+    down = by_part(run(write_config(home, MINIMAL), probe))["Model"]
+    assert down.fix.startswith("/usr/bin/sudo /bin/launchctl kickstart -k system/com.local-assistant.ollama")
+    # booted out (an update by hand, a failed one): kickstart cannot find it, bootstrap loads it again
+    probe.ollama_service = 'Could not find service "com.local-assistant.ollama" in domain for system'
+    down = by_part(run(write_config(home, MINIMAL), probe))["Model"]
+    assert down.fix.startswith(
+        "/usr/bin/sudo /bin/launchctl bootstrap system /Library/LaunchDaemons/com.local-assistant.ollama.plist"
+    )
+
+
+def test_ollama_down_with_another_service_names_that_service_not_setup(home: Path) -> None:
+    """Setup would refuse to install a second service next to it: the fix is starting that one again."""
+    import plistlib
+
+    from local_assistant import hostsec
+
+    daemons = hostsec.estia_root() / "Library/LaunchDaemons"
+    daemons.mkdir(parents=True, exist_ok=True)
+    program = "/Users/example/opt/ollama/current/ollama"
+    (daemons / "com.local-llm.ollama.plist").write_bytes(
+        plistlib.dumps({"Label": "com.local-llm.ollama", "ProgramArguments": [program, "serve"]})
+    )
+    probe = FakeProbe(home)
+    del probe.answers["http://127.0.0.1:11434/api/tags"]
+    down = by_part(run(write_config(home, MINIMAL), probe))["Model"]
+    assert down.status == "fail" and "scripts/setup.sh" not in down.fix
+    assert down.fix.startswith("/usr/bin/sudo /bin/launchctl kickstart -k system/com.local-llm.ollama")
+
+
+def official(folder: Path, *, xgrammar: bool = True) -> str:
+    from local_assistant.ollama_build import XGRAMMAR
+
+    for name in ("ollama", *(XGRAMMAR if xgrammar else ())):
+        (folder / name).parent.mkdir(parents=True, exist_ok=True)
+        (folder / name).write_bytes(b"\xcf\xfa\xed\xfe")
+    return str(folder / "ollama")
+
+
+def test_the_official_ollama_with_its_library_is_a_tick(home: Path) -> None:
+    probe = FakeProbe(home)
+    probe.ollama_at = official(home / "opt/ollama/v0.40.4")
+    probe.answers["http://127.0.0.1:11434/api/version"] = {"version": "0.40.4"}
+    line = by_part(run(write_config(home, MINIMAL), probe))["Ollama"]
+    assert line.status == "ok" and line.text == f"0.40.4 answers ({probe.ollama_at}), with its JSON-schema library"
+    assert probe.ollama_ports == [11434]
+
+
+def test_an_ollama_open_to_other_machines_is_named(home: Path) -> None:
+    """Ollama has no login: on every network, any machine there could replace local-worker."""
+    probe = FakeProbe(home)
+    probe.ollama_at = official(home / "opt/ollama/v0.40.4")
+    probe.ollama_addresses = ("*.11434",)
+    probe.answers["http://127.0.0.1:11434/api/version"] = {"version": "0.40.4"}
+    line = by_part(run(write_config(home, MINIMAL), probe))["Ollama"]
+    assert line.status == "warn" and "it listens for other machines too (*.11434)" in line.text
+    assert "OLLAMA_HOST=127.0.0.1:11434" in line.text
+
+
+@pytest.mark.parametrize("ours", [True, False], ids=["setups-service", "another"])
+def test_an_ollama_of_another_version_than_the_pin_is_named_untested(home: Path, ours: bool) -> None:
+    from local_assistant import hostsec, ollama_build
+
+    if ours:
+        daemon = hostsec.estia_root() / ollama_build.DAEMON.relative_to("/")
+        daemon.parent.mkdir(parents=True, exist_ok=True)
+        daemon.write_bytes(b"<plist/>")
+    probe = FakeProbe(home)
+    probe.ollama_at = official(home / "opt/ollama/v0.40.0")
+    probe.answers["http://127.0.0.1:11434/api/version"] = {"version": "0.40.0"}
+    line = by_part(run(write_config(home, MINIMAL), probe))["Ollama"]
+    assert line.status == "warn" and line.text == "0.40.0 answers, not 0.40.4, the version she is tested with"
+    assert ("updated in place" in line.fix) is ours and "scripts/" in line.fix
+
+
+@pytest.mark.parametrize("cellar", ["/opt/homebrew/Cellar", "/usr/local/Cellar"])
+def test_homebrews_ollama_is_named_with_the_fix(home: Path, cellar: str) -> None:
+    probe = FakeProbe(home)
+    probe.ollama_at = f"{cellar}/ollama/0.40.4/bin/ollama"
+    probe.answers["http://127.0.0.1:11434/api/version"] = {"version": "0.40.4"}
+    line = by_part(run(write_config(home, MINIMAL), probe))["Ollama"]
+    assert line.status == "warn" and "Homebrew's Ollama answers" in line.text and probe.ollama_at in line.text
+    assert line.fix.startswith("brew services stop ollama, then brew uninstall ollama")
+    assert exit_code([line]) == 0  # works for chat; the JSON-schema answers fail: a warning, not a stop
+
+
+def test_an_ollama_without_the_xgrammar_library_is_named(home: Path) -> None:
+    probe = FakeProbe(home)
+    probe.ollama_at = official(home / "built/here", xgrammar=False)
+    line = by_part(run(write_config(home, MINIMAL), probe))["Ollama"]
+    assert line.status == "warn" and "no mlx_metal_v3/libollama_xgrammar.dylib" in line.text
+    assert "scripts/setup.sh" in line.fix
+
+
+def test_an_ollama_older_than_the_json_schema_one_is_named(home: Path) -> None:
+    probe = FakeProbe(home)
+    probe.answers["http://127.0.0.1:11434/api/version"] = {"version": "0.30.2"}
+    line = by_part(run(write_config(home, MINIMAL), probe))["Ollama"]
+    assert line.status == "warn" and "0.30.2 answers: older than 0.33.1" in line.text
+
+
+def test_an_ollama_that_another_account_runs_is_named(home: Path) -> None:
+    probe = FakeProbe(home)
+    probe.ollama_at = official(home / "opt/ollama/v0.40.4")
+    probe.ollama_uid = os.getuid() + 1
+    probe.answers["http://127.0.0.1:11434/api/version"] = {"version": "0.40.4"}
+    line = by_part(run(write_config(home, MINIMAL), probe))["Ollama"]
+    assert line.status == "fail" and "another account on this Mac, not you: that account controls her answers" in (
+        line.text
+    )
+    probe.ollama_uid = os.getuid()
+    assert by_part(run(write_config(home, MINIMAL), probe))["Ollama"].status == "ok"
+
+
+def test_a_second_program_on_ollamas_port_is_a_failure(home: Path) -> None:
+    """Your Ollama on 127.0.0.1 and another account's on ::1: the bridge may reach either (re-check, 16 Oct)."""
+    probe = FakeProbe(home)
+    probe.ollama_at = official(home / "opt/ollama/v0.40.4")
+    probe.ollama_uid = os.getuid()
+    probe.ollama_others = ((probe.ollama_at, os.getuid() + 1),)
+    probe.answers["http://127.0.0.1:11434/api/version"] = {"version": "0.40.4"}
+    line = by_part(run(write_config(home, MINIMAL), probe))["Ollama"]
+    assert line.status == "fail" and "also listens on its port" in line.text
+
+
+def test_as_her_an_ollama_that_another_account_runs_is_named_too(home: Path, tmp_path: Path) -> None:
+    """As her, your folders are closed (no library line, no tick): the account is still read (ps names any user's
+    process), and the owner is the one the move's record names."""
+    import pwd
+
+    from local_assistant import hostsec, ownuser
+
+    marker = hostsec.estia_root() / ownuser.MARKER.relative_to("/")
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps({"owner": pwd.getpwuid(os.getuid()).pw_name}), encoding="utf-8")
+    closed = tmp_path / "closed"
+    program = official(closed / "opt/ollama/v0.40.4")
+    probe = FakeProbe(home)
+    probe.her = True
+    probe.ollama_at = program
+    probe.answers["http://127.0.0.1:11434/api/version"] = {"version": "0.40.4"}
+    (closed / "opt/ollama/v0.40.4").chmod(0o000)
+    try:
+        assert "Ollama" not in by_part(run(write_config(home, MINIMAL), probe))  # yours: nothing to say as her
+        probe.ollama_uid = os.getuid() + 1
+        line = by_part(run(write_config(home, MINIMAL), probe))["Ollama"]
+    finally:
+        (closed / "opt/ollama/v0.40.4").chmod(0o755)
+    assert line.status == "fail" and "another account on this Mac" in line.text
+
+
+@pytest.mark.parametrize(("memory", "named"), [(32.0, False), (16.0, True)], ids=["as-setup-writes", "older"])
+def test_setups_own_service_file_that_differs_from_what_setup_writes_is_named(
+    home: Path, monkeypatch: pytest.MonkeyPatch, memory: float, named: bool
+) -> None:
+    """A release that changes the service file reaches an install only through setup: doctor shows the old one."""
+    import grp
+    import pwd
+
+    from local_assistant import hostsec, ollama_build, setup
+
+    me = pwd.getpwuid(os.getuid())
+    daemon = hostsec.estia_root() / ollama_build.DAEMON.relative_to("/")
+    daemon.parent.mkdir(parents=True, exist_ok=True)
+    daemon.write_bytes(
+        ollama_build.daemon_plist(
+            user=me.pw_name, group=grp.getgrgid(me.pw_gid).gr_name, home=Path(me.pw_dir), num_ctx=32_768
+        )
+    )
+    monkeypatch.setattr(setup, "memory_gb", lambda: memory)  # 16 GB: setup writes a 16384-token context
+    parts = by_part(run(write_config(home, MINIMAL), FakeProbe(home)))
+    if not named:
+        assert "Ollama service" not in parts
+        return
+    line = parts["Ollama service"]
+    assert line.status == "warn" and "is not the one this version of setup writes" in line.text
+    assert str(ollama_build.DAEMON) in line.text and line.fix.startswith("scripts/install-ollama.sh")
+
+
+def test_no_ollama_line_when_its_program_cannot_be_seen(home: Path) -> None:
+    """As her, doctor may see neither your program nor its folder: nothing to say, never a guess."""
+    probe = FakeProbe(home)
+    probe.answers["http://127.0.0.1:11434/api/version"] = {"version": "0.40.4"}
+    assert "Ollama" not in by_part(run(write_config(home, MINIMAL), probe))
+
+
+@pytest.mark.parametrize(
+    ("config", "entry", "named"),
+    [
+        (
+            "",
+            {"name": "local-worker:latest", "details": {"format": "gguf", "parent_model": "gemma4:26b"}},
+            "made from gemma4:26b",
+        ),
+        ('model = "gemma4:12b"\n', {"name": "gemma4:12b"}, "gemma4:12b is not one of the builds"),
+    ],
+)
+def test_a_model_that_is_not_an_mlx_build_of_gemma_4_is_named(
+    home: Path, config: str, entry: dict[str, object], named: str
+) -> None:
+    probe = FakeProbe(home)
+    probe.answers["http://127.0.0.1:11434/api/tags"] = {"models": [entry]}
+    line = by_part(run(write_config(home, MINIMAL + config), probe))["Model build"]
+    assert line.status == "warn" and named in line.text and "gemma4:26b-mlx" in line.text
+    if not config:
+        assert line.fix.startswith("ollama rm local-worker, then run scripts/setup.sh")
+    else:
+        assert line.fix.startswith("ollama pull gemma4:26b-mlx")
+
+
+def test_the_model_build_line_names_setups_own_tags(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One definition of the tags: a new pin in setup reaches doctor's words with no second copy to change."""
+    from local_assistant import setup
+
+    monkeypatch.setattr(setup, "GEMMA_26B", "gemma4:27b-mlx")
+    monkeypatch.setattr(setup, "GEMMA_12B", "gemma4:13b-mlx")
+    probe = FakeProbe(home)
+    probe.answers["http://127.0.0.1:11434/api/tags"] = {"models": [{"name": "gemma4:12b"}]}
+    line = by_part(run(write_config(home, MINIMAL + 'model = "gemma4:12b"\n'), probe))["Model build"]
+    assert "(gemma4:27b-mlx, gemma4:13b-mlx)" in line.text and "26b-mlx" not in line.text + line.fix
+    assert line.fix.startswith("ollama pull gemma4:27b-mlx (gemma4:13b-mlx on 16 or 24 GB)")
+
+
+def test_an_mlx_build_has_no_model_build_line(home: Path) -> None:
+    probe = FakeProbe(home)
+    entry = {"name": "local-worker:latest", "details": {"format": "safetensors", "family": "gemma4"}}
+    probe.answers["http://127.0.0.1:11434/api/tags"] = {"models": [entry]}
+    assert "Model build" not in by_part(run(write_config(home, MINIMAL), probe))
 
 
 def test_a_missing_alias_points_to_setup_which_picks_the_model_for_this_macs_memory(home: Path) -> None:
@@ -239,7 +494,7 @@ def test_optional_parts_are_checked_only_when_turned_on(home: Path) -> None:
     probe = FakeProbe(home)
     parts = by_part(run(write_config(home, MINIMAL), probe))
     assert not {"Web search", "Places", "Mail", "Calendar", "Voice", "Calls", "Spotify"} & set(parts)
-    assert probe.asked == ["http://127.0.0.1:11434/api/tags"]
+    assert probe.asked == ["http://127.0.0.1:11434/api/tags", "http://127.0.0.1:11434/api/version"]  # Ollama only
 
 
 def test_web_search_needs_a_private_key_file_and_never_shows_a_key(home: Path) -> None:
@@ -716,7 +971,7 @@ def test_another_language_without_voice_is_text_only(home: Path) -> None:
     probe = FakeProbe(home)
     language = by_part(run(write_config(home, 'language = "ja"\n' + MINIMAL), probe))["Language"]
     assert (language.status, language.text) == ("ok", "日本語 (ja), text only (no [voice])")
-    assert probe.asked == ["http://127.0.0.1:11434/api/tags"]
+    assert probe.asked == ["http://127.0.0.1:11434/api/tags", "http://127.0.0.1:11434/api/version"]  # Ollama only
 
 
 SOURCES = (
@@ -1630,6 +1885,22 @@ def test_a_shared_folder_and_the_helper_in_place_then_her_last_look(
     recorded(path).failed("documents", "not_shared")
     failing = by_part(run(path, probe))["Documents"]
     assert failing.status == "fail" and "scripts/share-documents.sh" in failing.fix
+
+
+def test_a_failed_warm_up_is_a_warning_with_its_fix(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Text recognition failed at her start (live, 15 Oct: under her account): "!" with the fix, text pages still
+    read, so no ✗ and doctor's exit code stays 0."""
+    documents_at(monkeypatch, built_helper(home), home)
+    path = documents_config(home, shared_folder(home))
+    status = recorded(path)
+    status.ok("documents")
+    status.warn("documents", "ocr_unavailable")
+    findings = run(path, FakeProbe(home))
+    found = by_part(findings)["Documents"]
+    assert found.status == "warn" and exit_code(findings) == 0
+    assert found.text.startswith("working, last read 11:35; since 11:35: scanned pages not read")
+    assert found.fix == prompts.PART_FIXES["documents/ocr_unavailable"]
+    assert any(line.startswith("! Documents: working") for line in render(findings).splitlines())
 
 
 def test_a_folder_she_cannot_read_names_the_share(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:

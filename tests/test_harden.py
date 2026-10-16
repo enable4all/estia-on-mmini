@@ -319,9 +319,63 @@ def test_the_registration_lock_is_set_in_a_maintenance_window(tmp_path: Path) ->
         (SUDO, "-n", LAUNCHCTL, "bootstrap", "system", "/Library/LaunchDaemons/com.local-assistant.bridge.plist")
     )
     assert stop < pin_call < start
+    assert "✓ Registration Lock: on; she runs again." in said
     assert host.given[pin_call] == f"{PIN}\n"  # stdin only
     assert all(PIN not in " ".join(argv) for argv in host.asked) and PIN not in "\n".join(said)
     assert any("password manager" in line for line in said)
+
+
+def test_a_bridge_stopped_on_purpose_stays_stopped_after_a_new_pin(tmp_path: Path) -> None:
+    """FULL3: after `/usr/bin/sudo /usr/local/estia/bin/estia stop` (step 1 of "If the Mac is compromised") her service
+    file is still there, but launchd does not have her loaded. `--new-pin` (step 7) then neither stops nor starts her,
+    and says she stays stopped, so step 8 (her linked devices) comes before she runs again."""
+    root, home = mac(tmp_path)
+    (root / "Library/LaunchDaemons").mkdir(parents=True)
+    (root / "Library/LaunchDaemons/com.local-assistant.bridge.plist").write_text("x")
+    her = {"data_modes": {"status": "ok"}, "registration_lock": {"status": "ok", "text": "on"}}
+    stopped = 'Bad request.\nCould not find service "com.local-assistant.bridge" in domain for system\n'
+    answers = {
+        f"{SUDO} -n -u _estia -H -- *--her-checks": (0, json.dumps(her)),
+        f"{SUDO} -n -u _estia -H -- *--set-pin": (0, "Registration Lock: on\n"),
+        f"{LAUNCHCTL} print system/com.local-assistant.bridge": (113, stopped),
+    }
+    host = FakeMac(root, mac_state(root, **answers))
+    said: list[str] = []
+    run = step(host, home, yes=["Registration Lock"], pins=[PIN, PIN], own_user=True, new_pin=True, said=said)
+    assert run.run() == 0
+    assert any(argv[-1] == "--set-pin" for argv in host.asked)
+    bridge = [
+        argv for argv in host.asked if LAUNCHCTL in argv and argv[-1].endswith("com.local-assistant.bridge.plist")
+    ]
+    assert bridge == [] and (SUDO, "-n", LAUNCHCTL, "bootout", "system/com.local-assistant.bridge") not in host.asked
+    assert "✓ Registration Lock: on; she stays stopped (she was stopped before)." in said
+
+
+@pytest.mark.parametrize("answer", [(127, "TimeoutExpired"), (5, "Bad request.\n")], ids=["timeout", "other"])
+def test_a_bridge_whose_state_cannot_be_read_is_stopped_for_the_pin_and_never_started(
+    tmp_path: Path, answer: tuple[int, str]
+) -> None:
+    """Re-check of FULL3: launchctl's answer unread (a timeout, a message without "Could not find service") may be
+    a bridge stopped on purpose. She is booted out (harmless when not loaded: one signal-cli per account), never
+    started afterwards, and the line says how to start her."""
+    root, home = mac(tmp_path)
+    (root / "Library/LaunchDaemons").mkdir(parents=True)
+    (root / "Library/LaunchDaemons/com.local-assistant.bridge.plist").write_text("x")
+    her = {"data_modes": {"status": "ok"}, "registration_lock": {"status": "ok", "text": "on"}}
+    answers = {
+        f"{SUDO} -n -u _estia -H -- *--her-checks": (0, json.dumps(her)),
+        f"{SUDO} -n -u _estia -H -- *--set-pin": (0, "Registration Lock: on\n"),
+        f"{LAUNCHCTL} print system/com.local-assistant.bridge": answer,
+    }
+    host = FakeMac(root, mac_state(root, **answers))
+    said: list[str] = []
+    run = step(host, home, yes=["Registration Lock"], pins=[PIN, PIN], own_user=True, new_pin=True, said=said)
+    assert run.run() == 0
+    assert any(argv[-1] == "--set-pin" for argv in host.asked)
+    assert (SUDO, "-n", LAUNCHCTL, "bootout", "system/com.local-assistant.bridge") in host.asked
+    assert not any("bootstrap" in argv for argv in host.asked if argv[-1].endswith("com.local-assistant.bridge.plist"))
+    line = next(line for line in said if line.startswith("✓ Registration Lock: on;"))
+    assert "she stays stopped" in line and "/usr/bin/sudo /usr/local/estia/bin/estia start" in line, line
 
 
 def test_a_new_pin_is_offered_with_the_lock_on_only_when_asked_for(tmp_path: Path) -> None:

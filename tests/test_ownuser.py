@@ -1079,15 +1079,17 @@ def test_a_service_file_that_is_not_only_hers_is_named(change: dict[str, object]
 
 
 def test_service_logs_left_in_her_folder_name_the_tools_update(tmp_path: Path, as_her: None) -> None:
-    """An install from before /var/log/estia: launchd still opens her logs as root in her folder. Not her code being
-    wrong: the tools' update and one more deploy render the new service files."""
+    """An install from before /var/log/estia: launchd still opens her logs as root in her folder, so a program of her
+    account could make root write into a file it names (a link there). A ✗, in plain words: the tools' update and one
+    more deploy render the new service files."""
     installed(tmp_path)
     plist = tmp_path / "Library/LaunchDaemons/com.local-assistant.bridge.plist"
     data = plistlib.loads(plist.read_bytes())
     data["StandardOutPath"] = data["StandardErrorPath"] = "/var/estia/Library/Logs/local-assistant/launchd.log"
     plist.write_bytes(plistlib.dumps(data))
     check = by_key(ownuser.install_checks(tmp_path))["plists"]
-    assert check.status == "warn" and "her own folder" in check.text
+    assert check.status == "fail" and "her own folder" in check.text
+    assert "a program of her account could make root write into a file it names" in check.text
     assert check.fix == (
         "/usr/bin/sudo /usr/local/estia/bin/estia-deploy --update-tools (read the diff), then "
         "/usr/bin/sudo /usr/local/estia/bin/estia-deploy: it moves them to /var/log/estia"
@@ -1525,6 +1527,61 @@ def test_the_preflight_refuses_a_link_out_or_a_special_file(tmp_path: Path, no_u
     assert str(data / name) in text and "Nothing changed" in text
 
 
+def test_her_number_is_read_from_a_config_of_reasonable_size_only(tmp_path: Path) -> None:
+    """ARCH10 re-check: root reads her number at a path you control; like read_json, a capped read."""
+    config = tmp_path / "config.toml"
+    config.write_text('bot_number = "+306900000000"\n', encoding="utf-8")
+    assert ownuser.bot_number(config) == "+306900000000"
+    config.write_text('bot_number = "+306900000000"\n' + "# padding\n" * 200_000, encoding="utf-8")
+    assert ownuser.bot_number(config) is None
+
+
+def test_the_preflight_prints_a_planted_name_without_its_hidden_characters(tmp_path: Path, no_user: None) -> None:
+    """FULL2 re-check: root prints the move's preflight lines. A FIFO named with an escape sequence, a new line and
+    a right-to-left override in your config folder reaches root's terminal as "?"s."""
+    said: list[str] = []
+    move, _host, home, root = migration(tmp_path, said=said)
+    her_old_setup(home, root)
+    name = "pipe\x1b[2J\nfine\u202etxt"
+    os.mkfifo(home / ".config/local-assistant" / name)
+    assert move.run() == 1
+    text = "\n".join(said)
+    assert "pipe?[2J?fine?txt" in text and "\x1b" not in text and "\u202e" not in text
+    assert not any(line.startswith("fine") for line in said)
+
+
+@pytest.mark.parametrize("parent", [".config", ".local/share", ".local/share/signal-cli/data"])
+def test_the_preflight_reads_nothing_of_hers_through_a_link(
+    tmp_path: Path, no_user: None, monkeypatch: pytest.MonkeyPatch, parent: str
+) -> None:
+    """ARCH10: root runs the preflight, and root never follows your links. A folder on the way to her config or her
+    Signal account swapped for a link to elsewhere is named first, and nothing is read through it: neither her number
+    nor her account file."""
+    said: list[str] = []
+    move, host, home, root = migration(tmp_path, said=said)
+    her_old_setup(home, root)
+    elsewhere = tmp_path / "elsewhere"
+    shutil.move(home / parent, elsewhere)  # the same files, now behind a link
+    (home / parent).symlink_to(elsewhere)
+    read: list[Path] = []
+    real_number, real_account = ownuser.bot_number, ownuser.has_account
+
+    def number(config: Path) -> str | None:
+        read.append(config)
+        return real_number(config)
+
+    def account(signal_data: Path, wanted: str) -> bool:
+        read.append(signal_data)
+        return real_account(signal_data, wanted)
+
+    monkeypatch.setattr(ownuser, "bot_number", number)
+    monkeypatch.setattr(ownuser, "has_account", account)
+    assert move.run() == 1
+    assert read == [] and host.asked == []
+    text = "\n".join(said)
+    assert hostsec.LINK_OUT in text and "Nothing changed" in text
+
+
 @needs_plutil
 def test_a_link_inside_her_folders_is_copied(tmp_path: Path, no_user: None) -> None:
     move, _host, home, root = migration(tmp_path)
@@ -1631,8 +1688,12 @@ def test_a_failed_unhold_still_brings_her_services_back_and_prints_each_held_fol
 def test_hang_ups_terms_and_ctrl_c_are_ignored_while_her_old_setup_comes_back(
     tmp_path: Path, no_user: None, path: str
 ) -> None:
+    """The handlers she ignores come back as they were when the test started: a pytest run from a background job
+    starts with SIGINT already ignored (SEC5), so "as it was" is read, never assumed."""
     import signal
 
+    stops = (signal.SIGHUP, signal.SIGTERM, signal.SIGINT)
+    before = {number: signal.getsignal(number) for number in stops}
     said: list[str] = []
     move, _host, home, root = restoring(tmp_path, path, said)
     unhold = move._unhold
@@ -1646,12 +1707,17 @@ def test_hang_ups_terms_and_ctrl_c_are_ignored_while_her_old_setup_comes_back(
         finished.append(True)
 
     move._unhold = interrupted  # type: ignore[method-assign]
-    assert go(move, path) == (1 if path == "restore" else 0)
-    assert finished == [True]
-    for old in SECRET_FOLDERS:
-        assert (home / old).is_dir(), old
-    assert (root / "Library/LaunchDaemons/com.local-assistant.bridge.plist").read_bytes() == OLD_PLIST
-    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler  # as it was
+    try:
+        assert go(move, path) == (1 if path == "restore" else 0)
+        assert finished == [True]
+        for old in SECRET_FOLDERS:
+            assert (home / old).is_dir(), old
+        assert (root / "Library/LaunchDaemons/com.local-assistant.bridge.plist").read_bytes() == OLD_PLIST
+        assert {number: signal.getsignal(number) for number in stops} == before  # as they were
+    finally:
+        for number, handler in before.items():  # never left changed for the tests after this one
+            if handler is not None:
+                signal.signal(number, handler)
 
 
 STALE = (

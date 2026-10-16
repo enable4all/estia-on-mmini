@@ -20,7 +20,8 @@ life in the last `ALIVE_SECONDS` is ✓; no sign of life for longer, restarting,
 look (the logs). launchd's run count is never used: deploys, reboots and restarts raise it too.
 
 An optional part whose setup is in place shows what its last real use did, from the bridge's status.json
-(part_status): ✓ working, ○ set up but not tested yet, ✗ failing with the fix. Doctor never uses a part itself, so
+(part_status): ✓ working, ○ set up but not tested yet, ✗ failing with the fix, and ! working but with a warning
+(documents: text recognition failed) and its fix. Doctor never uses a part itself, so
 a failure whose fix was saved since (a sign-in, key, login, secret address or helper) is ○ again until the next use.
 One read goes out: with Hue lights, the device helper's `hue-check` asks the paired Hue Bridge, at its own address on
 the home network and with the certificate saved at pairing, which lights it has (nothing is switched; the key stays
@@ -43,6 +44,7 @@ import stat
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 from collections.abc import Collection
 from contextlib import closing
@@ -50,7 +52,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from local_assistant import hostsec, ownuser, prompts, share
+from local_assistant import hostsec, ollama_build, ownuser, prompts, share
 from local_assistant.config import (
     CODE_ROOT,
     DEFAULT_AVATAR,
@@ -98,8 +100,8 @@ from local_assistant.voice import detector_state
 
 Status = Literal["ok", "untested", "warn", "fail"]
 MARKS: dict[Status, str] = {"ok": "✓", "untested": "○", "warn": "!", "fail": "✗"}
-_STATES: dict[str, Status] = {"working": "ok", "untested": "untested", "failing": "fail"}
-TOOLS = ("signal-cli", "ollama", "uv")
+_STATES: dict[str, Status] = {"working": "ok", "untested": "untested", "failing": "fail", "warning": "warn"}
+TOOLS = ("signal-cli", "uv")  # Homebrew's; Ollama is its official build (its own lines: Ollama, Model)
 PLACEHOLDER_NUMBER = "+300000000000"  # config.example.toml's values
 PLACEHOLDER_ACI = "00000000-0000-0000-0000-000000000000"
 ALIVE_KEY = "last_alive"  # app.ALIVE_KEY: the bridge writes it after signal-cli subscribed, then every 60 s
@@ -172,6 +174,15 @@ class Probe:
         """This doctor runs as her (_estia)."""
         return os.geteuid() == (ownuser.lookup_uid(ownuser.ROLE_USER) or -1)
 
+    def owner_uid(self) -> int | None:
+        """Your account (its uid): as her, the one the move's record names (root's, every account reads it); else
+        the account doctor runs as. None when it cannot be told."""
+        if not self.her_user():
+            return os.getuid()
+        marker = ownuser.read_marker(hostsec.estia_root())
+        name = marker.get("owner") if marker is not None else None
+        return ownuser.lookup_uid(name) if isinstance(name, str) and name else None
+
     def projects(self, cfg: Config) -> Access:
         """What this user can read in the projects folder (as her: what her project tools can read)."""
         return asyncio.run(Projects(cfg).access())
@@ -241,6 +252,34 @@ class Probe:
         usual names, by name). Read-only: nothing changes."""
         return share.open_in_home(home, shared)
 
+    def ollama_listener(self, port: int) -> ollama_build.Listener:
+        """The program listening on Ollama's port and where it listens (netstat and proc_pidpath, read-only, fixed
+        argv); Listener("") when none is found: never under a test's root."""
+        return ollama_build.Tools(hostsec.estia_root(), say=lambda _line: None).listener(port)
+
+    def ollama_launchd(self) -> str | None:
+        """`launchctl print` of setup's Ollama service (read-only, fixed argv, no shell); None when it cannot be asked:
+        never under a test's root, never longer than a few seconds."""
+        if hostsec.estia_root() != Path("/"):
+            return None
+        try:
+            done = subprocess.run(
+                [LAUNCHCTL, "print", f"system/{ollama_build.LABEL}"],
+                capture_output=True,
+                text=True,
+                timeout=8,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return done.stdout + done.stderr
+
+    def ollama_jobs(self) -> list[ollama_build.Job]:
+        """The launchd jobs that run Ollama (read-only, no link followed): the LaunchDaemons, and on the live Mac the
+        LaunchAgents of the account doctor runs as."""
+        root = hostsec.estia_root()
+        return ollama_build.ollama_jobs(root, Path.home() / "Library/LaunchAgents" if root == Path("/") else None)
+
     def program_checks(self, cfg: Config) -> list[Check]:
         """What she runs: root's alone (her signal-cli, the call helper's Java and tunnel, the folders on her PATH)."""
         root = hostsec.estia_root()
@@ -281,7 +320,12 @@ def run(config_path: Path, probe: Probe) -> list[Finding]:
     models = _models(cfg, probe)  # Ollama's list, read once
     own = probe.moved()
     findings += [
-        _model(cfg, models),
+        _model(cfg, models, probe),
+        *[
+            line
+            for line in (_ollama_build(cfg, probe), _ollama_service(), _model_build(cfg, models))
+            if line is not None
+        ],
         _model_pin(cfg, models, config_path if own else None),
         _signal_number(cfg, probe),
         *([] if (signal_cli := _signal_cli(cfg, probe)) is None else [signal_cli]),
@@ -500,10 +544,32 @@ def _models(cfg: Config, probe: Probe) -> list[dict[str, Any]] | None:
     return [item for item in listed if isinstance(item, dict)] if isinstance(listed, list) else None
 
 
-def _model(cfg: Config, models: list[dict[str, Any]] | None) -> Finding:
+def _ours() -> bool:
+    """Setup's background service for Ollama is installed (its file in /Library/LaunchDaemons)."""
+    return (hostsec.estia_root() / ollama_build.DAEMON.relative_to("/")).exists()
+
+
+def _ollama_down_fix(probe: Probe) -> str:
+    """How to bring Ollama back: setup's service started again (bootstrap when launchd does not have it loaded), or
+    the service that runs Ollama here (Homebrew's or the app's: their removal), else setup."""
+    if _ours():
+        shown = probe.ollama_launchd()
+        if shown is not None and "Could not find service" in shown:
+            return prompts.DOCTOR_OLLAMA_NOT_LOADED_FIX.format(daemon=ollama_build.DAEMON)
+        return prompts.DOCTOR_OLLAMA_DOWN_FIX.format(label=ollama_build.LABEL)
+    live = hostsec.estia_root() == Path("/")
+    for job in probe.ollama_jobs():
+        real = os.path.realpath(job.program) if live else job.program
+        if ollama_build.job_kind(job, real) == "other":
+            return prompts.DOCTOR_OLLAMA_JOB_FIX.format(restart=ollama_build.restart_fix(job))
+        return ollama_build.job_problem(job, real)[1]
+    return prompts.DOCTOR_OLLAMA_SETUP_FIX
+
+
+def _model(cfg: Config, models: list[dict[str, Any]] | None, probe: Probe) -> Finding:
     base = _ollama(cfg)
     if models is None:
-        return Finding("fail", "Model", f"Ollama does not answer at {base}", "brew services start ollama")
+        return Finding("fail", "Model", f"Ollama does not answer at {base}", _ollama_down_fix(probe))
     wanted = cfg.model if ":" in cfg.model else f"{cfg.model}:latest"
     listed = next((item for item in models if item.get("name") == wanted), None)
     if listed is not None and is_remote(listed):  # the model runs only on this Mac
@@ -519,6 +585,91 @@ def _model(cfg: Config, models: list[dict[str, Any]] | None) -> Finding:
         f"Ollama runs but has no model called {cfg.model}",
         f"ollama pull {cfg.model}" if cfg.model != "local-worker" else f"run {prompts.SETUP_MODEL_FIX}",
     )
+
+
+def _ollama_build(cfg: Config, probe: Probe) -> Finding | None:
+    """The Ollama that answers (owner, 15 Oct: only its official build): Homebrew's, the app's, one without the MLX
+    engine's JSON-schema library, older than its first version with it, or listening for other machines too is ! with
+    the fix; one another account runs, or with another program or account on its port too, is ✗ (that account
+    controls her answers; as her too: ps names any user's process); another version than the pin is ! as untested
+    (setup's own service: updated in place by scripts/install-ollama.sh); the official one with its library ✓.
+    Read-only: its program and addresses from netstat and proc_pidpath, its account from ps, its folder's files; no
+    line when the program cannot be seen (as her, your folders may be closed to her account) and the version says
+    nothing."""
+    base = _ollama(cfg)
+    try:
+        answer = probe.get_json(f"{base}/api/version")
+        version: str | None = str(answer.get("version") or "") if isinstance(answer, dict) else None
+    except (OSError, ValueError, AttributeError):
+        version = None
+    heard = probe.ollama_listener(urllib.parse.urlsplit(base).port or ollama_build.PORT)
+    program = heard.program
+    pin = ollama_build.RELEASE.version
+    untested = (
+        Finding(
+            "warn",
+            "Ollama",
+            prompts.OLLAMA_UNTESTED.format(version=version, pin=pin),
+            prompts.DOCTOR_OLLAMA_UPDATE_FIX if _ours() else prompts.OLLAMA_UNTESTED_FIX.format(pin=pin),
+        )
+        if version and version != pin
+        else None
+    )
+    if not program:
+        parsed = ollama_build.parse_version(version) if version else None
+        if parsed is not None and parsed < ollama_build.MIN_VERSION:
+            text = prompts.DOCTOR_OLLAMA_OLD.format(version=version, needed=ollama_build.MIN_TEXT)
+            return Finding("warn", "Ollama", text, prompts.OLLAMA_OTHER_FIX)
+        return untested
+    found = ollama_build.Found(program, version or None, addresses=heard.addresses, uid=heard.uid, others=heard.others)
+    owner = probe.owner_uid()
+    wrong = ollama_build.problem(found, owner=owner)
+    if wrong is not None:  # another account's: it controls her answers, a ✗ as setup's stop
+        return Finding("fail" if ollama_build.someone_else_runs(found, owner) else "warn", "Ollama", *wrong)
+    if untested is not None:
+        return untested
+    _missing, unread = ollama_build.missing_libraries(program)
+    if unread or not version:
+        return None
+    return Finding("ok", "Ollama", prompts.DOCTOR_OLLAMA_OK.format(version=version, program=program))
+
+
+def _ollama_service() -> Finding | None:
+    """Setup's own service file for Ollama when it is not the one this version of setup writes (a later release
+    changed it, or a setting was changed by hand): ! with scripts/install-ollama.sh, which writes it again. Read-only;
+    no line without setup's service, or on a Mac too small for her."""
+    from local_assistant.setup import choose_model, memory_gb  # setup imports this module: its choice, read here
+
+    choice = choose_model(memory_gb())
+    if choice is None or not ollama_build.service_file_changed(hostsec.estia_root(), choice.num_ctx):
+        return None
+    return Finding(
+        "warn",
+        "Ollama service",
+        prompts.DOCTOR_OLLAMA_SERVICE_CHANGED.format(daemon=ollama_build.DAEMON),
+        prompts.DOCTOR_OLLAMA_SERVICE_FIX,
+    )
+
+
+def _model_build(cfg: Config, models: list[dict[str, Any]] | None) -> Finding | None:
+    """Her model when it is Gemma 4 but not one of the MLX builds setup installs (a bare tag, or an alias made from
+    a llama.cpp build): ! with the step to one. Nothing for an MLX build, another family, or a list not read."""
+    if models is None:
+        return None
+    wanted = cfg.model if ":" in cfg.model else f"{cfg.model}:latest"
+    entry = next((item for item in models if item.get("name") == wanted), None)
+    source = ollama_build.non_mlx_source(cfg.model, entry)
+    if source is None:
+        return None
+    from local_assistant.setup import GEMMA_12B, GEMMA_26B  # setup imports this module: its tags, read here
+
+    tags = {"big": GEMMA_26B, "small": GEMMA_12B}
+    text = (
+        prompts.DOCTOR_MODEL_TAG.format(model=cfg.model, **tags)
+        if source == cfg.model
+        else prompts.DOCTOR_MODEL_BUILD.format(model=cfg.model, source=source, **tags)
+    )
+    return Finding("warn", "Model build", text, prompts.model_build_fix(cfg.model, **tags))
 
 
 def _signal_number(cfg: Config, probe: Probe) -> Finding:
