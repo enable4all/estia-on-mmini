@@ -1,5 +1,6 @@
 # A proposal for a feature, opened as an issue by GitHub Actions, so it names the project rather than a person's
-# account (as releases do: release.yml). Started by hand: Actions, "Run workflow", with a title and the text. Only
+# account (as releases do: release.yml). Started by hand: Actions, "Run workflow", with a title and the text; with an
+# issue number, that issue's title and text are replaced instead (a proposal updated, still by GitHub Actions). Only
 # GitHub's own `gh` runs here; the inputs go in as data (environment variables), never into the script itself.
 name: proposal
 on:
@@ -11,15 +12,28 @@ on:
       body:
         description: The issue's text (Markdown)
         required: true
+      issue:
+        description: To update a proposal, its issue number (empty opens a new one)
+        required: false
+        default: ""
 permissions:
   issues: write
 jobs:
   open:
     runs-on: ubuntu-24.04
     steps:
-      - name: Open the issue
+      - name: Open or update the issue
         env:
           GH_TOKEN: ${{ github.token }}
           TITLE: ${{ inputs.title }}
           BODY: ${{ inputs.body }}
-        run: printf '%s\n' "$BODY" | gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file -
+          ISSUE: ${{ inputs.issue }}
+        run: |
+          if [ -z "$ISSUE" ]; then
+            printf '%s\n' "$BODY" | gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file -
+          elif printf '%s' "$ISSUE" | grep -Eq '^[1-9][0-9]{0,6}$'; then
+            printf '%s\n' "$BODY" | gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file -
+          else
+            echo "issue: a number, or empty" >&2
+            exit 1
+          fi
