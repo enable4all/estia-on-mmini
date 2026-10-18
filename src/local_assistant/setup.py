@@ -21,7 +21,7 @@ import sys
 import termios
 import time
 import tomllib
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -108,8 +108,90 @@ def memory_gb() -> float:
 
 
 def modelfile(choice: ModelChoice) -> str:
-    """The alias local-worker: the chosen model with a context window large enough for a long chat."""
-    return f"FROM {choice.tag}\nPARAMETER num_ctx {choice.num_ctx}\n"
+    """The alias local-worker: the chosen model with a context window large enough for a long chat, and for Gemma 4
+    of 12B or more Google's prompt for that size (ollama_build.LARGE_PROMPT): Ollama tells the sizes apart by the
+    model's name, which local-worker does not have (empty answers, 17 Oct)."""
+    return alias_modelfile(choice.tag, choice.num_ctx)
+
+
+def alias_modelfile(tag: str, num_ctx: int | None) -> str:
+    """local-worker's Modelfile: FROM the tag, its context window (None: no line, Ollama's own applies), and the
+    large prompt for a Gemma 4 tag of 12B or more."""
+    lines = [f"FROM {tag}", *([f"PARAMETER num_ctx {num_ctx}"] if num_ctx is not None else [])]
+    if ollama_build.large_gemma4(tag):
+        lines.append(f"RENDERER {ollama_build.LARGE_PROMPT}")
+    return "\n".join(lines) + "\n"
+
+
+def context_of(parameters: str) -> int | None:
+    """The num_ctx in /api/show's parameters text ("num_ctx    32768" lines); None when it sets none."""
+    for line in parameters.splitlines():
+        key, _, value = line.strip().partition(" ")
+        if key == "num_ctx" and value.strip().isdigit():
+            return int(value.strip())
+    return None
+
+
+# What an alias may add to its model's size in Ollama's list: its parameters and settings, a few hundred bytes (setup's
+# num_ctx line: 16). Weights, an adapter or a draft model add megabytes.
+ALIAS_EXTRA_BYTES = 64 * 1024
+
+
+def _settings(parameters: str) -> list[str]:
+    """/api/show's parameters text as sorted lines, spaces evened out and num_ctx left out: what an alias holds besides
+    its context."""
+    lines = (" ".join(line.split()) for line in parameters.splitlines())
+    return sorted(line for line in lines if line and line.split(" ", 1)[0] != "num_ctx")
+
+
+def _held(shown: Mapping[str, object]) -> tuple[object, ...]:
+    """What a model holds, from its /api/show answer: its weights (architecture and parameter count from model_info,
+    format and quantization from details; Ollama reads them from the weights' own files), its template, system prompt
+    and messages, and its parameters but num_ctx."""
+    info = shown.get("model_info")
+    details = shown.get("details")
+    info = info if isinstance(info, Mapping) else {}
+    details = details if isinstance(details, Mapping) else {}
+    return (
+        info.get("general.architecture"),
+        info.get("general.parameter_count"),
+        details.get("format"),
+        details.get("quantization_level"),
+        str(shown.get("template") or ""),
+        str(shown.get("system") or ""),
+        repr(shown.get("messages") or []),
+        _settings(str(shown.get("parameters") or "")),
+    )
+
+
+def made_from(
+    alias: Mapping[str, object],
+    alias_shown: Mapping[str, object],
+    tag: Mapping[str, object],
+    tag_shown: Mapping[str, object],
+) -> bool:
+    """Whether an alias is the tag with at most a context of its own, as setup made local-worker before 0.9.3 (FROM the
+    tag, PARAMETER num_ctx): its digest is its own, and Ollama names no parent for an MLX build (its manifest has no
+    model layer, so parent_model is ""), so it is traced by what it holds (`_held`, from each /api/show answer) and by
+    its size in Ollama's list (`alias`, `tag`: their /api/tags entries), within ALIAS_EXTRA_BYTES of the tag's. False
+    when any of it cannot be read: weights or settings a remake from the tag would drop are never guessed at."""
+    alias_bytes, tag_bytes = _whole(alias.get("size")), _whole(tag.get("size"))
+    if alias_bytes is None or tag_bytes is None or abs(alias_bytes - tag_bytes) > ALIAS_EXTRA_BYTES:
+        return False
+    held = _held(alias_shown)
+    architecture, count = held[0], _whole(held[1])
+    return isinstance(architecture, str) and bool(architecture) and bool(count) and held == _held(tag_shown)
+
+
+def _whole(value: object) -> int | None:
+    """A whole number from Ollama's JSON (never a bool); None for anything else."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _digest_of(entry: object) -> str:
+    """A model's digest in its /api/tags entry, lowercase and without "sha256:" ("" when none)."""
+    digest = entry.get("digest") if isinstance(entry, Mapping) else None
+    return str(digest or "").lower().removeprefix("sha256:")
 
 
 @dataclass(frozen=True)
@@ -528,19 +610,25 @@ class Wizard:
             self.ollama_refused = True
 
     # 1. the model
-    def installed_models(self) -> set[str]:
-        """Ollama's model names, read-only (the doctor's GET), so a dry run sees what a real run sees; empty when
+    def listed_models(self) -> list[dict[str, object]]:
+        """Ollama's model list, read-only (the doctor's GET), so a dry run sees what a real run sees; empty when
         Ollama does not answer."""
         try:
             listed = doctor.Probe().get_json(f"{OLLAMA}/api/tags").get("models", [])
-            return {str(item.get("name", "")) for item in listed if isinstance(item, dict)}
         except (OSError, ValueError, AttributeError, TypeError):
-            return set()
+            return []
+        return [item for item in listed if isinstance(item, dict)] if isinstance(listed, list) else []
 
     def model(self) -> None:
         memory = memory_gb()
-        if self.installed_models() & {"local-worker", "local-worker:latest"}:
-            self.say("✓ Model: local-worker is there.")
+        listed = self.listed_models()
+        alias = next((item for item in listed if item.get("name") in ("local-worker", "local-worker:latest")), None)
+        if alias is not None:
+            shown = self.shown("local-worker")
+            if shown is None or not ollama_build.gets_small_prompt("local-worker", shown, alias):
+                self.say("✓ Model: local-worker is there.")
+                return
+            self.remake(alias, shown, listed)
             return
         if self.ollama_refused:  # never a download through an Ollama setup refused
             self.say(prompts.SETUP_MODEL_AFTER_OLLAMA)
@@ -580,6 +668,77 @@ class Wizard:
             raise SystemExit(prompts.SETUP_MODEL_NOT_MADE)
         done = "(dry run) would set" if self.dry_run else "✓ Model:"
         self.say(f"{done} local-worker = {choice.tag}, context {choice.num_ctx} tokens.")
+
+    def shown(self, name: str) -> dict[str, object] | None:
+        """Ollama's /api/show answer for a model (read-only: its Modelfile, parameters and size); None when Ollama
+        does not answer."""
+        try:
+            answer = doctor.Probe().post_json(f"{OLLAMA}/api/show", {"model": name})
+        except (OSError, ValueError):
+            return None
+        return answer if isinstance(answer, dict) else None
+
+    def alias_base(
+        self, alias: dict[str, object], shown: dict[str, object], listed: list[dict[str, object]]
+    ) -> ModelChoice | None:
+        """Which of setup's models local-worker is made from, only while that model is listed with its tested digest:
+        the one whose digest it has (a copy, `ollama cp`), else the one it holds with at most a context of its own
+        (`made_from`: what setup made before 0.9.3; that model's /api/show read, read-only). `shown`: the alias's own
+        /api/show answer. None when it cannot be told."""
+        choices = [choice for choice in (choose_model(32), choose_model(16)) if choice is not None]
+        entries = {str(item.get("name")): item for item in listed}
+        tested = [choice for choice in choices if _digest_of(entries.get(choice.tag)) == choice.digest]
+        own = _digest_of(alias)
+        copy = next((choice for choice in tested if own == choice.digest), None)
+        if copy is not None:
+            return copy
+        for choice in tested:
+            tag_shown = self.shown(choice.tag)
+            if tag_shown is not None and made_from(alias, shown, entries[choice.tag], tag_shown):
+                return choice
+        return None
+
+    def remake(self, alias: dict[str, object], shown: dict[str, object], listed: list[dict[str, object]]) -> None:
+        """A re-run's alias with the small models' prompt (made before 0.9.3; empty answers, 17 Oct): said, and on a
+        yes made again from the same model with its own context, so only the prompt changes. Its digest changes:
+        the new one is printed with the pin's line. Never through an Ollama setup refused, never from a model setup
+        cannot tell (the way by hand instead); a failed create leaves the old alias, and setup goes on."""
+        self.say(prompts.SETUP_MODEL_SMALL_PROMPT)
+        if self.ollama_refused:
+            self.say(prompts.SETUP_MODEL_REMAKE_AFTER_OLLAMA)
+            return
+        base = self.alias_base(alias, shown, listed)
+        if base is None:
+            self.say(prompts.SETUP_MODEL_PROMPT_BY_HAND)
+            return
+        stop = prompts.SETUP_MODEL_STOP_HERS if self.own_user() else prompts.SETUP_MODEL_STOP_YOURS
+        self.say(prompts.SETUP_MODEL_REMAKE.format(tag=base.tag, stop=stop))
+        if self.dry_run:
+            self.say(prompts.SETUP_MODEL_REMAKE_DRY_RUN.format(ask=prompts.SETUP_MODEL_REMAKE_ASK))
+        elif not self.yes(prompts.SETUP_MODEL_REMAKE_ASK):
+            self.say(prompts.SETUP_MODEL_REMAKE_LATER)
+            return
+        spec = REPO / ".local-worker.Modelfile"
+        if not self.dry_run:
+            spec.write_text(alias_modelfile(base.tag, context_of(str(shown.get("parameters") or ""))), encoding="utf-8")
+        try:
+            made = self.run([self.ollama_program, "create", "local-worker", "-f", str(spec)]).returncode == 0
+        finally:
+            if not self.dry_run:
+                spec.unlink(missing_ok=True)
+        if self.dry_run:
+            return
+        if not made:
+            self.say(prompts.SETUP_MODEL_REMAKE_FAILED)
+            return
+        self.say(prompts.SETUP_MODEL_REMADE)
+        digest = self.model_digest()
+        if not digest:
+            self.say(prompts.SETUP_MODEL_REMADE_UNLISTED)
+            return
+        hers = self.own_user()
+        where = prompts.SETUP_MODEL_PIN_HERS if hers else prompts.SETUP_MODEL_PIN_YOURS.format(path=self.config_path)
+        self.say(prompts.SETUP_MODEL_REMADE_PIN.format(digest=digest, where=where))
 
     # 2. the Signal number
     def registered_numbers(self) -> list[str]:

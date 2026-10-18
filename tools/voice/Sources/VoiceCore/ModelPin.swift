@@ -27,6 +27,18 @@ public struct HubPin: Equatable, Sendable {
     /// What a download asks for: the whole folder, or the pinned files at the top.
     public var globs: [String] { folder.isEmpty ? sha256.keys.sorted() : ["\(folder)/*"] }
 
+    /// Where Hugging Face serves one pinned file (`path` inside `folder`) at the pinned commit, never a branch:
+    /// `https://huggingface.co/<repo>/resolve/<revision>/<folder>/<path>`. Every segment is percent-encoded (only
+    /// letters, digits and `-._~` stay), so a name can never add a query, a fragment or a folder.
+    public func fileURL(_ path: String) -> URL {
+        let unreserved = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        let parts: [Substring] = repo.split(separator: "/") + ["resolve", Substring(revision)] + folder.split(separator: "/")
+            + path.split(separator: "/")
+        let encoded = parts.map { $0.addingPercentEncoding(withAllowedCharacters: unreserved) ?? "" }
+        // only ASCII letters, digits, `-._~`, `%` and `/` are left: always a valid address
+        return URL(string: "https://huggingface.co/" + encoded.joined(separator: "/"))!
+    }
+
     /// The folder against the pins. At a repository's top, a download keeps its records (`.cache`) beside the files:
     /// never loaded, so left out.
     public func check(in base: URL) -> ModelFiles {

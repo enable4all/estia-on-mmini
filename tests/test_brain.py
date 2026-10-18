@@ -120,6 +120,211 @@ async def test_two_empty_answers_give_the_confused_note(store: Store) -> None:
     assert (await brain.answer(store.current_conversation(), incoming(store, "hi"))).text == prompts.CONFUSED
 
 
+def warnings_of(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.name == "local_assistant.brain" and r.levelname == "WARNING"]
+
+
+async def test_the_retrys_result_is_checked_and_a_second_empty_is_one_warning(
+    store: Store, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Research, 17 Oct: the retry was returned unchecked, so an empty retry became the confused line without a log
+    line, and "the retry worked every time" could not be told. A second empty is one warning of its own."""
+    caplog.set_level("INFO", logger="local_assistant.brain")
+    _, _, brain = make(store, FakeGemma(text(""), text("")))
+    reply = await brain.answer(store.current_conversation(), incoming(store, "hi"))
+    assert reply.text == prompts.CONFUSED
+    first, second = warnings_of(caplog)
+    assert "empty answer from Gemma; retrying once" in first
+    assert "the retry came back empty too; no words of hers in this answer" in second
+
+
+async def test_a_retry_that_answers_is_logged_as_answered_and_warns_no_more(
+    store: Store, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("INFO", logger="local_assistant.brain")
+    _, _, brain = make(store, FakeGemma(text(""), text("Hello!")))
+    assert (await brain.answer(store.current_conversation(), incoming(store, "hi"))).text == "Hello!"
+    assert len(warnings_of(caplog)) == 1
+    assert any("the retry after an empty answer answered" in r.getMessage() for r in caplog.records)
+
+
+async def test_a_retry_with_a_tool_call_is_an_answer(store: Store, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("INFO", logger="local_assistant.brain")
+    _, _, brain = make(store, FakeGemma(text(""), tool("remember", fact="The user plays piano."), text("Noted.")))
+    await brain.answer(store.current_conversation(), incoming(store, "remember that I play piano"))
+    assert len(warnings_of(caplog)) == 1
+
+
+def on_call(store: Store, text_: str) -> Message:
+    conversation = store.current_conversation()
+    return store.message(store.add_call_turn(conversation.id, ME, f"[call] {text_}"))
+
+
+async def test_on_a_call_the_caller_is_told_of_the_retry_before_it_is_sent(store: Store) -> None:
+    """Research, 17 Oct: an empty first try cost a caller 10 s of silence, then 2 to 10 s more for the retry. The call
+    is told once, before the retry goes out (it says an acknowledgement meanwhile)."""
+    gemma = FakeGemma(text(""), tool("remember", fact="The user plays piano."), text(""), text("Noted: piano."))
+    _, _, brain = make(store, gemma)
+    told: list[int] = []
+    reply = await brain.answer(
+        store.current_conversation(),
+        on_call(store, "remember that I play piano"),
+        max_tokens=300,
+        on_retry=lambda: told.append(len(gemma.calls)),
+    )
+    assert reply.text == "Noted: piano."
+    assert told == [1]  # after the first try, before the retry; once per answer, also when a later try is empty
+
+
+async def test_no_retry_no_word_to_the_call(store: Store) -> None:
+    told: list[int] = []
+    _, _, brain = make(store, FakeGemma(text("Hello!")))
+    await brain.answer(
+        store.current_conversation(), on_call(store, "hi"), max_tokens=300, on_retry=lambda: told.append(1)
+    )
+    assert told == []
+
+
+async def test_a_practice_calls_broken_first_try_tells_the_call_too(store: Store) -> None:
+    gemma = FakeGemma(text(""), text("Leuk! Waar werk je?"))
+    _, _, brain = make(store, gemma)
+    told: list[int] = []
+    reply = await brain.answer(
+        store.current_conversation(),
+        on_call(store, "Ik woon in Utrecht."),
+        max_tokens=300,
+        practice=practice_turn(spoken=True),
+        on_retry=lambda: told.append(len(gemma.calls)),
+    )
+    assert reply.text == "Leuk! Waar werk je?" and told == [1]
+
+
+class Ticks:
+    """A clock that moves 1.5 s at each read: each model call takes 1500 ms."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        self.now += 1.5
+        return self.now
+
+
+def logged(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.name == "local_assistant.brain"]
+
+
+def measured(store: Store, gemma: FakeGemma, *, max_tool_calls: int = 5, language: str = "nl") -> Brain:
+    profile = Profile(store)
+    tools = Tools(store, profile, TZ, no_fetch)
+    context = ContextBuilder(store, profile, TZ)
+    return Brain(gemma, context, tools, max_tool_calls=max_tool_calls, language=lambda: language, clock=Ticks())
+
+
+async def test_the_empty_answer_and_its_retry_are_logged_with_metadata_never_words(
+    store: Store, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Research, 17 Oct, section 4: what an empty answer was, in numbers, one line for each try."""
+    caplog.set_level("INFO", logger="local_assistant.brain")
+    empty = Completion("", prompt_tokens=16855, finish_reason="length", completion_tokens=300)
+    brain = measured(store, FakeGemma(empty, text("Hello, my secret friend!")))
+    message = incoming(store, "my secret plan for tomorrow")
+    await brain.answer(store.current_conversation(), message)
+    first, retry = [line for line in logged(caplog) if "empty answer" in line]
+    assert first == (
+        f"message {message.id}: empty answer from Gemma; retrying once (path text, attempt 1, finish length, "
+        f"completion_tokens 300, prompt_tokens 16855, max_tokens 600, tools offered {len(TOOL_SCHEMAS)}, tool calls 0, "
+        "content 0 chars (0 stripped), reasoning 0 chars, 1500 ms, after a tool result no, language nl)"
+    )
+    assert retry.startswith(f"message {message.id}: the retry after an empty answer answered (path text, attempt 2,")
+    assert "finish stop" in retry and "content 24 chars (24 stripped)" in retry
+    assert not any("secret" in line or "Hello" in line for line in logged(caplog))
+
+
+async def test_a_call_logs_its_path_and_cap(store: Store, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("INFO", logger="local_assistant.brain")
+    brain = measured(store, FakeGemma(text(""), text("")), language="en")
+    await brain.answer(store.current_conversation(), on_call(store, "what's on tomorrow"), max_tokens=300)
+    first, second = warnings_of(caplog)
+    assert "(path call, attempt 1," in first and "max_tokens 300" in first and "language en" in first
+    assert "the retry came back empty too" in second and "(path call, attempt 2," in second
+
+
+async def test_after_a_tool_result_and_with_whitespace_and_reasoning(
+    store: Store, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("INFO", logger="local_assistant.brain")
+    blank = Completion(" \n\t ", prompt_tokens=100, finish_reason="stop", completion_tokens=4, reasoning_chars=120)
+    brain = measured(store, FakeGemma(tool("search_history", query="dentist"), blank, text("Nothing found.")))
+    await brain.answer(store.current_conversation(), incoming(store, "did I see the dentist?"))
+    [first] = warnings_of(caplog)
+    assert "after a tool result yes" in first and "content 4 chars (0 stripped)" in first
+    [retry] = [line for line in logged(caplog) if "the retry after an empty answer answered" in line]
+    assert "after a tool result yes" in retry  # the same request, the nudge after it
+    assert "reasoning 120 chars" in first and "completion_tokens 4" in first
+
+
+async def test_a_tool_call_that_may_not_run_shows_as_a_call_with_no_tools_offered(
+    store: Store, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("INFO", logger="local_assistant.brain")
+    ignored = Completion("", tool_calls=(ToolCall("c1", "remember", "{}"),), finish_reason="tool_calls")
+    brain = measured(store, FakeGemma(ignored, text("Hello!")), max_tool_calls=0)
+    await brain.answer(store.current_conversation(), incoming(store, "hi"))
+    [first] = warnings_of(caplog)
+    assert "tools offered 0, tool calls 1" in first
+
+
+async def test_a_document_answer_logs_the_document_path(store: Store, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("INFO", logger="local_assistant.brain")
+    brain = measured(store, FakeGemma(text(""), text("A contract.")))
+    await brain.answer(
+        store.current_conversation(), incoming(store, f"{prompts.DOCUMENT_MARK} Estia-KB/x.pdf\nwhat is it?")
+    )
+    [first] = warnings_of(caplog)
+    assert "(path document, attempt 1," in first
+
+
+async def test_a_broken_practice_reply_logs_the_practice_path_and_its_language(
+    store: Store, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("INFO", logger="local_assistant.brain")
+    brain = measured(store, FakeGemma(text(""), text("Leuk! Waar werk je?")), language="en")
+    turn = PracticeTurn(
+        prompts.rules(name="Estia", practice=("nl", "A2")), prompts.PRACTICE_FALLBACK["nl"], False, "nl"
+    )
+    await brain.answer(store.current_conversation(), incoming(store, "Ik woon in Utrecht."), practice=turn)
+    first, retry = [line for line in logged(caplog) if "practice" in line]
+    assert "a broken practice reply; asking once more (path practice, attempt 1," in first
+    assert "tools offered 0" in first and "language nl" in first
+    assert "the practice retry answered (path practice, attempt 2," in retry
+
+
+async def test_an_answer_the_filters_leave_empty_is_logged_with_the_filter_and_the_lengths(
+    store: Store, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Research, 17 Oct: an answer whose words the filters all leave out became the confused line without a word in
+    the log; the 24 empty answers were counted before any filter, so these were not among them."""
+    caplog.set_level("INFO", logger="local_assistant.brain")
+    brain = measured(store, FakeGemma(text("thought\n<channel|>")))
+    message = incoming(store, "hi")
+    reply = await brain.answer(store.current_conversation(), message)
+    assert reply.text == prompts.CONFUSED
+    [line] = warnings_of(caplog)
+    assert line == (
+        f"message {message.id}: the filters left nothing (without_thinking emptied it; chars raw 18, "
+        "without_thinking 0, without_fake_notices 0, without_written_end_call 0)"
+    )
+
+
+async def test_a_written_end_call_alone_is_named_as_the_filter(store: Store, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("INFO", logger="local_assistant.brain")
+    brain = measured(store, FakeGemma(text("end_call")))
+    await brain.answer(store.current_conversation(), incoming(store, "hi"))
+    [line] = warnings_of(caplog)
+    assert "(without_written_end_call emptied it; chars raw 8, without_thinking 8," in line
+
+
 async def test_forget_refreshes_the_snapshot(store: Store) -> None:
     gemma = FakeGemma(tool("forget", fact="1"), text("Done, I forgot it."))
     profile, context, brain = make(store, gemma)
@@ -1602,3 +1807,71 @@ async def test_it_after_a_message_naming_a_device_gets_the_line(
     brain = with_all_tools(store, gemma, tmp_path, monkeypatch)
     reply = await brain.answer(store.current_conversation(), incoming(store, "Turn off the living room lamp please"))
     assert reply.device == "Nothing was switched."
+
+
+# a call's warm-up (owner, 17 Oct): the first call turn's request before the caller's words, so Ollama loads the model
+# and keeps the prompt's prefix for that turn
+
+
+def history(store: Store) -> None:
+    """A text and her answer with a tool call: the window a call's first turn comes after."""
+    conversation = store.current_conversation()
+    asked = store.add_incoming(conversation.id, ME, T0, "text", "remember that I like tea")
+    assert asked is not None
+    store.log_tool_call(asked, "remember", '{"fact": "The user likes tea."}', "Saved as fact #1.", True, 5)
+    store.mark_sent(store.add_outgoing(conversation.id, ME, "text", "Noted: you like tea.", asked), T0 + 1_000)
+
+
+def same_options(first: dict[str, object], second: dict[str, object]) -> bool:
+    """The two requests ask Gemma the same way apart from their input and length."""
+    return {k: v for k, v in first.items() if k not in ("messages", "max_tokens")} == {
+        k: v for k, v in second.items() if k not in ("messages", "max_tokens")
+    }
+
+
+async def test_a_call_warm_up_is_the_first_turns_request_without_the_callers_words(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_assistant.brain import WARM_UP_TOKENS
+
+    gemma = FakeGemma(Completion("", prompt_tokens=16_855), text("Two things today."))
+    brain = with_all_tools(store, gemma, tmp_path, monkeypatch)
+    history(store)
+    glance = prompts.call_glance(["Mail digest: 1 to answer."], at="09:40", calendar=False, mail=True)
+    conversation = store.current_conversation()
+    warmed = await brain.warm_up(conversation, glance=glance)
+    assert warmed.prompt_tokens == 16_855
+    said = store.add_call_turn(conversation.id, ME, "[call] what's on today?")
+    await brain.answer(conversation, store.message(said), max_tokens=300, glance=glance)
+    warm, first = gemma.calls
+    assert warm["messages"] == first["messages"][:-1]  # the same builder, the same order: a prefix
+    assert first["messages"][-1]["role"] == "user" and first["messages"][-1]["content"].endswith("what's on today?")
+    assert warm["messages"][0]["content"].endswith(glance)  # the call's rules, its style and its glance
+    assert warm["tools"] == first["tools"] and warm["tools"]  # every tool, as the first try offers them
+    assert same_options(warm, first)
+    assert warm["max_tokens"] == WARM_UP_TOKENS == 1 and first["max_tokens"] == 300  # only the prompt is read
+
+
+async def test_a_practice_call_warm_up_is_the_practice_request_without_the_callers_words(store: Store) -> None:
+    gemma = FakeGemma(Completion(""), text("Waar werk je?"))
+    _, _, brain = make(store, gemma)
+    history(store)
+    conversation = store.current_conversation()
+    turn = practice_turn(spoken=True)
+    await brain.warm_up(conversation, practice=turn)
+    said = store.add_call_turn(conversation.id, ME, "[call] Ik woon in Utrecht.")
+    await brain.answer(conversation, store.message(said), max_tokens=300, practice=turn)
+    warm, first = gemma.calls
+    assert warm["messages"] == first["messages"][:-1]
+    assert warm["messages"][0]["content"].startswith(turn.rules)  # the practice rules, no tools
+    assert warm["tools"] is None and first["tools"] is None
+    assert same_options(warm, first) and warm["max_tokens"] == 1
+
+
+async def test_a_warm_up_on_an_empty_conversation_is_her_system_prompt_alone(store: Store) -> None:
+    gemma = FakeGemma(Completion(""))
+    _, context, brain = make(store, gemma)
+    conversation = store.current_conversation()
+    await brain.warm_up(conversation)
+    [warm] = gemma.calls
+    assert warm["messages"] == [{"role": "system", "content": context.system_prompt(conversation, call=True)}]

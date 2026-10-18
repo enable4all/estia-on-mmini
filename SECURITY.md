@@ -95,10 +95,16 @@ The full threat model is in [setup_assistant.md, section 8](setup_assistant.md#8
 - The Mac's health alerts and their "back to normal" wait until quiet hours end: those of the messages she starts,
   22:00 to 08:00 by default, and still 22:00 to 08:00 with `quiet_hours = ""`. Security notes (a new linked device on
   her account, the model paused or a cloud model) are never held.
-- Whisper (speech to text) and the speech detector on calls load only files of one fixed version (one commit on
-  Hugging Face), each checked against its fingerprint (sha256) at every start: a model with a changed or extra file
-  is never loaded. Whisper's folder is then set aside (`<folder>.refused-<time>`, only the latest kept) and downloaded
-  again at that version; changed again, listening stays off. Once downloaded, Whisper starts with no network.
+- Whisper (speech to text), the speech detector and the turn detector (Smart Turn) on calls load only files of one fixed
+  version (one commit on Hugging Face), each checked against its fingerprint (sha256) at every start: a model with a
+  changed or extra file is never loaded. Whisper's folder is then set aside (`<folder>.refused-<time>`, only the latest
+  kept) and downloaded again at that version; changed again, listening stays off. The turn detector's folder is set
+  aside and downloaded again the same way; changed again, every turn on a call waits the full pause. Once downloaded,
+  Whisper starts with no network. Smart Turn's files are a community conversion of Daily's model
+  (`aufklarer/Smart-Turn-v3.2-CoreML`), not Daily's own: compared once with Daily's file (the same verdict, finished or
+  not, on 7,192 of 7,200 test windows), and the model holds only CoreML's built-in operations, no code of its own. If
+  that version is removed from Hugging Face, a new install cannot download it: the turn detector stays unavailable and
+  every turn waits the full pause.
 - Ollama is only its official build: setup downloads one fixed version (0.40.4) from GitHub and checks its fingerprint
   (sha256), every program's signature (Apple's Developer ID certificate for Ollama's team, 3MU9H2V9Y9, not only the
   team's name, which anyone can put in a signature) and Apple's notarization before anything is installed; one failed

@@ -1,6 +1,7 @@
 import dataclasses
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -851,6 +852,78 @@ def test_another_interrupt_value_is_a_config_error_in_the_new_words(key: str, wr
     base: dict[str, object] = {"bot_number": "+306900000000", "allowed_acis": [ACI], "voice": {}}
     with pytest.raises(ConfigError, match=r'calls\.interrupt must be "only speech" or "any sound"'):
         parse_config(base | {"calls": {key: wrong}})
+
+
+# owner, 17 Oct: a turn that sounds finished ends after a short pause (early_end, early_end_pause_seconds), and noise
+# in a pause no longer keeps a turn open (pause = "no speech"); both on by default, no shadow. pause names what keeps a
+# turn open in plain words, like interrupt: "no speech" or "quiet" (any sound), read as call_audio's "speech" and
+# "loudness"
+@pytest.mark.parametrize(
+    ("calls", "early", "seconds", "pause"),
+    [
+        ({}, True, 0.6, "speech"),
+        ({"early_end": False}, False, 0.6, "speech"),
+        ({"early_end_pause_seconds": 0.3}, True, 0.3, "speech"),
+        ({"early_end_pause_seconds": 1.5}, True, 1.5, "speech"),
+        ({"early_end_pause_seconds": 1}, True, 1.0, "speech"),
+        ({"pause": "no speech"}, True, 0.6, "speech"),
+        ({"pause": "quiet"}, True, 0.6, "loudness"),
+        ({"early_end": False, "pause": "quiet"}, False, 0.6, "loudness"),  # today's end of turn
+    ],
+)
+def test_early_end_keys_defaults_ranges_and_errors(
+    calls: dict[str, object], early: bool, seconds: float, pause: str
+) -> None:
+    base: dict[str, object] = {"bot_number": "+306900000000", "allowed_acis": [ACI], "voice": {}}
+    cfg = parse_config(base | {"calls": calls})
+    assert (cfg.calls_early_end, cfg.calls_early_end_pause_seconds, cfg.calls_pause) == (early, seconds, pause)
+    assert isinstance(cfg.calls_early_end_pause_seconds, float)
+
+
+def test_without_calls_the_early_end_settings_are_the_defaults() -> None:
+    cfg = parse_config({"bot_number": "+306900000000", "allowed_acis": [ACI], "voice": {}})
+    assert (cfg.calls_early_end, cfg.calls_early_end_pause_seconds, cfg.calls_pause) == (True, 0.6, "speech")
+
+
+@pytest.mark.parametrize(
+    ("calls", "error"),
+    [
+        ({"early_end": "on"}, "calls.early_end must be true or false"),
+        ({"early_end": 1}, "calls.early_end must be true or false"),
+        ({"early_end_pause_seconds": 0.2}, "calls.early_end_pause_seconds must be from 0.3 to 1.5"),
+        ({"early_end_pause_seconds": 1.6}, "calls.early_end_pause_seconds must be from 0.3 to 1.5"),
+        ({"early_end_pause_seconds": True}, "calls.early_end_pause_seconds must be from 0.3 to 1.5"),
+        ({"early_end_pause_seconds": "0.6"}, "calls.early_end_pause_seconds must be from 0.3 to 1.5"),
+        ({"pause": "speech"}, 'calls.pause must be "no speech" or "quiet"'),  # inside names are not read
+        ({"pause": "loudness"}, 'calls.pause must be "no speech" or "quiet"'),
+        ({"pause": "any sound"}, 'calls.pause must be "no speech" or "quiet"'),
+        ({"pause": ""}, 'calls.pause must be "no speech" or "quiet"'),
+        ({"pause": True}, 'calls.pause must be "no speech" or "quiet"'),
+    ],
+)
+def test_a_wrong_early_end_setting_is_a_config_error(calls: dict[str, object], error: str) -> None:
+    base: dict[str, object] = {"bot_number": "+306900000000", "allowed_acis": [ACI], "voice": {}}
+    with pytest.raises(ConfigError, match=re.escape(error)):
+        parse_config(base | {"calls": calls})
+
+
+def test_hand_set_pause_at_or_over_the_full_pause_is_an_error() -> None:
+    """A short pause at or past the full pause would never be reached: an error only when both are the user's. The
+    default short pause under a full pause set as low as 0.5 s just never asks (the full pause comes first)."""
+    base: dict[str, object] = {"bot_number": "+306900000000", "allowed_acis": [ACI], "voice": {}}
+    error = "calls.early_end_pause_seconds must be below calls.end_of_turn_seconds"
+    for calls in (
+        {"early_end_pause_seconds": 1.0, "end_of_turn_seconds": 1.0},
+        {"early_end_pause_seconds": 1.2, "end_of_turn_seconds": 1.0},
+        {"early_end_pause_seconds": 1.5, "end_of_turn_seconds": 0.9},
+    ):
+        with pytest.raises(ConfigError, match=re.escape(error)):
+            parse_config(base | {"calls": calls})
+    fine = parse_config(base | {"calls": {"early_end_pause_seconds": 0.9, "end_of_turn_seconds": 1.0}})
+    assert (fine.calls_early_end_pause_seconds, fine.calls_end_of_turn_seconds) == (0.9, 1.0)
+    low = parse_config(base | {"calls": {"end_of_turn_seconds": 0.5}})  # not set by hand: never an error
+    assert (low.calls_early_end_pause_seconds, low.calls_end_of_turn_seconds) == (0.6, 0.5)
+    assert parse_config(base | {"calls": {"early_end_pause_seconds": 1.5}}).calls_early_end_pause_seconds == 1.5
 
 
 BASE: dict[str, object] = {"bot_number": "+306900000000", "allowed_acis": [ACI]}

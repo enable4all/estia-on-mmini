@@ -21,6 +21,10 @@ from urllib.parse import urlsplit
 
 log = logging.getLogger(__name__)
 _TRANSIENT = frozenset({500, 502, 503, 504})
+# Google's sampling for Gemma 4 is temperature 1.0, top_k 64, top_p 0.95. Ollama's OpenAI layer sends top_p 1.0 when a
+# request names none (openai/openai.go, 0.40.4), over the model's own 0.95, so every request names it. It has no top_k
+# field: the model's 64 applies.
+TOP_P = 0.95
 
 
 class GemmaError(Exception):
@@ -62,6 +66,8 @@ class Completion:
     tool_calls: tuple[ToolCall, ...] = ()
     prompt_tokens: int = 0
     finish_reason: str = ""
+    completion_tokens: int = 0  # what the model generated, hidden thought included
+    reasoning_chars: int = 0  # the size of a reasoning field Ollama sent (thinking on); its text is never kept
 
 
 class GemmaClient(Protocol):
@@ -102,6 +108,8 @@ def parse_completion(body: dict[str, Any]) -> Completion:
         tool_calls=tuple(calls),
         prompt_tokens=int(usage.get("prompt_tokens") or 0),
         finish_reason=str(choice.get("finish_reason") or ""),
+        completion_tokens=int(usage.get("completion_tokens") or 0),
+        reasoning_chars=len(str(message.get("reasoning") or "")),
     )
 
 
@@ -167,6 +175,7 @@ class OllamaGemma:
             "messages": messages,
             "max_tokens": max_tokens,
             "reasoning_effort": reasoning_effort,
+            "top_p": TOP_P,
             "stream": False,
         }
         if tools:

@@ -65,6 +65,7 @@ class PracticeTurn:
     rules: str
     fallback: str
     spoken: bool
+    language: str = ""  # the practised language's code (the log's language code)
 
 
 # her reply: the broken-turn guard and the tidy text
@@ -677,7 +678,9 @@ class Babble:
         session = self.running()
         if session is None:
             raise RuntimeError("no practice session is running")
-        return PracticeTurn(self._rules(session.code, session.level), prompts.PRACTICE_FALLBACK[session.code], spoken)
+        return PracticeTurn(
+            self._rules(session.code, session.level), prompts.PRACTICE_FALLBACK[session.code], spoken, session.code
+        )
 
     def end(self, reason: str) -> Session | None:
         """End the running session now (reason: off, idle, call, switch); its recap is due at once, or after quiet hours

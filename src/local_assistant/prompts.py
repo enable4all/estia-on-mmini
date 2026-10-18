@@ -268,6 +268,40 @@ SETUP_EXTRAS_HERS = (
     "  /usr/bin/sudo /usr/local/estia/bin/estia restart"
 )
 SETUP_EXTRAS_YOURS = "Her config: {path} (add each section there; she reads it from her next start)."
+# a re-run's alias with Ollama's prompt for Gemma 4's small models (made before 0.9.3; empty answers, 17 Oct)
+SETUP_MODEL_SMALL_PROMPT = (
+    "! Model: local-worker gets Ollama's prompt for Gemma 4's small models, not Google's prompt for 12B and larger: "
+    "some answers come back empty and are asked again."
+)
+SETUP_MODEL_REMAKE = (
+    "  Making it again changes only the prompt: the same model ({tag}), the same context. Its digest changes, so with "
+    "model_digest in the config her answers pause until the config has the new one (printed below). {stop}"
+)
+SETUP_MODEL_STOP_HERS = "Stop her first: /usr/bin/sudo /usr/local/estia/bin/estia stop (start puts her back)."
+SETUP_MODEL_STOP_YOURS = "Stop her first if she runs (scripts/run.sh: Ctrl-C)."
+SETUP_MODEL_REMAKE_ASK = "Make local-worker again now?"
+SETUP_MODEL_REMAKE_DRY_RUN = '  (dry run: asks "{ask} [y/N]"; only y makes it)'
+SETUP_MODEL_REMAKE_LATER = "  Later: scripts/setup.sh again (or by hand: setup_assistant.md, 2.2)."
+SETUP_MODEL_REMAKE_AFTER_OLLAMA = "  Setup makes it again once the Ollama fix above is done and setup runs again."
+SETUP_MODEL_PROMPT_BY_HAND = (
+    "  Setup cannot tell which of its models local-worker is made from, so it leaves it as it is. Make it again by "
+    "hand with the line RENDERER gemma4-large (setup_assistant.md, 2.2), then pin the new digest."
+)
+SETUP_MODEL_REMAKE_FAILED = (
+    "✗ Model: local-worker was not made again (the lines above say why); it stays as it was. Check that Ollama runs, "
+    "then run scripts/setup.sh again."
+)
+SETUP_MODEL_REMADE = "✓ Model: local-worker made again with Google's prompt for 12B and larger."
+SETUP_MODEL_REMADE_PIN = (
+    '  Its new digest: sha256:{digest}. With model_digest in the config: model_digest = "sha256:{digest}" in place '
+    "of the old line, {where}. Without it, nothing more to do."
+)
+SETUP_MODEL_REMADE_UNLISTED = "  Ollama does not list its digest yet: doctor's Model pin line shows it once it does."
+SETUP_MODEL_PIN_YOURS = "in {path}, then restart her"
+SETUP_MODEL_PIN_HERS = (
+    "as her: /usr/bin/sudo /usr/local/estia/bin/estia config, then /usr/bin/sudo /usr/local/estia/bin/estia start "
+    "(or restart, when she runs)"
+)
 SETUP_MODEL_NOT_MADE = (
     "local-worker was not made (the lines above say why). Check that Ollama runs, then run scripts/setup.sh again."
 )
@@ -1849,7 +1883,7 @@ LANGUAGE_SAME_ENGLISH = "I already listen and answer in English (en)."
 LANGUAGE_UNKNOWN = 'Unknown language "{name}".\n\n{listing}'
 LANGUAGE_VOICE_TOO_OLD = (
     "Voice notes and calls in {english} need a newer voice service: run scripts/install-voice-daemon.sh on the Mac "
-    "(it asks for sudo: run it yourself)."
+    "(it asks for your Mac password: run it yourself)."
 )
 
 
@@ -2003,23 +2037,51 @@ DOCTOR_TEXT_ONLY = "{name}, text only (no [voice])"
 DOCTOR_VOICE_TOO_OLD = "{name}, but the voice service is older than the language feature"
 DOCTOR_VOICE_LACKS = "{name}, but the voice service does not have it"
 DOCTOR_VOICE_SILENT = "{name}; the voice service does not answer, so its languages are unknown"
-DOCTOR_VOICE_REINSTALL = "scripts/install-voice-daemon.sh (asks for sudo: run it yourself)"
+DOCTOR_VOICE_REINSTALL = "scripts/install-voice-daemon.sh (asks for your Mac password: run it yourself)"
+# how the voice service starts again in her own user ({estia}: her wrapper); else DOCTOR_VOICE_REINSTALL
+DOCTOR_VOICE_RESTART_OWN = "{estia} stop voice, then {estia} start voice"
+# a folder in the voice service's models ({home}: hers in her own user, where deleting it needs DOCTOR_ADMIN; else ~)
+DOCTOR_VOICE_MODELS = "{home}/Library/Application Support/local-assistant/voice-models/{folder}"
+DOCTOR_ADMIN = " (with admin rights)"
 # doctor's Speech detector line, with [calls] interrupt = "only speech", the default (voice.detector_state)
-DOCTOR_DETECTOR_OLD = "old voice service: any sound stops her on calls until it is updated"
-DOCTOR_DETECTOR_LOADING = "loading: any sound stops her on calls until it is ready"
+# doctor's Speech detector line: {falls}, what any sound does on calls until it is ready (DOCTOR_DETECTOR_FALLS, by
+# what waits for it: barge-in with interrupt = "only speech", the pause with pause = "no speech", or both)
+DOCTOR_DETECTOR_FALLS = {
+    (True, False): "any sound stops her on calls",
+    (False, True): "any sound keeps a turn open on calls",
+    (True, True): "any sound stops her and keeps a turn open on calls",
+}
+DOCTOR_DETECTOR_OLD = "old voice service: {falls} until it is updated"
+DOCTOR_DETECTOR_LOADING = "loading: {falls} until it is ready"
 # {log}: DOCTOR_VOICE_LOG, or in her own user her wrapper's `logs voice` (her output is in /var/log/estia)
 DOCTOR_DETECTOR_LOADING_FIX = (
     "wait a minute and run doctor again (the model, about 1 MB, downloads at the first start); if it stays, see {log}"
 )
-DOCTOR_DETECTOR_UNAVAILABLE = (
-    "unavailable (its model did not download or failed its check): any sound stops her on calls until it is fixed"
-)
+DOCTOR_DETECTOR_UNAVAILABLE = "unavailable (its model did not download or failed its check): {falls} until it is fixed"
+# the reason is in the log: a failed download (no folder: tried again at the next start, the usual case), files not
+# the pinned ones (the service never sets this folder aside: deleting it downloads it again) or a model that did not load
 DOCTOR_DETECTOR_UNAVAILABLE_FIX = (
-    "delete ~/Library/Application Support/local-assistant/voice-models/silero-vad, then run"
-    " scripts/install-voice-daemon.sh (asks for sudo: run it yourself); see {log}"
+    "see {log} for why; a failed download is tried again when the voice service starts again: {restart}; files that"
+    " are not the pinned ones: delete {folder} first{rights}"
 )
 DOCTOR_VOICE_LOG = "~/Library/Logs/local-assistant/voice.log"  # before her own user: the voice service's output
-DOCTOR_DETECTOR_SILENT = "not ready: any sound stops her on calls until it is"
+DOCTOR_DETECTOR_SILENT = "not ready: {falls} until it is"
+# doctor's Turn detector line (Smart Turn, with [calls] early_end on): until it is ready, every turn waits the full pause
+DOCTOR_TURN_OLD = "old voice service: turns end after the full pause until it is updated"
+DOCTOR_TURN_LOADING = "loading: turns end after the full pause until it is ready"
+DOCTOR_TURN_LOADING_FIX = (
+    "wait a minute and run doctor again (the model, about 17 MB, downloads at the first start); if it stays, see {log}"
+)
+DOCTOR_TURN_UNAVAILABLE = (
+    "unavailable (its model did not download or failed its check): turns end after the full pause until it is fixed"
+)
+# as the speech detector's, but changed files are set aside and downloaded again by the service itself: deleting the
+# folder helps only when it could not be set aside (the log says so)
+DOCTOR_TURN_UNAVAILABLE_FIX = (
+    "see {log} for why; a failed download is tried again when the voice service starts again: {restart}; files that"
+    " could not be set aside: delete {folder} first{rights}"
+)
+DOCTOR_TURN_SILENT = "not ready: turns end after the full pause until it is"
 # doctor's Calls setting line: an older wording of what stops her, still read ({old}: the line, {new}: the new one)
 DOCTOR_INTERRUPT_OLD = "{old} still works"
 DOCTOR_INTERRUPT_OLD_FIX = "write {new} in [calls] instead"
@@ -2464,6 +2526,27 @@ DOCTOR_MODEL_TAG = (
     "{model} is not one of the builds for Apple silicon (MLX) that setup installs and the tests use ({big}, {small})"
 )
 DOCTOR_MODEL_BUILD = "{model} is made from {source}: " + DOCTOR_MODEL_TAG.removeprefix("{model} is ")
+
+# her model gets Ollama's prompt for Gemma 4's small models (doctor's Model prompt line; ollama_build.gets_small_prompt)
+DOCTOR_MODEL_PROMPT = (
+    "{model} gets Ollama's prompt for Gemma 4's small models, not Google's prompt for 12B and larger: some answers "
+    "come back empty and are asked again"
+)
+DOCTOR_MODEL_PROMPT_FIX = (
+    "stop her, then scripts/setup.sh makes local-worker again with Google's prompt (it asks first and prints the new "
+    "digest); with model_digest set, answers pause until the config has that digest: put it in, then start her "
+    "(setup_assistant.md, 2.2)"
+)
+DOCTOR_MODEL_PROMPT_FIX_HERS = (
+    "/usr/bin/sudo /usr/local/estia/bin/estia stop, then scripts/setup.sh as you makes local-worker again with "
+    "Google's prompt (it asks first and prints the new digest); with model_digest set, put that digest in with "
+    "/usr/bin/sudo /usr/local/estia/bin/estia config, then /usr/bin/sudo /usr/local/estia/bin/estia start "
+    "(setup_assistant.md, 2.2)"
+)
+DOCTOR_MODEL_PROMPT_OTHER_FIX = (
+    "make {model} again with the line RENDERER gemma4-large in its Modelfile (setup_assistant.md, 2.2), then pin the "
+    "new digest (the Model pin line) and restart her"
+)
 
 
 def model_build_fix(model: str, *, big: str, small: str) -> str:

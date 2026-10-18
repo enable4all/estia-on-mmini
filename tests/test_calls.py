@@ -16,14 +16,15 @@ from typing import Any, cast
 
 import pytest
 
-from local_assistant import prompts
-from local_assistant.call_audio import FRAME_BYTES, RATE, Barge, CallAudio, Said, rms
+from local_assistant import calls, prompts
+from local_assistant.call_audio import FRAME_BYTES, RATE, Barge, CallAudio, Said, TurnEnd, rms
 from local_assistant.calls import (
     MAX_FALSE_BARGE,
     CallManager,
     CallSettings,
     Turn,
     asks,
+    goes_on,
     is_own_voice,
     is_wrap_up,
     played_part,
@@ -76,9 +77,13 @@ class FakeVoice:
         self.ready = ready
         self.detector: str | None = None  # the speech detector's state in the health; None: an older service
         self.chunks: list[tuple[str, int]] = []  # (stream, bytes) of each chunk the detector was asked about
+        self.turn_detector: str | None = None  # the turn detector's state in the health; None: an older service
+        self.turn_p: list[float | str] = []  # Smart Turn's answers in order (then 0.9); a str is a failure's kind
+        self.windows: list[int] = []  # the bytes of each window Smart Turn was asked about
         self.spoken: list[str] = []
         self.languages: list[str | None] = []  # the language of each spoken text
         self.heard_in: list[str | None] = []  # the language of each transcription
+        self.heard_s: list[float] = []  # the seconds of audio in each transcription
         self.heard = 0
         self.fail_transcribe = False
         self.broken: set[str] = set()
@@ -86,6 +91,7 @@ class FakeVoice:
     async def transcribe(self, audio: bytes, *, language: str | None = None) -> Transcript:
         self.heard += 1
         self.heard_in.append(language)
+        self.heard_s.append((len(audio) - 44) / 32_000)  # a 16 kHz mono 16-bit WAV
         if self.fail_transcribe:
             raise VoiceUnavailableError("down")
         return Transcript(self.transcripts.pop(0) if self.transcripts else "", 1.0)
@@ -100,11 +106,18 @@ class FakeVoice:
 
     async def health(self) -> dict[str, str] | None:
         health = {"stt": "ready", "tts": "ready"} if self.ready else {"stt": "loading", "tts": "loading"}
-        return health | ({"vad": self.detector} if self.detector is not None else {})
+        health |= {"vad": self.detector} if self.detector is not None else {}
+        return health | ({"turn": self.turn_detector} if self.turn_detector is not None else {})
 
     async def vad(self, chunk: bytes, *, stream: str) -> float | str:
         self.chunks.append((stream, len(chunk)))
         return speech_probability(chunk) if self.detector == "ready" else "http"
+
+    async def turn(self, window: bytes) -> float | str:
+        self.windows.append(len(window))
+        if self.turn_detector != "ready":
+            return "http"
+        return self.turn_p.pop(0) if self.turn_p else 0.9
 
 
 class FakeHost:
@@ -124,21 +137,53 @@ class FakeHost:
         self.gate: asyncio.Event | None = None  # when set, an answer also waits for it
         self.practice_ended: list[str] = []
         self.practice_turns: list[bool] = []  # per turn: whether the call said it is a practice call
+        self.warm_ups: list[tuple[str, bool]] = []  # per warm-up: (aci, practice)
+        self.warm_gate: asyncio.Event | None = None  # when set, a warm-up waits for it (a slow model)
+        self.warm_error: Exception | None = None  # when set, a warm-up raises it
+        self.warm_cancelled = 0
+        self.warm_done = 0
+        self.empty_first: set[int] = set()  # the turns (0, 1, ...) whose first try comes back empty: retried
+        self.retry_gate: asyncio.Event | None = None  # when set, a retry waits for it
 
     def call_started(self, aci: str, *, practice: bool = False) -> None:
         self.started.append(aci)
         self.started_practice.append(practice)
 
+    async def call_warm_up(self, aci: str, *, practice: bool = False) -> None:
+        self.warm_ups.append((aci, practice))
+        try:
+            if self.warm_gate is not None:
+                await self.warm_gate.wait()
+        except asyncio.CancelledError:
+            self.warm_cancelled += 1
+            raise
+        if self.warm_error is not None:
+            raise self.warm_error
+        self.warm_done += 1
+
     def call_ended(self) -> None:
         self.ended += 1
 
-    async def call_turn(self, aci: str, text: str, on_tools: Callable[[], None], *, practice: bool = False) -> Turn:
+    async def call_turn(
+        self,
+        aci: str,
+        text: str,
+        on_tools: Callable[[], None],
+        *,
+        practice: bool = False,
+        on_retry: Callable[[], None] | None = None,
+    ) -> Turn:
         self.turns.append(text)
         self.practice_turns.append(practice)
         if self.use_tools:
             on_tools()
         try:
             await asyncio.sleep(self.delay)
+            if len(self.turns) - 1 in self.empty_first and on_retry is not None:  # the first try came back empty
+                on_retry()
+                await asyncio.sleep(0.3)  # the retry takes a moment (2 to 10 s live)
+                if self.retry_gate is not None:
+                    await self.retry_gate.wait()  # the retry, still running
             if self.gate is not None:
                 await self.gate.wait()
         except asyncio.CancelledError:
@@ -322,6 +367,10 @@ class Harness:
             "greetings": (GREETING,),  # one known greeting (the real default varies)
             "acknowledge": False,  # the tests about the short "okay" turn it on; on in the real default
             "barge": "loudness",  # any sound: the tests about speech say so ("only speech" is the real default)
+            # today's end of turn: the full pause of quiet (the tests about the early end and the pause by speech say
+            # so; both are on in the real default)
+            "early_end": False,
+            "pause": "loudness",
         }
         options.update(settings)
         self.manager = CallManager(
@@ -1158,6 +1207,97 @@ async def test_a_caller_who_hangs_up_while_it_rings_is_not_answered() -> None:
         assert h.signal.accepted == [] and h.manager._call is None
 
 
+# the model's warm-up (owner, 17 Oct): it loads and reads the first turn's prompt while the call rings
+
+
+async def test_the_model_warms_up_while_it_rings_before_she_answers() -> None:
+    async with Harness(answer_after_s=0.4) as h:
+        h.signal.ring()
+        await h.until(lambda: h.host.warm_ups != [])
+        assert h.host.warm_ups == [(ME, False)] and h.host.started == [ME]  # after the call's start (its glance)
+        assert h.signal.accepted == []  # still ringing
+        await h.until(lambda: h.signal.accepted != [])
+
+
+async def test_a_caller_who_hangs_up_while_it_rings_leaves_the_warm_up_to_finish() -> None:
+    """A warm-up is never cancelled: an abort while Ollama loads the model stops its runner (ollama.log, 15 Oct)."""
+    async with Harness(answer_after_s=0.4) as h:
+        h.host.warm_gate = asyncio.Event()
+        h.signal.ring()
+        await h.until(lambda: h.host.warm_ups != [])
+        h.signal.remote_hangup()
+        await h.until(lambda: h.host.ended == 1)
+        await asyncio.sleep(0.1)
+        assert h.signal.accepted == [] and h.host.warm_cancelled == 0
+        h.host.warm_gate.set()
+        await h.until(lambda: h.host.warm_done == 1)
+
+
+async def test_a_placed_call_warms_up_once_it_is_picked_up() -> None:
+    async with Harness() as h:
+        task = await placing(h)
+        await asyncio.sleep(0.2)
+        assert h.host.warm_ups == []  # ringing: it may never be picked up
+        await h.signal.pick_up()
+        assert await task == "answered"
+        await h.until(lambda: h.host.warm_ups != [])
+        assert h.host.warm_ups == [(ME, False)]  # her call for a reminder is never a practice call
+
+
+async def test_a_practice_call_warms_up_the_practice_prompt() -> None:
+    async with Harness(practice=lambda aci: "nl") as h:
+        await h.connected()
+        assert h.host.warm_ups == [(ME, True)]
+
+
+async def test_one_warm_up_per_call() -> None:
+    async with Harness(["first idea", "second idea"], [Turn("Nice."), Turn("Good one.")]) as h:
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(1.0))
+        await h.quiet_after("Nice.")
+        h.helper.caller_says(speech(1.0))
+        await h.quiet_after("Good one.")
+        assert h.host.warm_ups == [(ME, False)]  # never again for a later turn
+        h.signal.remote_hangup()
+        await h.until(lambda: h.host.ended == 1)
+        h.signal.ring()  # the next call warms up again: its own
+        await h.until(lambda: len(h.signal.accepted) == 2)
+        assert h.host.warm_ups == [(ME, False), (ME, False)]
+
+
+async def test_a_slow_warm_up_never_holds_up_the_call() -> None:
+    async with Harness(["what's on tomorrow"], [Turn("Two meetings tomorrow.")]) as h:
+        h.host.warm_gate = asyncio.Event()  # the model never finishes reading
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(1.0))
+        await h.quiet_after("Two meetings tomorrow.")
+        assert h.host.turns == ["what's on tomorrow"] and h.host.warm_done == 0
+        h.signal.remote_hangup()
+        await h.until(lambda: h.host.ended == 1)
+        await asyncio.sleep(0.1)
+        assert h.host.warm_cancelled == 0  # left to finish: a finished warm-up is harmless
+        h.host.warm_gate.set()
+        await h.until(lambda: h.host.warm_done == 1)
+
+
+async def test_a_failing_warm_up_never_affects_the_call(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger="local_assistant.calls")
+    async with Harness(["what's on tomorrow"], [Turn("Two meetings tomorrow.")]) as h:
+        h.host.warm_error = RuntimeError("Ollama said: a private detail")
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(1.0))
+        await h.quiet_after("Two meetings tomorrow.")
+        assert h.host.turns == ["what's on tomorrow"]
+    failed = [r for r in caplog.records if "warm-up" in r.getMessage()]
+    assert [(r.levelno, r.getMessage()) for r in failed] == [
+        (logging.WARNING, "calls: model warm-up failed (RuntimeError)")  # the kind only, never the text
+    ]
+    assert all(r.exc_info is None for r in failed)
+
+
 async def test_no_thinking_lines_unless_they_are_switched_on() -> None:
     async with Harness(["and my calendar?"], [Turn("Free.")], delay=1.0, use_tools=True, fillers=False) as h:
         await h.connected()
@@ -1637,6 +1777,115 @@ async def test_a_dutch_call_acknowledges_a_long_turn_in_dutch_and_a_short_one_no
     acknowledged = h.manager.said[1]
     assert acknowledged in prompts.call_lines("nl", name=NAME).acknowledge and (acknowledged, "nl") in said_in(h)
     assert h.manager.said[2:] == ["Twee afspraken.", "Goed, dank je."]  # nothing before the short turn's answer
+
+
+async def test_an_empty_first_try_gets_an_acknowledgement_at_once_while_the_retry_runs() -> None:
+    """Research, 17 Oct: a first try that came back empty cost a caller about 10 s of silence, then the retry's 2 to
+    10 s. When the call is told of the retry, she says one of the acknowledgements at once (the same picker), before
+    the answer. A short turn ("how are you?") gets none at its start, so this is its only one."""
+    async with Harness(["How are you?"], [Turn("Fine, thanks.")], acknowledge=True, fillers=False) as h:
+        h.host.empty_first = {0}
+        h.host.retry_gate = asyncio.Event()
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(1.2))
+        await h.until(lambda: len(h.manager.said) == 2)  # said while the retry still runs
+        assert h.manager.said[1] in prompts.CALL_ACK_LINES and h.host.retry_gate is not None
+        h.host.retry_gate.set()
+        await h.quiet_after("Fine, thanks.")
+    assert h.manager.said[1:] == [h.manager.said[1], "Fine, thanks."]
+
+
+async def test_a_turn_acknowledged_at_its_start_gets_no_second_one_for_its_retry() -> None:
+    said = "What's on my calendar for tomorrow?"
+    async with Harness([said], [Turn("Two meetings.")], acknowledge=True, fillers=False) as h:
+        h.host.empty_first = {0}
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(1.2))
+        await h.quiet_after("Two meetings.")
+    spoken = h.manager.said[1:]
+    assert [line in prompts.CALL_ACK_LINES for line in spoken] == [True, False]
+
+
+async def test_the_retrys_acknowledgement_keeps_the_rule_of_never_two_turns_in_a_row() -> None:
+    """A request right after an acknowledged one gets none, at its start or for its retry; a retry's counts too."""
+    said = ["please tell me what is on today", "and then?", "please tell me what is on tomorrow"]
+    answers = ["Answer 0.", "Answer 1.", "Answer 2."]
+    async with Harness(said, [Turn(a) for a in answers], acknowledge=True, fillers=False) as h:
+        h.host.empty_first = {1, 2}
+        await h.connected()
+        await h.quiet_after(GREETING)
+        for answer in answers:
+            h.helper.caller_says(speech(1.2))
+            await h.quiet_after(answer)
+    spoken = h.manager.said[1:]
+    # turn 0: its start; turn 1 (empty, right after it): none; turn 2 (empty, a request): at its start, none again
+    assert [line in prompts.CALL_ACK_LINES for line in spoken] == [True, False, False, True, False]
+
+
+async def test_a_retry_after_an_unacknowledged_turn_lets_the_next_request_go_without_one() -> None:
+    said = ["how are you?", "please tell me what is on tomorrow"]
+    answers = ["Fine.", "Two meetings."]
+    async with Harness(said, [Turn(a) for a in answers], acknowledge=True, fillers=False) as h:
+        h.host.empty_first = {0}
+        await h.connected()
+        await h.quiet_after(GREETING)
+        for answer in answers:
+            h.helper.caller_says(speech(1.2))
+            await h.quiet_after(answer)
+    spoken = h.manager.said[1:]
+    assert [line in prompts.CALL_ACK_LINES for line in spoken] == [True, False, False]  # the retry's, then none
+
+
+@pytest.mark.parametrize("use_tools", [False, True], ids=["thinking", "checking"])
+async def test_no_retry_acknowledgement_after_a_thinking_or_checking_line(use_tools: bool) -> None:
+    """Review of 17 Oct (M1): with fillers on, a line said while the first try ran ("Let me think.", or "Let me check."
+    after a tool call) already told the caller she is on it; an acknowledgement after it ("Let me think." then
+    "Sure.") comes in the wrong order, so none follows."""
+    async with Harness(
+        ["How are you?"],
+        [Turn("Fine, thanks.")],
+        delay=1.0,
+        use_tools=use_tools,
+        acknowledge=True,
+        fillers=True,
+        thinking_after_s=0.3,
+    ) as h:
+        h.host.empty_first = {0}
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(1.2))
+        await h.quiet_after("Fine, thanks.")
+    spoken = h.manager.said[1:]
+    assert spoken[0] in (prompts.CALL_CHECKING_LINES if use_tools else prompts.CALL_THINKING_LINES)
+    assert spoken[1:] == ["Fine, thanks."]
+
+
+async def test_no_retry_acknowledgement_with_acknowledgements_off() -> None:
+    async with Harness(["How are you?"], [Turn("Fine.")], acknowledge=False, fillers=False) as h:
+        h.host.empty_first = {0}
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(1.2))
+        await h.quiet_after("Fine.")
+    assert h.manager.said[1:] == ["Fine."]
+
+
+async def test_no_retry_acknowledgement_for_the_answer_to_a_device_question() -> None:
+    question = "The heater needs your yes. Say yes if you want me to switch it off now."
+    last = "Say yes if you want me to switch it off now."
+    turns = [Turn(question, reply_id=3, asks_yes=True), Turn("Done: heater off.")]
+    said = ["switch the heater off", "Yes."]
+    async with Harness(said, turns, acknowledge=True, fillers=False) as h:
+        h.host.empty_first = {1}
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(0.8))
+        h.helper.caller_says_after(lambda: last in h.manager.said, 30, speech(0.4))
+        await h.quiet_after("Done: heater off.")
+    spoken = h.manager.said
+    assert spoken[spoken.index(last) + 1] == "Done: heater off."
 
 
 async def test_no_acknowledgement_before_the_answer_to_a_device_question() -> None:
@@ -2421,7 +2670,7 @@ class CutInEvery:
         self.barge = Barge()
         self.starts: list[int] = []  # where in her clip each say() started, in bytes
 
-    async def say(self, pcm: bytes, *, barge: bool = False, fresh: bool = True) -> Said:
+    async def say(self, pcm: bytes, *, barge: bool = False, fresh: bool = True, watch: bool = False) -> Said:
         self.starts.append(self.total - len(pcm))
         if len(self.starts) > 40:
             raise AssertionError("she never got to the end of her sentence")
@@ -2456,3 +2705,516 @@ async def test_acknowledgements_over_every_part_of_her_sentence_still_take_her_t
         assert all(a < b for a, b in itertools.pairwise(audio.starts))  # always further on
         assert audio.barge.acknowledged == len(starts_s) - 1
         assert MAX_FALSE_BARGE == 3
+
+
+# the early end of a turn (owner, 17 Oct; no shadow): Smart Turn at the short pause and the pause by speech, on every
+# call (practice calls too), each on its own detector of the voice service; the call's audio rules are call_audio's
+EARLY: dict[str, Any] = {"early_end": True, "pause": "speech", "end_of_turn_s": 2.3}
+
+
+@pytest.fixture
+def listens(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """The keywords of every CallAudio.listen in the test, in order."""
+    seen: list[dict[str, Any]] = []
+    original = CallAudio.listen
+
+    async def spy(self: CallAudio, **kwargs: Any) -> tuple[bytes, dict[str, Any]]:
+        seen.append(kwargs)
+        return await original(self, **kwargs)
+
+    monkeypatch.setattr(CallAudio, "listen", spy)
+    return seen
+
+
+def log_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [record.getMessage() for record in caplog.records]
+
+
+def calls_logs(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger="local_assistant.calls")
+    caplog.set_level(logging.INFO, logger="local_assistant.call_audio")
+
+
+async def one_turn_call(h: Harness, answer: str, *, placed: bool = False) -> None:
+    """A call (incoming, or one she placed) with one turn of 1 s of speech, answered with `answer`, then hung up."""
+    if placed:
+        task = await placing(h)
+        await h.signal.pick_up()
+        assert await task == "answered"
+        await h.quiet_after("Good morning! It's 7:00. wake up")
+    else:
+        await h.connected()
+        await h.quiet_after(h.greeting)
+    h.helper.caller_says(speech(1.0))
+    await h.quiet_after(answer)
+    h.signal.remote_hangup()
+    await h.until(lambda: h.host.ended == 1)
+
+
+def test_the_early_end_and_the_pause_by_speech_are_on_by_default() -> None:
+    settings = CallSettings(socket_dir=Path("/tmp"))
+    assert (settings.early_end, settings.early_end_pause_s, settings.pause) == (True, 0.6, "speech")
+
+
+@pytest.mark.parametrize("kind", ["incoming", "placed", "practice"])
+async def test_every_call_gets_both_on_its_barge_in_stream(
+    caplog: pytest.LogCaptureFixture, listens: list[dict[str, Any]], kind: str
+) -> None:
+    calls_logs(caplog)
+    practice = (lambda aci: "nl") if kind == "practice" else None
+    async with Harness(["what time is it"], [Turn("Four.")], barge="speech", practice=practice, **EARLY) as h:
+        h.voice.detector = h.voice.turn_detector = "ready"
+        h.voice.turn_p = [0.95]
+        await one_turn_call(h, "Four.", placed=kind == "placed")
+    main = [keywords for keywords in listens if not keywords.get("preroll")]
+    turns = {id(keywords.get("turn")) for keywords in main}
+    assert main and len(turns) == 1  # one TurnEnd for the call, given to every listen of hers
+    turn = main[0]["turn"]
+    assert isinstance(turn, TurnEnd) and turn.judged and turn.detected and turn.early_pause_s == 0.6
+    assert h.voice.windows and all(0 < size <= 256_000 and size % 2 == 0 for size in h.voice.windows)
+    streams = {stream for stream, _ in h.voice.chunks}
+    assert len(streams) == 1 and re.fullmatch(r"[0-9a-f]{32}", streams.pop())  # barge-in and the pause: one stream
+    assert any(re.fullmatch(r"calls: turn ended early \(sure, p 0\.95, pause 0\.\d\d s, answer \d+ ms\)", line)
+               for line in log_lines(caplog))  # fmt: skip
+    assert h.host.practice_turns == [kind == "practice"]
+
+
+async def test_practice_calls_end_early_too(caplog: pytest.LogCaptureFixture) -> None:
+    """Owner, 17 Oct (decision 4): practice calls are no exception; only the counts would bring them back."""
+    calls_logs(caplog)
+    async with Harness(["Ik ben moe."], [Turn("Waarom?")], practice=lambda aci: "nl", **EARLY) as h:
+        h.voice.detector = h.voice.turn_detector = "ready"
+        h.voice.turn_p = [0.95]
+        await one_turn_call(h, "Waarom?")
+    assert h.host.practice_turns == [True]
+    assert any(line.startswith("calls: turn ended early (sure, p 0.95") for line in log_lines(caplog))
+
+
+async def test_off_and_quiet_pass_no_turn_rules(
+    caplog: pytest.LogCaptureFixture, listens: list[dict[str, Any]]
+) -> None:
+    """early_end = false and pause = "quiet": today's listen, byte for byte (call_audio pins it), and no end lines."""
+    calls_logs(caplog)
+    settings = EARLY | {"early_end": False, "pause": "loudness"}
+    async with Harness(["what time is it"], [Turn("Four.")], barge="speech", **settings) as h:
+        h.voice.detector = h.voice.turn_detector = "ready"
+        await one_turn_call(h, "Four.")
+    assert listens and all(keywords.get("turn") is None for keywords in listens)
+    assert h.voice.windows == []  # Smart Turn never asked
+    lines = log_lines(caplog)
+    assert not [line for line in lines if line.startswith(("calls: early end", "calls: pause by", "calls: turn "))]
+    assert any(line.startswith("calls: barge-in speech:") for line in lines)  # barge-in's own line stays
+
+
+@pytest.mark.parametrize(
+    ("turn", "vad", "said"),
+    [
+        ("loading", "ready", "turn detector loading"),
+        ("unavailable", "ready", "turn detector unavailable"),
+        (None, "ready", "turn detector old voice service"),
+        ("ready", "loading", "speech detector loading"),
+        ("ready", None, "speech detector old voice service"),
+    ],
+)
+async def test_a_detector_not_ready_logs_once(
+    caplog: pytest.LogCaptureFixture, turn: str | None, vad: str | None, said: str
+) -> None:
+    """A detector not ready when the call starts: one line for the call, and the full pause (Smart Turn) or loudness
+    (the pause by speech) decides; Smart Turn is never asked, and the end lines say why."""
+    calls_logs(caplog)
+    async with Harness(["one", "two"], [Turn("A."), Turn("B.")], **EARLY) as h:  # any sound stops her
+        h.voice.detector, h.voice.turn_detector = vad, turn
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(1.0))
+        await h.quiet_after("A.")
+        h.helper.caller_says(speech(1.0))
+        await h.quiet_after("B.")
+        h.signal.remote_hangup()
+        await h.until(lambda: h.host.ended == 1)
+    lines = log_lines(caplog)
+    if turn != "ready":
+        assert lines.count(f"calls: {said}; the full pause decides this call") == 1
+        assert h.voice.windows == []
+        assert any(line.startswith("calls: early end on (no turn detector: the full pause decided): 2 turns, 0 ended")
+                   for line in lines)  # fmt: skip
+    else:
+        assert lines.count(f"calls: {said}; loudness decides this call") == 1  # the pause too, for this call
+        assert any(line.startswith("calls: pause by speech (loudness: no speech detector): 2 turns") for line in lines)
+        assert not [stream for stream, _ in h.voice.chunks]
+
+
+async def test_the_listen_after_a_barge_in_never_gets_them(listens: list[dict[str, Any]]) -> None:
+    long_answer = "This is a long answer. " * 8
+    turns = [Turn(long_answer, reply_id=5), Turn("Okay.")]
+    async with Harness(["tell me more", "wait, what about tomorrow"], turns, **EARLY) as h:
+        h.voice.detector = h.voice.turn_detector = "ready"
+        await h.connected()
+        await h.quiet_after(GREETING)
+        greeting = h.helper.her_frames()
+        h.helper.caller_says_when(lambda: h.helper.her_frames() > greeting + 150, speech(1.2))
+        h.helper.caller_says(speech(1.0))
+        await h.quiet_after("Okay.")
+        assert h.host.turns == ["tell me more", f"{prompts.CUTTING_IN} wait, what about tomorrow"]
+    over_her = [keywords for keywords in listens if keywords.get("preroll")]
+    assert over_her and all(keywords.get("turn") is None for keywords in over_her)  # INTERRUPTION_END_S alone
+    assert all(keywords["end_silence_s"] == 1.2 for keywords in over_her)
+
+
+async def test_end_of_call_lines_follow_barge_in(caplog: pytest.LogCaptureFixture) -> None:
+    calls_logs(caplog)
+    async with Harness(["what time is it"], [Turn("Four.")], **EARLY) as h:
+        h.voice.detector = h.voice.turn_detector = "ready"
+        h.voice.turn_p = [0.95]
+        await one_turn_call(h, "Four.")
+    lines = log_lines(caplog)
+    barge = next(index for index, line in enumerate(lines) if line.startswith("calls: barge-in"))
+    early = (
+        r"calls: early end on \(short pause 0\.60 s, full 2\.30 s\): 1 turn, 1 ended early \(sure 1, probably 0\);"
+        r" saved 1\.\d s, median 1\.\d\d s a turn; went on 0 \(sure 0, probably 0, speech 0\), caught by the hold 0,"
+        r" cut off 0 \(sure 0, probably 0, speech 0\); held 0 \(goes on 0, ends the call 0\); taken over in her first"
+        r" 1\.5 s: 0 after an early end, 0 after a full pause; 1 ask \(sure 1, probably 0, not 0, dropped 0\), answer"
+        r" median \d+ ms, slowest \d+ ms, 0 failed; saved per turn 1\.\d\d"
+    )
+    pause = (
+        # a few loud frames of the last syllable may count as pause, by where the chunks fall in the clip
+        r"calls: pause by speech: 1 turn, 0 ended sooner than by loudness \(0\.0 s in all, median 0\.00 s\), \d+ loud"
+        r" frames counted as pause; detector \d+ chunks, slowest \d+ ms, 0 failed"
+    )
+    assert re.fullmatch(early, lines[barge + 1]), lines[barge + 1]
+    assert re.fullmatch(pause, lines[barge + 2]), lines[barge + 2]
+    assert lines[barge + 3].startswith("calls: ended after")
+
+
+def end_line(caplog: pytest.LogCaptureFixture) -> str:
+    [line] = [line for line in log_lines(caplog) if line.startswith(("calls: early end on", "calls: early end off"))]
+    return line
+
+
+@pytest.mark.parametrize("early", [True, False])
+async def test_speech_before_her_answer_is_cut_off_but_not_after_the_full_pause(
+    caplog: pytest.LogCaptureFixture, early: bool
+) -> None:
+    """The watch: after an early end the caller who goes on, sustained, within what would have been the full pause was
+    cut off (the owner's count: at most 1 turn in 20); after the full pause going on is a new turn, never counted."""
+    calls_logs(caplog)
+    settings = EARLY if early else EARLY | {"pause": "loudness"}  # a full pause: no loud frame counted as pause
+    async with Harness(["what time is it"], [Turn("Four.")], delay=0.3, **settings) as h:
+        h.voice.detector = h.voice.turn_detector = "ready"
+        h.voice.turn_p = [0.95 if early else 0.2]
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(1.0))
+        h.helper.caller_says_when(lambda: h.voice.heard == 1, speech(0.5))  # on again while she works it out
+        await h.quiet_after("Four.")
+        h.signal.remote_hangup()
+        await h.until(lambda: h.host.ended == 1)
+    lines = log_lines(caplog)
+    went = "calls: the caller went on after an early end (sure)"
+    if early:
+        assert went in lines
+        assert "; went on 1 (sure 1, probably 0, speech 0), caught by the hold 0, cut off 1 (sure 1," in end_line(
+            caplog
+        )
+    else:
+        assert went not in lines and ": 1 turn, 0 ended early (" in end_line(caplog)
+        assert "; went on 0 (sure 0, probably 0, speech 0), caught by the hold 0, cut off 0 (" in end_line(caplog)
+
+
+@pytest.mark.parametrize("goes_on", [True, False])
+async def test_going_on_over_her_got_it_is_cut_off_too(caplog: pytest.LogCaptureFixture, goes_on: bool) -> None:
+    """Review I1: "Got it." comes right after Whisper, inside what would have been the full pause; the caller who goes on
+    over it was cut off, as without it. Her own "Got it." alone counts nothing."""
+    calls_logs(caplog)
+    said = "What's on my calendar for tomorrow?"  # five words or more: a "got it"
+    async with Harness([said], [Turn("Two meetings tomorrow.")], delay=0.3, acknowledge=True, **EARLY) as h:
+        h.voice.detector = h.voice.turn_detector = "ready"
+        h.voice.turn_p = [0.95]
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(1.0))
+        if goes_on:  # on again as her "Got it." starts
+            h.helper.caller_says_when(lambda: h.manager.saying in prompts.CALL_ACK_LINES, speech(0.4))
+        await h.quiet_after("Two meetings tomorrow.")
+        h.signal.remote_hangup()
+        await h.until(lambda: h.host.ended == 1)
+    assert h.manager.said[1] in prompts.CALL_ACK_LINES  # the "Got it." was said
+    cut = 1 if goes_on else 0
+    assert f"; went on {cut} (sure {cut}, probably 0, speech 0), caught by the hold 0, cut off {cut} (" in end_line(
+        caplog
+    )
+
+
+async def test_clicks_after_an_early_end_are_no_cut_off(caplog: pytest.LogCaptureFixture) -> None:
+    calls_logs(caplog)
+    async with Harness(["what time is it"], [Turn("Four.")], delay=0.3, **EARLY) as h:
+        h.voice.detector = h.voice.turn_detector = "ready"
+        h.voice.turn_p = [0.95]
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(1.0))
+        h.helper.caller_says_when(lambda: h.voice.heard == 1, typing(0.6))  # keys, never 10 loud frames in a row
+        await h.quiet_after("Four.")
+        h.signal.remote_hangup()
+        await h.until(lambda: h.host.ended == 1)
+    assert "cut off 0 (" in end_line(caplog)
+
+
+def bursts(count: int, *, every_s: float = 0.6, loud_s: float = 0.12) -> bytes:
+    """Dishes: `count` loud bursts of noise (no voice), one every `every_s`."""
+    return (noise(loud_s, 3000) + noise(every_s - loud_s)) * count
+
+
+@pytest.mark.parametrize(
+    ("p", "after"),
+    [
+        (0.95, noise(0.9) + noise(0.15, 3000)),  # a sure end (0.61 s after the last loud frame), a door 0.3 s later
+        (0.2, noise(0.3) + bursts(8)),  # unsure: the pause by speech ends the turn while the dishes go on
+    ],
+)
+async def test_noise_after_an_early_end_is_no_cut_off(caplog: pytest.LogCaptureFixture, p: float, after: bytes) -> None:
+    """Review I2: the watch counts the caller's voice (the speech detector's), not a loud sound."""
+    calls_logs(caplog)
+    async with Harness(["What time is it?"], [Turn("Four.")], delay=1.5, **EARLY) as h:
+        h.voice.detector = h.voice.turn_detector = "ready"
+        h.voice.turn_p = [p]
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(1.0) + after)
+        await h.quiet_after("Four.")
+        h.signal.remote_hangup()
+        await h.until(lambda: h.host.ended == 1)
+    lines = log_lines(caplog)
+    assert "; went on 0 (sure 0, probably 0, speech 0), caught by the hold 0, cut off 0 (" in end_line(caplog)
+    assert not [line for line in lines if line.startswith("calls: the caller went on")]
+    ended = "calls: turn ended early (sure" if p == 0.95 else "calls: the speech pause ended the turn"
+    assert any(line.startswith(ended) for line in lines)  # an early end, then the noise
+
+
+async def test_noise_and_no_words_after_an_early_end_are_no_turns(caplog: pytest.LogCaptureFixture) -> None:
+    """Where the call logs noise or a sound without words, the end before it is no turn (TurnEnd.noise)."""
+    calls_logs(caplog)
+    async with Harness(["*music*", "Um.", "what time is it"], [Turn("Four.")], **EARLY) as h:
+        h.voice.detector = h.voice.turn_detector = "ready"
+        h.voice.turn_p = [0.95] * 4
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(0.11))  # a bump: too little voice to transcribe
+        await h.until(lambda: any(line.startswith("calls: noise (voiced") for line in log_lines(caplog)))
+        for heard in (1, 2):  # heard as noise, then as a filler alone
+            h.helper.caller_says(speech(1.0))
+            await h.until(lambda: h.voice.heard == heard)  # noqa: B023 - awaited at once
+        h.helper.caller_says(speech(1.0))
+        await h.quiet_after("Four.")
+        h.signal.remote_hangup()
+        await h.until(lambda: h.host.ended == 1)
+    assert h.host.turns == ["what time is it"]
+    assert end_line(caplog).startswith("calls: early end on (short pause 0.60 s, full 2.30 s): 1 turn, 1 ended early")
+    assert "; 4 asks (sure 4," in end_line(caplog)  # Smart Turn was asked each time: the noise is no turn
+
+
+@pytest.mark.parametrize(("early", "after_frames", "counted"), [(True, 80, 1), (False, 80, 1), (True, 300, 0)])
+async def test_a_takeover_in_her_first_1_5_s_counts_for_both_kinds(
+    caplog: pytest.LogCaptureFixture, early: bool, after_frames: int, counted: int
+) -> None:
+    """The caller taking over within EARLY_BARGE_S of her answer (after its lead) counts against the end before it:
+    after an early end or after a full pause, the owner's comparison; later is an ordinary barge-in."""
+    calls_logs(caplog)
+    long_answer = "This is a long answer. " * 8
+    turns = [Turn(long_answer, reply_id=5), Turn("Okay.")]
+    settings = EARLY if early else EARLY | {"pause": "loudness"}  # a full pause: no loud frame counted as pause
+    async with Harness(["tell me more", "wait, what about tomorrow"], turns, **settings) as h:
+        h.voice.detector = h.voice.turn_detector = "ready"
+        h.voice.turn_p = [0.95 if early else 0.2, 0.95]
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(1.0))
+        h.helper.caller_says_after(lambda: h.manager.saying == "This is a long answer.", after_frames, speech(1.2))
+        await h.quiet_after("Okay.")
+        assert h.host.turns == ["tell me more", f"{prompts.CUTTING_IN} wait, what about tomorrow"]
+        h.signal.remote_hangup()
+        await h.until(lambda: h.host.ended == 1)
+    after = "an early end (sure)" if early else "a full pause"
+    taken = [line for line in log_lines(caplog) if re.fullmatch(rf"calls: taken over \d\.\d s into her answer, after {re.escape(after)}", line)]  # fmt: skip
+    assert len(taken) == counted
+    early_count, full_count = (counted, 0) if early else (0, counted)
+    line = end_line(caplog)
+    assert f"taken over in her first 1.5 s: {early_count} after an early end, {full_count} after a full pause" in line
+
+
+# the hold: an early end whose words end the call, or end like they go on, waits out the full pause after all; the
+# caller going on in it is joined to the turn and heard whole
+
+
+async def held_call(h: Harness, *, start: list[int] | None = None) -> None:
+    await h.connected()
+    await h.quiet_after(h.greeting)
+    if start is not None:
+        start.append(len(h.helper.heard))
+    h.helper.caller_says(speech(1.0))
+
+
+async def test_an_early_goodbye_is_held_then_ends_the_call(caplog: pytest.LogCaptureFixture) -> None:
+    calls_logs(caplog)
+    start: list[int] = []
+    async with Harness(["okay, bye"], **EARLY) as h:
+        h.voice.detector = h.voice.turn_detector = "ready"
+        h.voice.turn_p = [0.95]
+        await held_call(h, start=start)
+        await h.until(lambda: bool(h.signal.hung_up))
+        await h.until(lambda: h.host.ended == 1)
+        heard = list(h.helper.heard)
+    assert h.host.turns == []  # a plain goodbye: code's bye, no answer
+    said_bye = next(index for index in range(start[0] + 100, len(heard)) if rms(heard[index]) > 300)
+    assert said_bye - (start[0] + 100) >= 200  # after the full pause (2.3 s), never at 0.6 s
+    lines = log_lines(caplog)
+    assert "calls: early end held (ends the call); the turn stands" in lines
+    line = end_line(caplog)
+    assert ": 1 turn, 1 ended early (sure 1, probably 0); saved 0.0 s, median 0.00 s a turn;" in line  # held: 0
+    assert "; held 1 (goes on 0, ends the call 1);" in line and "caught by the hold 0" in line
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        "Okay, I have to go",  # leave-taking
+        "That's all for now",  # a wrap-up
+        "You can hang up now",  # asks her to hang up
+        "No, that's good. Okay, thank you. Bye-bye.",  # a goodbye with more
+    ],
+)
+async def test_leave_taking_and_wrap_up_are_held(caplog: pytest.LogCaptureFixture, said: str) -> None:
+    calls_logs(caplog)
+    async with Harness([said], [Turn("Bye for now!")], **EARLY) as h:
+        h.voice.detector = h.voice.turn_detector = "ready"
+        h.voice.turn_p = [0.95]
+        await held_call(h)
+        await h.quiet_after("Bye for now!")
+        await h.until(lambda: bool(h.signal.hung_up))  # her answer, then the end, as without the hold
+        await h.until(lambda: h.host.ended == 1)
+    assert h.host.turns == [said]
+    assert "calls: early end held (ends the call); the turn stands" in log_lines(caplog)
+
+
+@pytest.mark.parametrize(
+    ("code", "first"),
+    [
+        ("en", "I want to call,"),
+        ("en", "I want to call…"),
+        ("en", "I want to call..."),
+        ("en", "I want to call -"),
+        ("en", "I want to go to"),  # a word that goes on (language.CONTINUING)
+        ("en", "It is nice but"),
+        ("en", "I want to, um"),  # a filler
+        ("nl", "Het is mooi, maar"),  # the call language's "but"
+        ("nl", "Ik ga naar"),
+        ("nl", "It is nice but"),  # English too
+    ],
+)
+async def test_a_turn_that_goes_on_is_held_and_joined(caplog: pytest.LogCaptureFixture, code: str, first: str) -> None:
+    calls_logs(caplog)
+    whole = "I want to call my mother."
+    async with Harness([first, whole], [Turn("Okay.")], language=code, **EARLY) as h:
+        h.voice.detector = h.voice.turn_detector = "ready"
+        h.voice.turn_p = [0.95, 0.95]
+        await held_call(h)
+        h.helper.caller_says_when(lambda: h.voice.heard == 1, speech(1.0))  # on again, inside the full pause
+        await h.quiet_after("Okay.")
+        assert h.host.turns == [whole]  # one turn: the two clips heard whole
+        first_s, joined_s = h.voice.heard_s
+        assert joined_s > first_s + 0.9
+        h.signal.remote_hangup()
+        await h.until(lambda: h.host.ended == 1)
+    assert "calls: early end held (goes on); the caller went on" in log_lines(caplog)
+    line = end_line(caplog)
+    assert ": 1 turn, 1 ended early (sure 1, probably 0);" in line  # the held end is no turn of its own
+    assert "; went on 1 (sure 1, probably 0, speech 0), caught by the hold 1, cut off 0 (" in line
+    assert "; held 1 (goes on 1, ends the call 0);" in line
+
+
+async def test_a_hold_that_hears_nothing_keeps_the_turn(caplog: pytest.LogCaptureFixture) -> None:
+    calls_logs(caplog)
+    async with Harness(["I want to call,"], [Turn("Who?")], **EARLY) as h:
+        h.voice.detector = h.voice.turn_detector = "ready"
+        h.voice.turn_p = [0.95]
+        await held_call(h)
+        await h.quiet_after("Who?")
+        assert h.host.turns == ["I want to call,"] and h.voice.heard == 1
+    assert "calls: early end held (goes on); the turn stands" in log_lines(caplog)
+
+
+@pytest.mark.parametrize(
+    ("said", "p", "pause"),
+    [
+        ("What time is it?", 0.95, "speech"),  # finished words: they stand
+        ("Okay, I have to go", 0.2, "loudness"),  # a full pause was waited out already
+        ("I want to call,", 0.2, "loudness"),
+    ],
+)
+async def test_finished_texts_and_full_pause_turns_are_not_held(
+    caplog: pytest.LogCaptureFixture, said: str, p: float, pause: str
+) -> None:
+    calls_logs(caplog)
+    async with Harness([said], [Turn("Sure.")], **EARLY | {"pause": pause}) as h:
+        h.voice.detector = h.voice.turn_detector = "ready"
+        h.voice.turn_p = [p]
+        await held_call(h)
+        await h.quiet_after("Sure.")
+        h.signal.remote_hangup()
+        await h.until(lambda: h.host.ended == 1)
+    assert not [line for line in log_lines(caplog) if line.startswith("calls: early end held")]
+    assert "; held 0 (goes on 0, ends the call 0);" in end_line(caplog)
+
+
+@pytest.mark.parametrize(
+    ("text", "code", "open_"),
+    [
+        ("I want to call,", "en", True),
+        ("I want to call, ", "en", True),
+        ('He said "and then…"', "en", True),  # a closing quote after it
+        ("Then we go to", "en", True),
+        ("Nice, but", "en", True),
+        ("So, uh", "en", True),
+        ("Dan gaan we naar", "nl", True),
+        ("Schön, aber", "de", True),
+        ("電話したいけど、", "ja", True),
+        ("いいね、でも", "ja", True),
+        ("What time is it?", "en", False),
+        ("I want to call my mother.", "en", False),
+        ("Butter.", "en", False),  # a word that starts like one is not one
+        ("Het is mooi.", "nl", False),
+        ("", "en", False),
+    ],
+)
+def test_goes_on_reads_the_end_of_the_words(text: str, code: str, open_: bool) -> None:
+    assert goes_on(text, code) is open_
+
+
+async def test_a_hold_never_joins_past_120_s_of_audio(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls_logs(caplog)
+    monkeypatch.setattr(calls, "HOLD_MAX_S", 1.5)  # the first clip (1 s and its edges) leaves no room
+    async with Harness(["I want to call,"], [Turn("Who?")], **EARLY) as h:
+        h.voice.detector = h.voice.turn_detector = "ready"
+        h.voice.turn_p = [0.95]
+        await held_call(h)
+        await h.quiet_after("Who?")
+    assert not [line for line in log_lines(caplog) if line.startswith("calls: early end held")]
+
+
+async def test_status_shows_the_turn_detector() -> None:
+    """/status names each detector that something on calls waits for: the speech detector with only speech or no
+    speech, the turn detector with early end."""
+    async with Harness(**EARLY) as h:  # any sound stops her, no speech keeps a turn open, early end on
+        h.voice.detector, h.voice.turn_detector = "ready", "loading"
+        assert await h.manager.detectors() == ("ready", "loading")
+        assert await h.manager.detector() == "ready"  # the pause waits for it too
+        line = h.manager.status_line(detector="ready", turn="loading")
+        assert line == "Calls: ready · speech detector: ready · turn detector: loading"
+        h.voice.turn_detector = None
+        assert await h.manager.detectors() == ("ready", "old voice service")
+    async with Harness(**EARLY | {"early_end": False, "pause": "loudness"}) as h:
+        h.voice.detector = h.voice.turn_detector = "ready"
+        assert await h.manager.detectors() == ("", "")  # nothing waits for either: nothing to show
+        assert h.manager.status_line() == "Calls: ready"

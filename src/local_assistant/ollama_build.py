@@ -521,6 +521,78 @@ def login_profile(home: Path, shell: str) -> Path:
     return home / (".bash_profile" if shell.endswith("/bash") else ".zprofile")
 
 
+# Gemma 4's prompts in Ollama 0.40.4 (server/renderer_resolution.go, model/renderers/renderer.go): "gemma4-large" is
+# Google's prompt for 12B and larger, which ends with an empty thought block when thinking is off ("suppressing ghost
+# thought channels"); "gemma4-small" is the one for E2B and E4B, without it. A model whose RENDERER is the plain
+# "gemma4" gets one by its name (e2b, e4b: small; 12b, 26b, 31b: large), else by its model type (none for an MLX
+# build), else small: so the alias local-worker, which names no size, got the small one (empty answers, 17 Oct).
+LARGE_PROMPT = "gemma4-large"
+_SMALL_PROMPTS = ("gemma4", "gemma4-small")
+_SMALL_SIZES = ("e2b", "e4b")
+_LARGE_SIZES = ("12b", "26b", "31b")
+LARGE_MIN_PARAMETERS = 12_000_000_000  # Ollama's line between the two (gemma4LargeMinParameterCount)
+
+
+def large_gemma4(tag: str) -> bool:
+    """A Gemma 4 tag of 12B or more, by its name as Ollama tells the sizes apart: its alias gets LARGE_PROMPT. A small
+    model's tag (E2B, E4B) and any other family: False (Ollama's own pick stays)."""
+    lower = tag.lower()
+    if not lower.startswith("gemma4:") or any(size in lower for size in _SMALL_SIZES):
+        return False
+    return any(size in lower for size in _LARGE_SIZES)
+
+
+def _parameters(text: str) -> int | None:
+    """Ollama's human parameter count ("26.2B", "12B", "800M") as a number; None when it is not one."""
+    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([KMB])\s*", text, re.IGNORECASE)
+    if match is None:
+        return None
+    return int(float(match.group(1)) * {"K": 1e3, "M": 1e6, "B": 1e9}[match.group(2).upper()])
+
+
+def renderer_line(modelfile: str) -> str:
+    """The RENDERER line's value in a model's Modelfile as /api/show writes it back ("" when it has none)."""
+    for line in modelfile.splitlines():
+        command, _, value = line.strip().partition(" ")
+        if command.upper() == "RENDERER":
+            return value.strip()
+    return ""
+
+
+def _size(shown: Mapping[str, Any]) -> int | None:
+    """The model's parameters from /api/show: its details' parameter_size (an MLX build's is read from its files),
+    else model_info's general.parameter_count; None when neither can be read."""
+    details = shown.get("details")
+    size = _parameters(str(details.get("parameter_size") or "")) if isinstance(details, Mapping) else None
+    info = shown.get("model_info")
+    count = info.get("general.parameter_count") if isinstance(info, Mapping) else None
+    if size is None and isinstance(count, int) and not isinstance(count, bool):
+        size = count
+    return size
+
+
+def gets_small_prompt(name: str, shown: Mapping[str, Any], listed: Mapping[str, Any] | None = None) -> bool:
+    """A Gemma 4 model of 12B or more that Ollama gives the prompt meant for the small models, read from its
+    /api/show answer (`shown`: the RENDERER line of its Modelfile, its size) and its /api/tags entry (`listed`: its
+    parameter_size there is the model type Ollama's rule reads; an MLX build has none). Ollama 0.40.4's rule for the
+    plain "gemma4": the name (e2b, e4b first), then the model type, else small. False for LARGE_PROMPT, any other
+    renderer, a smaller model, or a size that cannot be read."""
+    renderer = renderer_line(str(shown.get("modelfile") or ""))
+    size = _size(shown)
+    if renderer not in _SMALL_PROMPTS or size is None or size < LARGE_MIN_PARAMETERS:
+        return False
+    if renderer == "gemma4-small":
+        return True
+    lower = name.lower()
+    if any(hint in lower for hint in _SMALL_SIZES):
+        return True
+    if any(hint in lower for hint in _LARGE_SIZES):
+        return False
+    details = listed.get("details") if isinstance(listed, Mapping) else None
+    model_type = _parameters(str(details.get("parameter_size") or "")) if isinstance(details, Mapping) else None
+    return model_type is None or model_type < LARGE_MIN_PARAMETERS
+
+
 def non_mlx_source(model: str, entry: Mapping[str, Any] | None) -> str | None:
     """What a Gemma 4 model is made from when it is not one of the MLX builds setup installs (the tag, or "a llama.cpp
     (GGUF) build of Gemma 4"); None when it is one, is another family, or cannot be told from Ollama's list. A bare

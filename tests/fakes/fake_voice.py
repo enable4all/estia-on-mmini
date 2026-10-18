@@ -2,7 +2,8 @@
 contract: `?language=<code>` on a transcription, a "language" field on speech, "en" without either, 400 for a code
 outside the 11; the health lists "languages" only when a test sets them (an older service has none). The speech
 detector (`POST /vad?stream=<id>`, 4096 samples of 16 kHz audio) answers with `speech_probability`; the health says
-"vad" only when a test sets it (an older service has no detector)."""
+"vad" only when a test sets it (an older service has no detector). The turn detector (`POST /turn`, at most 8 s of 16 kHz
+audio, no query) answers `turn_p` with the contract's refusals; the health says "turn" only when a test sets it."""
 
 from __future__ import annotations
 
@@ -36,6 +37,7 @@ def wav(seconds: float = 0.3, rate: int = 16_000) -> bytes:
 
 
 VAD_CHUNK_BYTES = 8192  # 4096 samples of 16 kHz mono int16
+TURN_MAX_BYTES = 256_000  # 8 s of 16 kHz mono int16: Smart Turn's whole window
 
 
 def speech_probability(pcm16k: bytes) -> float:
@@ -64,6 +66,10 @@ class FakeVoiceService:
         self.vad: str | None = None  # the detector's state in the health once set ("ready", "loading", ...)
         self.vad_delay = 0.0  # seconds before /vad answers (a slow service)
         self.vad_answer: bytes | None = None  # a /vad body to send instead of the probability
+        self.turn: str | None = None  # the turn detector's state in the health once set ("ready", "loading", ...)
+        self.turn_p = 0.9  # how sure Smart Turn's stand-in is that the sentence is finished
+        self.turn_delay = 0.0  # seconds before /turn answers (a slow service)
+        self.turn_answer: bytes | None = None  # a /turn body to send instead of the probability
         self.status: dict[str, int] = {}  # path → status to answer with instead
         self.requests: list[tuple[str, str, dict[str, str], bytes]] = []  # method, path (with query), headers, body
         self.request_languages: list[str] = []  # per transcription or speech request
@@ -103,9 +109,14 @@ class FakeVoiceService:
                 elif path == "/health":
                     listed = {"languages": service.languages} if service.languages is not None else {}
                     detector = {"vad": service.vad} if service.vad is not None else {}
-                    self._answer(200, json.dumps(service.health | listed | detector).encode())
+                    turn = {"turn": service.turn} if service.turn is not None else {}
+                    self._answer(200, json.dumps(service.health | listed | detector | turn).encode())
                 elif path == "/vad":
                     self._vad(query, body)
+                elif path == "/turn" and self.command != "POST":
+                    self._answer(405, b'{"error":"method_not_allowed"}')
+                elif path == "/turn":
+                    self._turn(body)
                 elif path.startswith("/v1/audio/") and language not in CODES:
                     self._answer(400, json.dumps({"error": f"unsupported language: {language}"}).encode())
                 elif path == "/v1/audio/transcriptions":
@@ -128,6 +139,18 @@ class FakeVoiceService:
                     time.sleep(service.vad_delay)
                     answer = service.vad_answer or json.dumps({"p": speech_probability(body)}).encode()
                     self._answer(200, answer)
+
+            def _turn(self, body: bytes) -> None:
+                if service.turn is None:
+                    self._answer(404, b'{"error":"not_found"}')  # an older service
+                elif not body or len(body) % 2 or len(body) > TURN_MAX_BYTES:
+                    self._answer(400, b'{"error":"bad_window"}')  # before the state, as voice-service's Server.turn
+                elif service.turn != "ready":
+                    error = "not_ready" if service.turn == "loading" else "unavailable"
+                    self._answer(503, json.dumps({"error": error}).encode())
+                else:
+                    time.sleep(service.turn_delay)
+                    self._answer(200, service.turn_answer or json.dumps({"p": service.turn_p}).encode())
 
             do_GET = _handle
             do_POST = _handle

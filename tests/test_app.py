@@ -3,6 +3,7 @@ import contextlib
 import dataclasses
 import hashlib
 import json
+import logging
 import os
 import re
 import stat
@@ -87,10 +88,12 @@ async def start(
     welcome: bool = False,
     model_pin: ModelPin | None = None,
     security_level: Callable[[], str | None] | None = None,
+    warm_up: bool | None = None,
     **settings: Any,
 ) -> Harness:
     """The bridge on a fake signal-cli. Its store has had the welcome (a fresh install's first message) unless
-    `welcome`; starting again on the same tmp_path is a restart."""
+    `welcome`; starting again on the same tmp_path is a restart. `warm_up`: a call's model warm-up (App's; with a
+    scripted Gemma none unless a test asks)."""
     folder = tmp_path / "signal"
     (folder / "attachments").mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("FAKE_SIGNAL_DIR", str(folder))
@@ -120,6 +123,7 @@ async def start(
         clock=clock,
         model_pin=model_pin,
         security_level=security_level,
+        warm_up=warm_up,
     )
     task = asyncio.create_task(app.run())
     await until(lambda: signal.ready)
@@ -1456,12 +1460,13 @@ async def test_the_speech_rule_reaches_the_calls_and_status_shows_its_detector(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     with FakeVoiceService() as service:
-        service.vad = "ready"
+        service.vad, service.turn = "ready", "ready"
         settings = call_settings(tmp_path) | {"voice_url": service.url, "calls_barge": "speech"}
         harness = await start(tmp_path, monkeypatch, FakeGemma(), **settings)
         try:
             assert harness.app.calls is not None and harness.app.calls.settings.barge == "speech"
-            assert "Calls: ready · speech detector: ready" in await harness.app._status_lines()
+            lines = await harness.app._status_lines()
+            assert "Calls: ready · speech detector: ready · turn detector: ready" in lines
         finally:
             await stop(harness)
 
@@ -1530,8 +1535,32 @@ async def test_without_calls_there_is_no_voice_ready_note(tmp_path: Path, monkey
         await stop(harness)
 
 
+@pytest.mark.parametrize(
+    ("chosen", "settings"),
+    [
+        ({}, (True, 0.6, "speech")),  # the owner's defaults, 17 Oct
+        ({"calls_early_end": False, "calls_early_end_pause_seconds": 0.9, "calls_pause": "loudness"}, (False, 0.9, "loudness")),
+    ],
+)  # fmt: skip
+async def test_the_early_end_settings_reach_the_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, chosen: dict[str, Any], settings: tuple[bool, float, str]
+) -> None:
+    harness = await start(tmp_path, monkeypatch, FakeGemma(), **call_settings(tmp_path) | chosen)
+    try:
+        calls = harness.app.calls
+        assert calls is not None
+        assert (calls.settings.early_end, calls.settings.early_end_pause_s, calls.settings.pause) == settings
+    finally:
+        await stop(harness)
+
+
 async def test_with_loudness_status_shows_no_speech_detector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    settings = call_settings(tmp_path) | {"calls_barge": "loudness"}  # interrupt = "any sound"
+    # interrupt = "any sound", pause = "quiet", early_end = false
+    settings = call_settings(tmp_path) | {
+        "calls_barge": "loudness",
+        "calls_pause": "loudness",
+        "calls_early_end": False,
+    }
     harness = await start(tmp_path, monkeypatch, FakeGemma(), **settings)
     try:
         assert harness.app.calls is not None and harness.app.calls.settings.barge == "loudness"
@@ -1553,8 +1582,8 @@ async def test_with_calls_texts_wait_during_a_call(tmp_path: Path, monkeypatch: 
         app.call_ended()
         await until(lambda: sent(harness.folder) == ["Hi."])
         assert not app._is_busy()
-        lines = await app._status_lines()  # only speech, the default: the line names the speech detector's state
-        assert "Calls: ready · speech detector: not ready" in lines
+        lines = await app._status_lines()  # the defaults: the line names both detectors' states
+        assert "Calls: ready · speech detector: not ready · turn detector: not ready" in lines
     finally:
         await stop(harness)
 
@@ -1969,6 +1998,285 @@ async def test_a_slow_calendar_never_holds_up_the_first_answer(tmp_path: Path, m
         assert gemma.calls[1]["messages"][0]["content"].endswith(glance)  # from the turn it is ready
         app.call_ended()
         assert app._glance is None  # the next call counts again
+    finally:
+        await stop(harness)
+
+
+# the model's warm-up when a call starts (owner, 17 Oct): Gemma loads and reads the first turn's request up to the
+# caller's words, so that turn finds the prefix in Ollama's cache (live, 17 Oct: a cold load and a miss over 16,855
+# tokens cost the first answer 19.5 s)
+
+
+def warm_lines(caplog: pytest.LogCaptureFixture) -> list[tuple[int, str]]:
+    return [
+        (r.levelno, r.getMessage()) for r in caplog.records if "warm" in r.getMessage() and "calls:" in r.getMessage()
+    ]
+
+
+def same_options(first: dict[str, Any], second: dict[str, Any]) -> bool:
+    """Two requests ask Gemma the same way, apart from their input and length."""
+    skip = ("messages", "max_tokens")
+    return {k: v for k, v in first.items() if k not in skip} == {k: v for k, v in second.items() if k not in skip}
+
+
+async def test_a_calls_warm_up_is_its_first_turns_request_up_to_the_callers_words(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The proof that Ollama keeps the prefix: the warm-up's input is the first turn's without its new message (the
+    same builder, the same order), with the same tools and options, built after the same waits (the glance's
+    calendar), asking for one token."""
+    caplog.set_level(logging.INFO, logger="local_assistant")
+    gemma = FakeGemma(text("Hi!"), Completion("", prompt_tokens=16_855), text("Three things today. Want the rundown?"))
+    harness = await start(
+        tmp_path,
+        monkeypatch,
+        gemma,
+        prepare=glance_mail,
+        clock=glance_clock(),
+        warm_up=True,
+        **glance_settings(tmp_path),
+    )
+    try:
+        app, folder = harness.app, harness.folder
+        deliver(folder, "hello", T0)
+        await until(lambda: "Hi!" in sent(folder))  # (the mail's sign-in note may come too)
+        app.call_started(ME)
+        await app.call_warm_up(ME)
+        await app.call_turn(ME, "what's on today?", lambda: None)
+        _, warm, first = gemma.calls
+        assert warm["messages"] == first["messages"][:-1]
+        assert [m["role"] for m in first["messages"]] == ["system", "user", "assistant", "user"]
+        assert first["messages"][-1]["content"].endswith("[call] what's on today?")
+        glance = prompts.call_glance(GLANCE_LINES.split("\n"), at="13:10", calendar=True, mail=True)
+        assert warm["messages"][0]["content"].endswith(glance)  # the calendar was read in time: its line is there
+        assert warm["tools"] == first["tools"] and warm["tools"] and same_options(warm, first)
+        assert (warm["max_tokens"], first["max_tokens"]) == (1, CALL_MAX_TOKENS)
+        [(level, line)] = warm_lines(caplog)
+        assert level == logging.INFO and re.fullmatch(
+            r"calls: model warmed up in \d+\.\d s \(prompt 16,855 tokens\)", line
+        )
+        app.call_ended()
+    finally:
+        await stop(harness)
+
+
+async def test_a_practice_calls_warm_up_is_its_practice_request_up_to_the_callers_words(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gemma = FakeGemma(Completion(""), text("Leuk! Waar werk je?"))
+    harness = await start(tmp_path, monkeypatch, gemma, warm_up=True, **call_settings(tmp_path))
+    try:
+        folder, app = harness.folder, harness.app
+        deliver(folder, "/babble nl", T0)
+        await until(lambda: len(sent(folder)) == 1)
+        session = app.babble.running(ME)
+        assert session is not None
+        app.call_started(ME, practice=True)
+        await app.call_warm_up(ME, practice=True)
+        await app.call_turn(ME, "Ik woon in Utrecht.", lambda: None, practice=True)
+        warm, first = gemma.calls
+        assert warm["messages"] == first["messages"][:-1] and same_options(warm, first)
+        conversation = app.store.conversation(session.conversation_id)
+        rules = app.babble.turn(spoken=True).rules
+        assert warm["messages"] == [
+            {"role": "system", "content": app.context.system_prompt(conversation, rules, call=True)}
+        ]  # the practice rules, in the practice conversation
+        assert warm["tools"] is None and warm["max_tokens"] == 1
+        app.call_ended()
+    finally:
+        await stop(harness)
+
+
+async def test_only_ollama_itself_gets_a_warm_up_never_a_scripted_gemma(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="local_assistant")
+    harness = await start(tmp_path, monkeypatch, FakeGemma(), **call_settings(tmp_path))
+    try:
+        harness.app.call_started(ME)
+        await harness.app.call_warm_up(ME)
+        assert harness.gemma.calls == [] and warm_lines(caplog) == []  # the tests' scripts keep their order
+        harness.app.call_ended()
+    finally:
+        await stop(harness)
+    cfg = Config(
+        bot_number="+306900000000",
+        allowed_acis=frozenset({ME}),
+        data_dir=tmp_path / "ollama" / "data",
+        log_dir=tmp_path / "ollama" / "logs",
+        **call_settings(tmp_path),
+    )
+    store = Store.open(cfg.db_path)
+    signal = SignalClient([sys.executable, str(FAKE)], cfg.allowed_acis)
+    app = App(cfg, store, signal, OllamaGemma(closed_port_url(), cfg.model, unreachable_seconds=0), Fetcher())
+    try:
+        app.call_started(ME)
+        await app.call_warm_up(ME)  # Ollama itself is asked (nothing listens on this port)
+        assert warm_lines(caplog) == [(logging.WARNING, "calls: model warm-up failed (GemmaUnavailableError)")]
+        app.call_ended()
+    finally:
+        store.close()
+
+
+async def test_a_failed_or_slow_warm_up_is_one_warning_with_its_kind_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="local_assistant")
+    monkeypatch.setattr(app_module, "WARM_UP_SECONDS", 0.2)
+    never: asyncio.Future[Completion] = asyncio.get_running_loop().create_future()
+    gemma = FakeGemma(GemmaUnavailableError("Ollama unreachable for 120 s (a private detail)"), never)
+    harness = await start(tmp_path, monkeypatch, gemma, warm_up=True, **call_settings(tmp_path))
+    try:
+        app = harness.app
+        app.call_started(ME)
+        await app.call_warm_up(ME)
+        await app.call_warm_up(ME)  # the next one never answers: cut off at WARM_UP_SECONDS
+        assert warm_lines(caplog) == [
+            (logging.WARNING, "calls: model warm-up failed (GemmaUnavailableError)"),
+            (logging.WARNING, "calls: model warm-up failed (timeout)"),
+        ]
+        assert "private detail" not in caplog.text
+        app.call_ended()
+    finally:
+        await stop(harness)
+
+
+async def test_a_warm_up_still_reading_never_holds_up_the_first_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Ollama itself runs one request at a time: the turn's waits behind the warm-up there, then finds its prefix
+    read; the bridge never holds the turn back for it."""
+    caplog.set_level(logging.INFO, logger="local_assistant")
+    reading: asyncio.Future[Completion] = asyncio.get_running_loop().create_future()
+    gemma = FakeGemma(reading, text("Hi."))
+    harness = await start(tmp_path, monkeypatch, gemma, warm_up=True, **call_settings(tmp_path))
+    try:
+        app = harness.app
+        app.call_started(ME)
+        warming = asyncio.create_task(app.call_warm_up(ME))
+        await until(lambda: len(gemma.calls) == 1)
+        turn = await app.call_turn(ME, "hi", lambda: None)
+        assert turn.text == "Hi." and not warming.done()
+        reading.set_result(Completion("", prompt_tokens=900))
+        await warming
+        [(_, line)] = warm_lines(caplog)
+        assert line.startswith("calls: model warmed up in ") and line.endswith(" s (prompt 900 tokens)")
+        app.call_ended()
+    finally:
+        await stop(harness)
+
+
+async def test_a_warm_up_waits_for_a_text_being_answered_and_reads_nothing_once_the_call_ended_or_locked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gemma = FakeGemma(Completion(""))
+    harness = await start(tmp_path, monkeypatch, gemma, warm_up=True, **call_settings(tmp_path))
+    try:
+        app, folder = harness.app, harness.folder
+        app.call_started(ME)
+        app._worker_idle.clear()  # a text is being answered: its reply belongs in the turn's history
+        warming = asyncio.create_task(app.call_warm_up(ME))
+        await asyncio.sleep(0.1)
+        assert gemma.calls == []
+        app._worker_idle.set()
+        await warming
+        assert len(gemma.calls) == 1
+        app.call_ended()
+        await app.call_warm_up(ME)  # the call ended before it read anything
+        app.call_started(ME)
+        deliver(folder, "/lock", T0)
+        await until(lambda: app.guard.locked)
+        await app.call_warm_up(ME)  # /lock: Gemma is not asked
+        assert len(gemma.calls) == 1
+        app.call_ended()
+    finally:
+        await stop(harness)
+
+
+async def test_an_ended_calls_warm_up_never_reads_during_the_next_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review, 17 Oct: a text is being answered; call A rings and its warm-up waits for that text; A hangs up and call B
+    rings, with its own warm-up. Once the text is done, only B's reaches Gemma: A's checks its own call, not just that
+    some call is on."""
+    gemma = FakeGemma(Completion(""), Completion(""))
+    harness = await start(tmp_path, monkeypatch, gemma, warm_up=True, **call_settings(tmp_path))
+    try:
+        app = harness.app
+        app._worker_idle.clear()  # a text is being answered
+        app.call_started(ME)
+        first = asyncio.create_task(app.call_warm_up(ME))
+        await asyncio.sleep(0.05)
+        app.call_ended()
+        app.call_started(ME)
+        second = asyncio.create_task(app.call_warm_up(ME))
+        await asyncio.sleep(0.05)
+        app._worker_idle.set()
+        await asyncio.gather(first, second)
+        assert len(gemma.calls) == 1
+        app.call_ended()
+    finally:
+        await stop(harness)
+
+
+async def test_the_warm_up_waits_for_the_calendar_at_most_its_own_limit_and_leaves_the_first_turn_its_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A calendar slower than WARM_UP_GLANCE_SECONDS: the warm-up goes without its line after that long, and the first
+    turn still has its own wait (GLANCE_WAIT_SECONDS, from the turn). Here the calendar is not read by then either, so
+    both go without it and the prefix matches; one read between the two still changes the glance (a known gap)."""
+    monkeypatch.setattr(app_module, "WARM_UP_GLANCE_SECONDS", 0.3)
+    monkeypatch.setattr(app_module, "GLANCE_WAIT_SECONDS", 0.3)
+    gemma = FakeGemma(Completion(""), text("Hi."))
+    settings = glance_settings(tmp_path)
+    calendar = Path(settings["calendar_helper"][2])
+    calendar.write_text(json.dumps({"calendar": "Family", "events": GLANCE_DAY, "sleep": 4.0}))
+    harness = await start(
+        tmp_path, monkeypatch, gemma, prepare=glance_mail, clock=glance_clock(), warm_up=True, **settings
+    )
+    try:
+        app = harness.app
+        app.call_started(ME)
+        started = time.monotonic()
+        await app.call_warm_up(ME)
+        assert 0.25 <= time.monotonic() - started < 2.5  # its own limit, never the calendar's 4 s
+        started = time.monotonic()
+        await app.call_turn(ME, "hi", lambda: None)
+        assert time.monotonic() - started >= 0.25  # the turn's own wait, as before the warm-up
+        warm, first = gemma.calls
+        assert warm["messages"] == first["messages"][:-1]
+        assert "Calendar today" not in warm["messages"][0]["content"]
+        app.call_ended()
+    finally:
+        await stop(harness)
+
+
+async def test_a_calendar_slower_than_a_turns_wait_still_reaches_the_warm_up_and_the_whole_prefix_matches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review, 17 Oct: the calendar is read live from the call's start and may take some seconds; the first turn comes
+    some 20 s later and finds it read. The warm-up waits for it longer than a turn does (WARM_UP_GLANCE_SECONDS), so
+    its glance is that turn's: else the system prompt differs at the glance, and Ollama reads the tools and the whole
+    history again (6-8 s)."""
+    monkeypatch.setattr(app_module, "GLANCE_WAIT_SECONDS", 0.2)
+    gemma = FakeGemma(Completion(""), text("Hi."))
+    settings = glance_settings(tmp_path)
+    calendar = Path(settings["calendar_helper"][2])
+    calendar.write_text(json.dumps({"calendar": "Family", "events": GLANCE_DAY, "sleep": 1.0}))
+    harness = await start(
+        tmp_path, monkeypatch, gemma, prepare=glance_mail, clock=glance_clock(), warm_up=True, **settings
+    )
+    try:
+        app = harness.app
+        app.call_started(ME)
+        await app.call_warm_up(ME)
+        await until(lambda: app._glance is not None and app._glance.calendar_done(), limit=5)  # the caller talks
+        await app.call_turn(ME, "hi", lambda: None)
+        warm, first = gemma.calls
+        assert warm["messages"] == first["messages"][:-1]
+        glance = prompts.call_glance(GLANCE_LINES.split("\n"), at="13:10", calendar=True, mail=True)
+        assert warm["messages"][0]["content"].endswith(glance)
+        app.call_ended()
     finally:
         await stop(harness)
 
@@ -3884,6 +4192,39 @@ async def test_babble_typed_during_a_call_waits_for_its_end(tmp_path: Path, monk
         app.call_ended()
         await until(lambda: len(sent(harness.folder)) == 1)
         assert app.babble.running(ME) is not None
+    finally:
+        await stop(harness)
+
+
+async def test_a_call_turn_passes_the_retry_word_to_the_brain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty first try on a call: the call is told before the retry (it says an acknowledgement meanwhile)."""
+    gemma = FakeGemma(text(""), text("Two meetings tomorrow."))
+    harness = await start(tmp_path, monkeypatch, gemma, **call_settings(tmp_path))
+    try:
+        told: list[int] = []
+        turn = await harness.app.call_turn(
+            ME, "what's on tomorrow", lambda: None, on_retry=lambda: told.append(len(gemma.calls))
+        )
+        assert turn.text == "Two meetings tomorrow." and told == [1]
+        assert harness.app.brain._language() == harness.app.language  # the log's language code is hers
+    finally:
+        await stop(harness)
+
+
+async def test_a_practice_call_turn_passes_the_retry_word_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    gemma = FakeGemma(text(""), text("Leuk! Waar werk je?"))
+    harness = await start(tmp_path, monkeypatch, gemma, **call_settings(tmp_path))
+    try:
+        folder, app = harness.folder, harness.app
+        deliver(folder, "/babble nl", T0)
+        await until(lambda: len(sent(folder)) == 1)
+        app.call_started(ME)
+        told: list[int] = []
+        turn = await app.call_turn(
+            ME, "Ik woon in Utrecht.", lambda: None, practice=True, on_retry=lambda: told.append(len(gemma.calls))
+        )
+        assert turn.text == "Leuk! Waar werk je?" and told == [1]
+        app.call_ended()
     finally:
         await stop(harness)
 

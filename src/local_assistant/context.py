@@ -245,6 +245,7 @@ class ContextBuilder:
         glance: str = "",
         call: bool = False,
         notes: bool = True,
+        newest: bool = True,
     ) -> list[dict[str, Any]]:
         """System prompt, then the conversation. Earlier tool calls are replayed after the message that caused
         them: without them Gemma saw "remember X" → "Noted: X" and learned it could skip the remember call.
@@ -253,16 +254,20 @@ class ContextBuilder:
         only (a practice turn); the style and the profile stay below them. `glance`: a call's counts at its start.
         `call`: a call's turn (its rules without the list of what she can do). `notes`: her notes that may matter
         for the newest message come in it, before its words (the profile's second part, owner 16 Oct), so everything
-        before it stays the same from one message to the next; off for a practice turn."""
+        before it stays the same from one message to the next; off for a practice turn. `newest`: the window ends with
+        the message being answered; False for the input before the next message is stored (a call's warm-up): every
+        message comes as it will once that one is (no year, no notes), so the next answer's input is this one and the
+        new message."""
         system = self.system_prompt(conversation, rules, glance, call=call)
         built: list[dict[str, Any]] = [{"role": "system", "content": system}]
         window = self.window(conversation)
         # the message being answered: the last of the user's in the window's order (a text held during a call is stored
-        # first, a lower id, and gets its place only when answered), not the highest id
-        newest = next((message.id for message in reversed(window) if message.direction == "in"), None)
+        # first, a lower id, and gets its place only when answered), not the highest id; none before it is stored
+        found = (message.id for message in reversed(window) if message.direction == "in")
+        answered = next(found, None) if newest else None
         for message in window:
-            chat = self.to_chat(message, (images or {}).get(message.id, ()), newest=message.id == newest)
-            if notes and message.id == newest:
+            chat = self.to_chat(message, (images or {}).get(message.id, ()), newest=message.id == answered)
+            if notes and message.id == answered:
                 chat = _with_notes(chat, self._profile.notes_block(message.text))
             built.append(chat)
             if message.direction == "in":

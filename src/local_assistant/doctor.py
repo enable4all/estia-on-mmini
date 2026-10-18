@@ -147,6 +147,16 @@ class Probe:
         with opener.open(url, timeout=3) as response:
             return json.loads(response.read(1_000_000))
 
+    def post_json(self, url: str, payload: dict[str, Any]) -> Any:
+        """POST a JSON question to a local service that only reads (Ollama's /api/show has no GET), and its JSON
+        answer (OSError or ValueError when it does not answer properly)."""
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        request = urllib.request.Request(
+            url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, method="POST"
+        )
+        with opener.open(request, timeout=3) as response:
+            return json.loads(response.read(1_000_000))
+
     def security_checks(self, home: Path, bot_number: str) -> list[Check]:
         """The Mac's checks around her (read-only, fixed tools, nothing applied; `home`: hers)."""
         host = hostsec.Host(hostsec.estia_root(), say=lambda _line: None)
@@ -323,7 +333,12 @@ def run(config_path: Path, probe: Probe) -> list[Finding]:
         _model(cfg, models, probe),
         *[
             line
-            for line in (_ollama_build(cfg, probe), _ollama_service(), _model_build(cfg, models))
+            for line in (
+                _ollama_build(cfg, probe),
+                _ollama_service(),
+                _model_build(cfg, models),
+                _model_prompt(cfg, models, probe, own=own),
+            )
             if line is not None
         ],
         _model_pin(cfg, models, config_path if own else None),
@@ -672,6 +687,28 @@ def _model_build(cfg: Config, models: list[dict[str, Any]] | None) -> Finding | 
     return Finding("warn", "Model build", text, prompts.model_build_fix(cfg.model, **tags))
 
 
+def _model_prompt(cfg: Config, models: list[dict[str, Any]] | None, probe: Probe, *, own: bool) -> Finding | None:
+    """Her model when it is Gemma 4 of 12B or more and Ollama gives it the prompt meant for the small models (an alias
+    made before 0.9.3: Ollama tells the sizes apart by the name, which local-worker does not have; empty answers, 17
+    Oct): ! with the step that makes it again. Read-only: its Modelfile and size from /api/show, metadata only. Nothing
+    when the model is not listed, Ollama does not show it, or it has Google's prompt for its size."""
+    wanted = cfg.model if ":" in cfg.model else f"{cfg.model}:latest"
+    listed = next((item for item in models or [] if item.get("name") == wanted), None)
+    if listed is None:
+        return None
+    try:
+        shown = probe.post_json(f"{_ollama(cfg)}/api/show", {"model": cfg.model})
+    except (OSError, ValueError):
+        return None
+    if not isinstance(shown, dict) or not ollama_build.gets_small_prompt(cfg.model, shown, listed):
+        return None
+    if cfg.model.removesuffix(":latest") == "local-worker":  # the same alias with its tag
+        fix = prompts.DOCTOR_MODEL_PROMPT_FIX_HERS if own else prompts.DOCTOR_MODEL_PROMPT_FIX
+    else:
+        fix = prompts.DOCTOR_MODEL_PROMPT_OTHER_FIX.format(model=cfg.model)
+    return Finding("warn", "Model prompt", prompts.DOCTOR_MODEL_PROMPT.format(model=cfg.model), fix)
+
+
 def _signal_number(cfg: Config, probe: Probe) -> Finding:
     """The bot's number in signal-cli's list, and its own account file not saying the registration is unfinished:
     signal-cli lists a number as soon as register starts, before the SMS code (an unreadable file changes nothing)."""
@@ -921,23 +958,69 @@ def _interrupt_wording(cfg: Config) -> list[Finding]:
     return found
 
 
-def _speech_detector(cfg: Config, probe: Probe) -> Finding:
-    """With [calls] interrupt = "only speech" (the default): whether the voice service's speech detector is ready (else
-    any sound stops her on calls meanwhile)."""
+def _detector_health(cfg: Config, probe: Probe, part: str) -> str:
+    """A detector's state from the voice service's health (voice.detector_state: "vad" or "turn")."""
     try:
         health = probe.get_json(f"{cfg.voice_url.rstrip('/')}/health")
     except (OSError, ValueError):
         health = None
-    state = detector_state(health if isinstance(health, dict) else None)
+    return detector_state(health if isinstance(health, dict) else None, part=part)
+
+
+def _voice_log(probe: Probe) -> str:
+    return f"{ownuser.ESTIA} logs voice" if probe.moved() else prompts.DOCTOR_VOICE_LOG  # her output: /var/log/estia
+
+
+def _unavailable_fix(probe: Probe, fix: str, folder: str) -> str:
+    """A detector's fix when its model is unavailable: the log says why, the voice service started again tries a failed
+    download again (her wrapper in her own user, else its install script), and the model's `folder` to delete when
+    the files are wrong (hers in her own user, which needs admin rights; the review of 17 Oct, I4)."""
+    own = probe.moved()
+    restart = prompts.DOCTOR_VOICE_RESTART_OWN.format(estia=ownuser.ESTIA) if own else prompts.DOCTOR_VOICE_REINSTALL
+    home = str(ownuser.HOME) if own else "~"
+    return fix.format(
+        log=_voice_log(probe),
+        restart=restart,
+        folder=prompts.DOCTOR_VOICE_MODELS.format(home=home, folder=folder),
+        rights=prompts.DOCTOR_ADMIN if own else "",
+    )
+
+
+def _speech_detector(cfg: Config, probe: Probe) -> Finding:
+    """With [calls] interrupt = "only speech" or pause = "no speech" (both the default): whether the voice service's
+    speech detector is ready (else, on calls meanwhile, any sound stops her or keeps a turn open, as the line says)."""
+    state = _detector_health(cfg, probe, "vad")
     if state == "ready":
         return Finding("ok", "Speech detector", "ready")
-    log = f"{ownuser.ESTIA} logs voice" if probe.moved() else prompts.DOCTOR_VOICE_LOG  # her output: /var/log/estia
+    falls = prompts.DOCTOR_DETECTOR_FALLS[(cfg.calls_barge == "speech", cfg.calls_pause == "speech")]
+    log = _voice_log(probe)
     text, fix = {
         "old voice service": (prompts.DOCTOR_DETECTOR_OLD, prompts.DOCTOR_VOICE_REINSTALL),
         "loading": (prompts.DOCTOR_DETECTOR_LOADING, prompts.DOCTOR_DETECTOR_LOADING_FIX.format(log=log)),
-        "unavailable": (prompts.DOCTOR_DETECTOR_UNAVAILABLE, prompts.DOCTOR_DETECTOR_UNAVAILABLE_FIX.format(log=log)),
+        "unavailable": (
+            prompts.DOCTOR_DETECTOR_UNAVAILABLE,
+            _unavailable_fix(probe, prompts.DOCTOR_DETECTOR_UNAVAILABLE_FIX, "silero-vad"),
+        ),
     }.get(state, (prompts.DOCTOR_DETECTOR_SILENT, prompts.DOCTOR_VOICE_REINSTALL))
-    return Finding("warn", "Speech detector", text, fix)
+    return Finding("warn", "Speech detector", text.format(falls=falls), fix)
+
+
+def _turn_detector(cfg: Config, probe: Probe) -> Finding:
+    """With [calls] early_end on (the default): whether the voice service's turn detector (Smart Turn) is ready (else
+    every turn waits the full pause on calls meanwhile)."""
+    state = _detector_health(cfg, probe, "turn")
+    if state == "ready":
+        return Finding("ok", "Turn detector", "ready")
+    log = _voice_log(probe)
+    text, fix = {
+        "old voice service": (prompts.DOCTOR_TURN_OLD, prompts.DOCTOR_VOICE_REINSTALL),
+        "loading": (prompts.DOCTOR_TURN_LOADING, prompts.DOCTOR_TURN_LOADING_FIX.format(log=log)),
+        "unavailable": (
+            prompts.DOCTOR_TURN_UNAVAILABLE,
+            _unavailable_fix(probe, prompts.DOCTOR_TURN_UNAVAILABLE_FIX, "models/aufklarer"),
+        ),
+    }.get(state, (prompts.DOCTOR_TURN_SILENT, prompts.DOCTOR_VOICE_REINSTALL))
+    return Finding("warn", "Turn detector", text, fix)
 
 
 def _private_file(path: Path) -> bool:
@@ -1078,8 +1161,10 @@ def _optional_parts(cfg: Config, folder: Path, probe: Probe, states: _States) ->
                     + ("; set [calls] java_home" if "Java" in missing else ""),
                 )
             )
-        if cfg.calls_barge == "speech":
+        if cfg.calls_barge == "speech" or cfg.calls_pause == "speech":
             found.append(_speech_detector(cfg, probe))
+        if cfg.calls_early_end:
+            found.append(_turn_detector(cfg, probe))
         found += _interrupt_wording(cfg)
     if cfg.mail_enabled:
         tokens = TokenStore(cfg.mail_token_path)

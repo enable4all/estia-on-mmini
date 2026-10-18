@@ -555,6 +555,7 @@ def test_a_turn_carries_the_practice_rules_and_the_languages_fallback(store: Sto
     harness.babble.start(ME, "ja", "B1")
     turn = harness.babble.turn(spoken=True)
     assert (turn.rules, turn.fallback, turn.spoken) == ("PRACTICE RULES ja B1", prompts.PRACTICE_FALLBACK["ja"], True)
+    assert turn.language == "ja"  # the practised language, for the log's language code
     assert not harness.babble.turn(spoken=False).spoken
 
 

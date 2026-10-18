@@ -89,12 +89,12 @@ private func sine(_ hertz: Double, rate: Int, count: Int, amplitude: Float = 1) 
     }
 
     @Test func healthListsTheLanguages() throws {
-        let body = healthBody(stt: "ready", tts: "loading", vad: "unavailable")
+        let body = healthBody(stt: "ready", tts: "loading", vad: "unavailable", turn: "ready")
         #expect(body["stt"] as? String == "ready" && body["tts"] as? String == "loading")
         #expect(body["languages"] as? [String] == Languages.all)
-        // the speech detector's state is one more field; the others stay byte for byte as they were
+        // the speech and turn detectors' states are two more fields; the others stay byte for byte as they were
         let text = String(decoding: HTTP.json(200, body), as: UTF8.self)
-        #expect(text.hasSuffix(#"{"languages":["en","es","it","ko","pt","nl","pl","de","ja","ru","fr"],"stt":"ready","tts":"loading","vad":"unavailable"}"#))
+        #expect(text.hasSuffix(#"{"languages":["en","es","it","ko","pt","nl","pl","de","ja","ru","fr"],"stt":"ready","tts":"loading","turn":"ready","vad":"unavailable"}"#))
     }
 }
 
@@ -157,10 +157,10 @@ private func sine(_ hertz: Double, rate: Int, count: Int, amplitude: Float = 1) 
         }
     }
 
-    @Test func otherLanguagesKeepTheirDigits() throws {
-        // English number words inside a Dutch sentence would be read out wrong; Supertonic-3 reads digits itself
+    @Test func otherLanguagesSayNumbersInTheirOwnWords() throws {
+        // 0.9.3: Supertonic-3 misread Dutch digits (the audit); they are said in Dutch, never in English words
         let request = try SpeechRequest(json: raw(#"{"input": "Het kost 5 euro.\nDat is 20% minder, l\u2019heure.", "language": "nl"}"#))
-        #expect(request.spokenInput == "Het kost 5 euro. Dat is 20% minder, l'heure.")
+        #expect(request.spokenInput == "Het kost vijf euro. Dat is twintig procent minder, l'heure.")
     }
 
     @Test func numbersAreSpelledOut() {

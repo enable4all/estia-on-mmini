@@ -1,7 +1,8 @@
 // voice-service: local-assistant's ears and voice. WhisperKit (large-v3 turbo; its files pinned and checked at start,
 // see Whisper.swift) listens in the language the bridge names (one of eleven, never detected); FluidAudio speaks it:
-// Kokoro English, Supertonic-3 the other ten, both on the Neural Engine; and FluidAudio's Silero VAD tells speech in a
-// call's audio (`/vad`, for barge-in), on the CPU only. Served on 127.0.0.1:8150 for the bridge only. Logs hold
+// Kokoro English, Supertonic-3 the other ten, both on the Neural Engine; FluidAudio's Silero VAD tells speech in a
+// call's audio (`/vad`, for barge-in and the pause), and Smart Turn judges whether a caller's sentence sounds finished
+// (`/turn`, for early end of turn), both on the CPU only. Served on 127.0.0.1:8150 for the bridge only. Logs hold
 // metadata (sizes, durations, language, timings), never audio, transcripts or text.
 import AVFoundation
 import FluidAudio
@@ -56,7 +57,7 @@ func prepareEnglish(_ kokoro: some EnglishLexiconTaking) async {
 }
 
 /// Whisper and Kokoro, loaded and warmed once at start, then kept in memory; Supertonic-3 on first use; the
-/// speech detector at start too, on its own.
+/// speech and turn detectors at start too, each on its own.
 actor Engines {
     enum State: String { case loading, ready, failed }
 
@@ -68,6 +69,7 @@ actor Engines {
     private var kokoro: KokoroAneManager?
     private let supertonic = Supertonic()
     let detector: SpeechDetector
+    let turn: TurnDetector
     private let models: URL
     private let temp: URL
     private let serial = Serial()
@@ -76,6 +78,7 @@ actor Engines {
         self.models = models
         self.temp = temp
         detector = SpeechDetector(models: models)
+        turn = TurnDetector(models: models)
     }
 
     /// Loads both engines. Listening that fails exits the process, so launchd starts it again (KeepAlive), except
@@ -83,10 +86,12 @@ actor Engines {
     /// fails stays "failed" with the service up (listening and the detector work on) and is tried again in the
     /// process (`SpeakingRetry`: 1, 5 and 30 minutes, then every 30), never by a restart that reloads Whisper. The
     /// speech detector loads beside them, without waiting for Whisper's compile; when it fails it is only
-    /// "unavailable" (the bridge keeps its loudness rule), and the service stays up.
+    /// "unavailable" (the bridge keeps its loudness rule), and the service stays up. The turn detector the same way
+    /// (unavailable: the bridge waits the full pause).
     func load() async {
-        let detector = self.detector
+        let (detector, turn) = (self.detector, self.turn)
         Task { await detector.load() }
+        Task { await turn.load() }
         await loadWhisper()
         await loadKokoro()
         if stt == .failed && !sttRefused {
@@ -179,8 +184,9 @@ actor Engines {
         }
     }
 
-    func health() async -> [String: Any] {
-        healthBody(stt: stt.rawValue, tts: tts.rawValue, vad: await detector.state.rawValue)
+    /// The `/health` answer, every engine's and detector's state.
+    func health() async -> Data {
+        HTTP.json(200, healthBody(stt: stt.rawValue, tts: tts.rawValue, vad: await detector.state.rawValue, turn: await turn.state.rawValue))
     }
 
     /// Transcribes audio bytes of a sniffed kind in the given language; the file lives only for the call.
@@ -295,13 +301,15 @@ final class Server {
         let engines = self.engines
         switch Route(request.method, request.path) {
         case .health:
-            Task { self.send(nw, HTTP.json(200, await engines.health())) }
+            Task { self.send(nw, await engines.health()) }
         case .transcribe:
             Task { self.send(nw, await Self.transcribe(request.body, target: request.path, engines)) }
         case .speak:
             Task { self.send(nw, await Self.speak(request.body, engines)) }
         case .vad:
             Task { self.send(nw, await Self.vad(request.body, target: request.path, engines.detector)) }
+        case .turn:
+            Task { self.send(nw, await Self.turn(request.body, engines.turn)) }
         case .methodNotAllowed:
             send(nw, HTTP.json(405, ["error": "method_not_allowed"]))
         case .notFound:
@@ -372,6 +380,28 @@ final class Server {
             return error.response
         } catch {
             log("speech detector failed: \(type(of: error))")
+            return VoiceError.failed.response
+        }
+    }
+
+    /// One window's probability of a finished turn; refusals are logged (the bridge's mistakes), not "loading" or
+    /// "unavailable", which the bridge reads from `/health` and answers with the full pause. Nothing is logged for an
+    /// answer.
+    static func turn(_ body: Data, _ detector: TurnDetector) async -> Data {
+        let window: TurnWindow
+        do {
+            window = try TurnWindow(body: body)
+        } catch {
+            log("turn detector refused: \(error.code), \(body.count) bytes")
+            return error.response
+        }
+        do {
+            return HTTP.json(200, try turnBody(try await detector.probability(of: window)))
+        } catch let error as VoiceError {
+            if error == .failed { log("turn detector failed: not a probability") }
+            return error.response
+        } catch {
+            log("turn detector failed: \(type(of: error))")
             return VoiceError.failed.response
         }
     }

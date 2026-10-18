@@ -152,6 +152,13 @@ CALL_MAX_TOKENS = 300  # spoken answers stay short (a few sentences); a cut-off 
 # a call's first answer waits at most this long for the glance of the day (counted from the turn; the calendar is read
 # from the moment the call starts); not ready by then, it joins from the first turn after it is
 GLANCE_WAIT_SECONDS = 3.0
+# a call's model warm-up (owner, 17 Oct): the model's load and its read of the first turn's prompt, cut off after this
+# (live, 17 Oct: a cold load took 7 s and a 16,855-token prompt 12.5 s)
+WARM_UP_SECONDS = 60.0
+# the warm-up waits this long for the glance's calendar, longer than a turn does (review, 17 Oct): the first turn comes
+# some 20 s into the call and finds a slow calendar read, and a glance that differs from the warm-up's makes Ollama read
+# the tools and the whole history again (6-8 s); the wait delays the warm-up by at most 5 s more
+WARM_UP_GLANCE_SECONDS = 8.0
 # signal-cli also downloads files no photo message refers to (link previews, quote thumbnails, avatars,
 # edited messages): every 10 minutes, files older than that which no waiting photo needs are deleted.
 SWEEP_SECONDS = 600.0
@@ -243,12 +250,16 @@ class App:
         health: HealthCheck | None = None,
         model_pin: ModelPin | None = None,
         security_level: Callable[[], str | None] | None = None,
+        warm_up: bool | None = None,
     ) -> None:
         """`security_level`: reads the Mac's security level for her list of what she can do (default: as doctor
-        reads it, on the live Mac only: hostsec.mac_security_level)."""
+        reads it, on the live Mac only: hostsec.mac_security_level). `warm_up`: a call's model warm-up
+        (`call_warm_up`); None: only with Ollama itself (an OllamaGemma with a model named, also behind the model
+        pin), so a scripted Gemma in the tests gets none and its script keeps its order."""
         self.cfg = cfg
         self.store = store
         self.signal = signal
+        self._warms_up = isinstance(gemma, OllamaGemma) and bool(cfg.model) if warm_up is None else warm_up
         # nothing reaches a model Ollama lists as a cloud one, nor (with model_digest) one without the pinned digest
         self.model_pin = model_pin
         self._paused_why = ""  # why answers were last paused: the note when they come back says what changed
@@ -287,6 +298,7 @@ class App:
         self.queue: asyncio.Queue[int] = asyncio.Queue()
         self._no_call = asyncio.Event()
         self._no_call.set()
+        self._calls = 0  # calls started: a call's warm-up reads only while its own call is on
         # a call's glance: today's calendar and mail digest as numbers and times, read when an ordinary call starts
         self._glance: CallGlance | None = None
         # language practice (/babble): its own conversation, no tools, the recap at the end; typed only
@@ -448,6 +460,9 @@ class App:
                     acknowledge=cfg.calls_acknowledge,
                     answer_after_s=cfg.calls_answer_after_seconds,
                     barge=cfg.calls_barge,
+                    early_end=cfg.calls_early_end,
+                    early_end_pause_s=cfg.calls_early_end_pause_seconds,
+                    pause=cfg.calls_pause,
                 ),
                 tz=cfg.timezone,
                 language=self.language,
@@ -574,6 +589,7 @@ class App:
             max_tool_calls=cfg.max_tool_calls,
             learn_tool_calls=cfg.learn_tool_calls,
             reply_max_tokens=cfg.reply_max_tokens,
+            language=lambda: self.language,
         )
         self.profiler = Profiler(
             store,
@@ -994,6 +1010,7 @@ class App:
         ordinary call starts reading today's calendar and mail digest as numbers and times (the glance); a practice
         call reads neither."""
         self._no_call.clear()
+        self._calls += 1
         self.profiler.note_activity()
         if self.initiative is not None:
             self.initiative.note_activity()
@@ -1016,16 +1033,25 @@ class App:
         if self.reminder_scheduler is not None:
             self.reminder_scheduler.notify()  # reminders that waited for the call go out now
 
-    async def call_turn(self, aci: str, text: str, on_tools: Callable[[], None], *, practice: bool = False) -> Turn:
+    async def call_turn(
+        self,
+        aci: str,
+        text: str,
+        on_tools: Callable[[], None],
+        *,
+        practice: bool = False,
+        on_retry: Callable[[], None] | None = None,
+    ) -> Turn:
         """One thing the user said on a call: stored like a message (answered at once), then a waiting device's
         yes (code) or Gemma with the same tools as text; device notes and profile notes go out as texts. A turn of a
         practice call (`practice`, the call's own flag: only a call the user made during practice) goes to practice;
-        a call she placed for a reminder is an ordinary call, even during practice."""
+        a call she placed for a reminder is an ordinary call, even during practice. `on_retry`: told once when
+        Gemma's first try came back empty, before it is asked again (the call says an acknowledgement)."""
         self.profiler.note_activity()
         await self._worker_idle.wait()  # a text that was being answered when the call came in finishes first
         session = self.babble.running(aci) if practice else None
         if session is not None:  # a practice call: its own conversation, no tools, no device yes
-            return await self._practice_call_turn(aci, text, session)
+            return await self._practice_call_turn(aci, text, session, on_retry)
         conversation_id = self.store.current_conversation().id
         said = f"{prompts.CALL_MARK} {text}"
         said_id = self.store.add_call_turn(conversation_id, aci, said)
@@ -1042,7 +1068,13 @@ class App:
         reads = self._rundown(offer, said) if glance else ()
         try:
             reply = await self.brain.answer(
-                conversation, message, max_tokens=CALL_MAX_TOKENS, on_tools=on_tools, glance=glance, reads=reads
+                conversation,
+                message,
+                max_tokens=CALL_MAX_TOKENS,
+                on_tools=on_tools,
+                glance=glance,
+                reads=reads,
+                on_retry=on_retry,
             )
         except GemmaError as exc:
             log.error("call turn: Gemma failed: %s", exc)
@@ -1072,6 +1104,39 @@ class App:
         code_text = " ".join(line for line in spoken if line)  # English
         return Turn(said_text, reply_id=reply_id, asks_yes=asks_yes, end_call=reply.end_call, code_text=code_text)
 
+    async def call_warm_up(self, aci: str, *, practice: bool = False) -> None:
+        """The model's warm-up for a call that starts (CallManager: while it rings, or once a call she placed is
+        picked up): Gemma loads and reads the first turn's request up to the caller's words (Brain.warm_up), built
+        after that turn's own waits (a text being answered finishes first; the glance's calendar at most
+        WARM_UP_GLANCE_SECONDS, leaving the turn its own wait), so the turn finds its prefix in Ollama's cache. A practice
+        call (the call's own flag, with practice still running) warms the practice request. Nothing without Ollama
+        itself (`warm_up`), and nothing once its call ended (a later call's start too) or /lock came meanwhile. The read
+        is cut off after WARM_UP_SECONDS. One log line, metadata only; it never raises."""
+        if not self._warms_up:
+            return
+        call = self._calls  # the call it is for, taken before any wait
+        try:
+            await self._worker_idle.wait()  # as call_turn: that text's reply is in the turn's history
+            session = self.babble.running(aci) if practice else None
+            glance = await self._glance_now(warm_up=True) if session is None else ""
+            if self._no_call.is_set() or self._calls != call or self.guard.locked:
+                return  # its call ended (another may have started), or /lock: Gemma is not asked
+            started = time.monotonic()
+            if session is not None:
+                conversation = self.store.conversation(session.conversation_id)
+                warming = self.brain.warm_up(conversation, practice=self.babble.turn(spoken=True))
+            else:
+                warming = self.brain.warm_up(self.store.current_conversation(), glance=glance)
+            completion = await asyncio.wait_for(warming, WARM_UP_SECONDS)
+        except TimeoutError:
+            log.warning("calls: model warm-up failed (timeout)")
+            return
+        except Exception as exc:  # the call goes on as without it: one line, the kind only
+            log.warning("calls: model warm-up failed (%s)", type(exc).__name__)
+            return
+        tokens = f" (prompt {completion.prompt_tokens:,} tokens)" if completion.prompt_tokens else ""
+        log.info("calls: model warmed up in %.1f s%s", time.monotonic() - started, tokens)
+
     async def _calendar_glance(self, calendar: CalendarTools) -> str:
         """Today's calendar as numbers and times only, for her input on this call (never a title, place or calendar
         name: that text would make the whole call outside text); any failure is "not read"."""
@@ -1091,16 +1156,20 @@ class App:
             log.exception("calls: the mail digest's glance failed")
             return ""
 
-    async def _glance_now(self) -> str:
+    async def _glance_now(self, *, warm_up: bool = False) -> str:
         """The call's glance as far as it is ready: the mail counts at once; the first turn waits for the calendar
-        at most GLANCE_WAIT_SECONDS, later turns take it once read. The call's end drops it."""
+        at most GLANCE_WAIT_SECONDS, later turns take it once read. The call's warm-up (`warm_up`) waits for it at
+        most WARM_UP_GLANCE_SECONDS, so the first turn, some 20 s later, finds the glance the warm-up read, and leaves
+        that turn its own wait. The call's end drops it."""
         glance = self._glance
         if glance is None:
             return ""
         if glance.calendar is not None and not glance.calendar.done() and not glance.waited:
-            glance.waited = True
+            if not warm_up:
+                glance.waited = True
+            wait = WARM_UP_GLANCE_SECONDS if warm_up else GLANCE_WAIT_SECONDS
             # asyncio.wait neither cancels it nor raises when the call's end cancels it meanwhile
-            await asyncio.wait({glance.calendar}, timeout=GLANCE_WAIT_SECONDS)
+            await asyncio.wait({glance.calendar}, timeout=wait)
         if self._glance is not glance:  # the call ended meanwhile
             return ""
         return prompts.call_glance(
@@ -1121,7 +1190,9 @@ class App:
             self._glance.calendar.cancel()
         self._glance = None
 
-    async def _practice_call_turn(self, aci: str, text: str, practice: Session) -> Turn:
+    async def _practice_call_turn(
+        self, aci: str, text: str, practice: Session, on_retry: Callable[[], None] | None = None
+    ) -> Turn:
         """What the user said on a practice call: in the practice conversation, answered with the practice rules (no
         tools, no "→" line). A claimed reminder still gets code's note and line."""
         conversation_id = practice.conversation_id
@@ -1130,7 +1201,11 @@ class App:
         conversation = self.context.enforce_limit(self.store.conversation(conversation_id))
         try:
             reply = await self.brain.answer(
-                conversation, message, max_tokens=CALL_MAX_TOKENS, practice=self.babble.turn(spoken=True)
+                conversation,
+                message,
+                max_tokens=CALL_MAX_TOKENS,
+                practice=self.babble.turn(spoken=True),
+                on_retry=on_retry,
             )
         except GemmaError as exc:
             log.error("practice call turn: Gemma failed: %s", exc)
@@ -1794,7 +1869,8 @@ class App:
             lines.append(await self.devices.reachability())
         if self.calls:
             next_call = self.reminders.next_call() if self.reminders else ""
-            lines.append(self.calls.status_line(next_call=next_call, detector=await self.calls.detector()))
+            speech, turn = await self.calls.detectors()
+            lines.append(self.calls.status_line(next_call=next_call, detector=speech, turn=turn))
         if self.music:
             lines.append(self.music.status_line())
         if self.web:

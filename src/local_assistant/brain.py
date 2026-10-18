@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -31,6 +32,7 @@ log = logging.getLogger(__name__)
 
 INSTANT_TOOLS = frozenset({"remember", "forget", "end_call"})  # no "let me check" on a call for these
 DOCUMENT_REPLY_TOKENS = 2_000  # an answer after read_document may run this long: a section in full (16 Oct)
+WARM_UP_TOKENS = 1  # a call's warm-up asks for one token: Ollama reads the prompt and stops
 
 
 @dataclass(frozen=True)
@@ -242,6 +244,64 @@ def _without_captions(text: str, turn: Turn) -> str:
     return "\n".join(part for part in (text, *lines) if part)
 
 
+@dataclass(frozen=True)
+class _Shape:
+    """What an empty answer's log line says about each try, metadata only (research, 17 Oct, section 4): never a
+    word of the conversation or of her answer, only counts, codes and times."""
+
+    path: str  # call, text, document or practice
+    max_tokens: int
+    tools: int  # the tools offered
+    language: str
+    after_tool: bool  # the request's last message was a tool result (the retry's nudge comes after it)
+
+    def of(self, completion: Completion, attempt: int, took: float) -> str:
+        content = completion.content
+        return (
+            f"path {self.path}, attempt {attempt}, finish {completion.finish_reason or '-'}, "
+            f"completion_tokens {completion.completion_tokens}, prompt_tokens {completion.prompt_tokens}, "
+            f"max_tokens {self.max_tokens}, tools offered {self.tools}, tool calls {len(completion.tool_calls)}, "
+            f"content {len(content)} chars ({len(content.strip())} stripped), "
+            f"reasoning {completion.reasoning_chars} chars, {round(took * 1000)} ms, "
+            f"after a tool result {'yes' if self.after_tool else 'no'}, language {self.language or '-'}"
+        )
+
+
+def _filtered(content: str, message_id: int) -> tuple[str, bool]:
+    """Her answer through the filters that leave out what she must not say (a leaked thinking channel, a notice
+    she wrote as if code had, a written end_call), and whether a written end_call ended it. An answer they leave
+    empty is one warning: which filter emptied it, and the length after each (metadata only)."""
+    thought = without_thinking(content)
+    noticed = without_fake_notices(thought)
+    text, ended = without_written_end_call(noticed)
+    if content.strip() and not text:
+        steps = (("without_thinking", thought), ("without_fake_notices", noticed), ("without_written_end_call", text))
+        log.warning(
+            "message %d: the filters left nothing (%s emptied it; chars raw %d, %s)",
+            message_id,
+            next(name for name, left in steps if not left.strip()),
+            len(content),
+            ", ".join(f"{name} {len(left)}" for name, left in steps),
+        )
+    return text, ended
+
+
+def _once(callback: Callable[[], None] | None) -> Callable[[], None]:
+    """`callback` at most once, however often the result is called (none: nothing)."""
+    left = [callback] if callback is not None else []
+
+    def call() -> None:
+        if left:
+            left.pop()()
+
+    return call
+
+
+def _usable(completion: Completion, allow_tools: bool) -> bool:
+    """An answer with text, or with a tool call that may run."""
+    return bool(completion.content.strip() or (completion.tool_calls and allow_tools))
+
+
 def _has_images(messages: list[dict[str, Any]]) -> bool:
     return any(isinstance(message.get("content"), list) for message in messages)
 
@@ -275,8 +335,12 @@ class Brain:
         max_tool_calls: int = 5,
         learn_tool_calls: int = 10,
         reply_max_tokens: int = 600,
+        language: Callable[[], str] = lambda: "",
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._gemma = gemma
+        self._language = language  # her language's code now, for the empty answers' log
+        self._clock = clock
         self._context = context
         self._tools = tools
         self._max_tool_calls = max_tool_calls
@@ -295,6 +359,7 @@ class Brain:
         practice: PracticeTurn | None = None,
         glance: str = "",
         reads: Sequence[tuple[str, str]] = (),
+        on_retry: Callable[[], None] | None = None,
     ) -> Reply:
         """Gemma's reply to the newest message of the conversation (already stored), with its photos.
 
@@ -305,18 +370,20 @@ class Brain:
         arguments) code makes itself before she answers (a yes to her offer of the day's rundown): run through the same
         tools, logged and counted like hers and given to her as her own tool calls with their results, so what they
         read is outside text for this answer exactly as when she calls them. `practice`: a /babble turn
-        (`_practise`)."""
+        (`_practise`). `on_retry`: called once in an answer, when a try came back empty, before it is asked again (a
+        call says an acknowledgement meanwhile)."""
         limit_tokens = max_tokens or self._reply_max_tokens
         shown = {**(recent or {}), **({message.id: images} if images else {})}
+        retrying = _once(on_retry)
         if practice is not None:
-            return await self._practise(conversation, message, practice, limit_tokens, shown)
+            return await self._practise(conversation, message, practice, limit_tokens, shown, retrying)
         turn = Turn(message=message, after_outside=self._context.after_outside(conversation, message.id))
         # code's video lines, last in the prompt: a kept video's (reading it again), a YouTube link in this message's
         # (what read_link reads); none on a call, so never with a call's glance
         glance = "\n\n".join(part for part in (glance, self._tools.video_hint(message)) if part)
         # on a call her rules leave out the list of what she can do (spoken sentences, never a list)
         on_call = message.text.startswith(prompts.CALL_MARK)
-        messages = self._context.build(conversation, shown or None, glance=glance, call=on_call)
+        messages = self._input(conversation, shown, glance, call=on_call)
         said = [  # the user's own words: her notes before the newest message are not theirs
             without_notes(str(m["content"]))
             for m in messages
@@ -342,7 +409,11 @@ class Brain:
             # a section given in full after reading its pages (owner, 16 Oct: B5 was cut mid-sentence at 600); a
             # call keeps its own spoken cap
             room = DOCUMENT_REPLY_TOKENS if turn.read_documents and max_tokens is None else limit_tokens
-            completion = await self._complete(messages, allow_tools, max(limit_tokens, room))
+            with_document = turn.read_documents or message.text.startswith(prompts.DOCUMENT_MARK)
+            path = "call" if on_call else "document" if with_document else "text"
+            completion = await self._complete(
+                messages, allow_tools, max(limit_tokens, room), retrying, path=path, message_id=message.id
+            )
             if completion.tool_calls and allow_tools:
                 if on_tools is not None and any(call.name not in INSTANT_TOOLS for call in completion.tool_calls):
                     on_tools()
@@ -363,7 +434,7 @@ class Brain:
                         turn.reminder_attempts.append(ReminderAttempt(_reminder_text(call.arguments), why))
                     messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
                 continue
-            text, wrote_end_call = without_written_end_call(without_fake_notices(without_thinking(completion.content)))
+            text, wrote_end_call = _filtered(completion.content, message.id)
             if wrote_end_call and self._tools.calls_on and message.text.startswith(prompts.CALL_MARK):
                 turn.end_call = True
             if not corrected and _claims_a_save(text) and not turn.saved and allow_tools:
@@ -449,6 +520,7 @@ class Brain:
         practice: PracticeTurn,
         max_tokens: int,
         shown: Mapping[int, Sequence[str]],
+        on_retry: Callable[[], None],
     ) -> Reply:
         """A practice turn: the practice rules, no tools offered (none can run), no tool loop. A reply that is empty,
         only "---" or only a "→" line is asked again once, then replaced by the language's fallback question (the
@@ -462,16 +534,29 @@ class Brain:
         answer, after outside text in the practice conversation (an audio file or a photo) unless the user sent them."""
         # a practice call's turn gets the call's style too (its rules have no list of what she can do to leave out)
         on_call = message.text.startswith(prompts.CALL_MARK)
-        messages = self._context.build(conversation, shown or None, rules=practice.rules, call=on_call, notes=False)
-        completion = await self._gemma.chat(messages, max_tokens=max_tokens, tools=None)
+        messages = self._practice_input(conversation, shown, practice, call=on_call)
+        shape = _Shape("practice", max_tokens, 0, practice.language or self._language(), after_tool=False)
+        completion, took = await self._timed(messages, max_tokens, None)
         if not _has_images(messages):  # image tokens are counted by Ollama but not in our characters
             self._context.calibrate(messages, completion.prompt_tokens)
         if broken(completion.content):
-            log.warning("message %d: a broken practice reply; asking once more", message.id)
+            log.warning(
+                "message %d: a broken practice reply; asking once more (%s)",
+                message.id,
+                shape.of(completion, 1, took),
+            )
+            on_retry()
             nudged = [*messages, {"role": "user", "content": prompts.EMPTY_NUDGE}]
-            completion = await self._gemma.chat(nudged, max_tokens=max_tokens, tools=None)
+            completion, took = await self._timed(nudged, max_tokens, None)
+            if broken(completion.content):
+                log.warning(
+                    "message %d: the practice reply stayed broken; the fallback question instead (%s)",
+                    message.id,
+                    shape.of(completion, 2, took),
+                )
+            else:
+                log.info("message %d: the practice retry answered (%s)", message.id, shape.of(completion, 2, took))
         if broken(completion.content):
-            log.warning("message %d: the practice reply stayed broken; the fallback question instead", message.id)
             text = practice.fallback
         else:
             text = tidy(
@@ -512,17 +597,99 @@ class Brain:
             reminder_spoken=spoken,
         )
 
-    async def _complete(self, messages: list[dict[str, Any]], allow_tools: bool, max_tokens: int) -> Completion:
-        """One Gemma call; an answer with neither text nor a usable tool call is retried once."""
-        tools = self._tools.schemas if allow_tools else None
+    async def warm_up(
+        self, conversation: Conversation, *, glance: str = "", practice: PracticeTurn | None = None
+    ) -> Completion:
+        """A call's warm-up, before the caller's words: the request the call's first turn will send, without its new
+        message, asking for WARM_UP_TOKENS, so Ollama loads the model and keeps the prompt's prefix for that turn.
+        Built as `answer` and `_practise` build a call turn's (`_input`, `_practice_input`: a call's rules and style,
+        no photos, and no video lines, which a call never has), with the same tools (the first try's, `_offered`;
+        none for a practice turn) and options. `glance`: the call's, as the first turn will have it. No message is
+        stored and no calibration is learned."""
+        if practice is not None:
+            messages = self._practice_input(conversation, {}, practice, call=True, newest=False)
+            return await self._gemma.chat(messages, max_tokens=WARM_UP_TOKENS, tools=None)
+        messages = self._input(conversation, {}, glance, call=True, newest=False)
+        tools = self._offered(self._max_tool_calls > 0)  # the first try: no tool has run yet
+        return await self._gemma.chat(messages, max_tokens=WARM_UP_TOKENS, tools=tools)
+
+    def _input(
+        self,
+        conversation: Conversation,
+        shown: Mapping[int, Sequence[str]],
+        glance: str,
+        *,
+        call: bool,
+        newest: bool = True,
+    ) -> list[dict[str, Any]]:
+        """An answer's input (`answer`; `newest=False`: a call's warm-up, before the new message is stored)."""
+        return self._context.build(conversation, shown or None, glance=glance, call=call, newest=newest)
+
+    def _practice_input(
+        self,
+        conversation: Conversation,
+        shown: Mapping[int, Sequence[str]],
+        practice: PracticeTurn,
+        *,
+        call: bool,
+        newest: bool = True,
+    ) -> list[dict[str, Any]]:
+        """A practice answer's input (`_practise`): its rules, no notes (`newest=False`: a practice call's warm-up)."""
+        return self._context.build(
+            conversation, shown or None, rules=practice.rules, call=call, notes=False, newest=newest
+        )
+
+    def _offered(self, allow_tools: bool) -> list[dict[str, Any]] | None:
+        """The tools a request offers: all of this setup's, or none once the tool limit is reached."""
+        return self._tools.schemas if allow_tools else None
+
+    async def _timed(
+        self, messages: list[dict[str, Any]], max_tokens: int, tools: list[dict[str, Any]] | None
+    ) -> tuple[Completion, float]:
+        """One Gemma call and the seconds it took."""
+        started = self._clock()
         completion = await self._gemma.chat(messages, max_tokens=max_tokens, tools=tools)
+        return completion, self._clock() - started
+
+    async def _complete(
+        self,
+        messages: list[dict[str, Any]],
+        allow_tools: bool,
+        max_tokens: int,
+        on_retry: Callable[[], None],
+        *,
+        path: str,
+        message_id: int,
+    ) -> Completion:
+        """One Gemma call; an answer with neither text nor a usable tool call is retried once (`on_retry` first), and
+        the retry's result is checked: a second empty one is a warning of its own, and the caller gives the confused
+        line. Each try of an empty answer is one log line, metadata only (`_Shape`; `path`: call, text or
+        document)."""
+        tools = self._offered(allow_tools)
+        completion, took = await self._timed(messages, max_tokens, tools)
         if not _has_images(messages):  # image tokens are counted by Ollama but not in our characters
             self._context.calibrate(messages, completion.prompt_tokens)
-        if completion.content.strip() or (completion.tool_calls and allow_tools):
+        if _usable(completion, allow_tools):
             return completion
-        log.warning("empty answer from Gemma; retrying once")
+        after_tool = bool(messages) and messages[-1].get("role") == "tool"
+        shape = _Shape(path, max_tokens, len(tools or ()), self._language(), after_tool)
+        log.warning(
+            "message %d: empty answer from Gemma; retrying once (%s)", message_id, shape.of(completion, 1, took)
+        )
+        on_retry()
         nudged = [
             *messages,
             {"role": "user", "content": prompts.EMPTY_NUDGE},
         ]  # an identical request may come back empty again
-        return await self._gemma.chat(nudged, max_tokens=max_tokens, tools=tools)
+        retried, took = await self._timed(nudged, max_tokens, tools)
+        if _usable(retried, allow_tools):
+            log.info(
+                "message %d: the retry after an empty answer answered (%s)", message_id, shape.of(retried, 2, took)
+            )
+        else:
+            log.warning(
+                "message %d: the retry came back empty too; no words of hers in this answer (%s)",
+                message_id,
+                shape.of(retried, 2, took),
+            )
+        return retried

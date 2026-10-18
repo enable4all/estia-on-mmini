@@ -405,6 +405,12 @@ class Config:
     calls_barge: str = "speech"
     calls_interrupt_old: str = ""  # an older wording that was read ('barge = "speech"'): doctor suggests the new one
     calls_barge_unread: str = ""  # an old barge line beside interrupt, which wins: doctor says it is not read
+    # the end of a turn (owner, 17 Oct): Smart Turn asked at a short pause ([calls] early_end, early_end_pause_seconds),
+    # and what keeps a turn open ([calls] pause): "speech" ("no speech", the default: noise in a pause counts as pause)
+    # or "loudness" ("quiet": any sound); call_audio.TurnEnd's names
+    calls_early_end: bool = True
+    calls_early_end_pause_seconds: float = 0.6
+    calls_pause: str = "speech"
 
     # reminders the user sets ("remind me at 17:00 to ..."): on without the [reminders] section
     reminders_enabled: bool = True
@@ -1234,6 +1240,9 @@ class _CallsSettings(TypedDict, total=False):
     calls_barge: str
     calls_interrupt_old: str
     calls_barge_unread: str
+    calls_early_end: bool
+    calls_early_end_pause_seconds: float
+    calls_pause: str
 
 
 # [calls] interrupt, in the words people read, and the rule each one means (owner, 14 Oct; call_audio.Barge's names)
@@ -1242,6 +1251,10 @@ INTERRUPT = {"only speech": "speech", "any sound": "loudness"}
 INTERRUPT_READ = INTERRUPT | {"speech": "speech", "sound": "loudness", "loudness": "loudness"}
 INTERRUPT_NEW = {rule: words for words, rule in INTERRUPT.items()}  # the rule's new wording, for doctor
 INTERRUPT_ERROR = 'calls.interrupt must be "only speech" or "any sound"'
+# [calls] pause, in the words people read: what keeps a turn open (owner, 17 Oct; call_audio.TurnEnd's names)
+PAUSE = {"no speech": "speech", "quiet": "loudness"}
+PAUSE_ERROR = 'calls.pause must be "no speech" or "quiet"'
+EARLY_END_PAUSE = (0.3, 1.5)  # [calls] early_end_pause_seconds: from, to
 
 
 def _interrupt(calls: dict[str, object]) -> tuple[str, str, str]:
@@ -1257,6 +1270,25 @@ def _interrupt(calls: dict[str, object]) -> tuple[str, str, str]:
     if "barge" in calls:
         return INTERRUPT_READ[str(calls["barge"])], barge, ""
     return "speech", "", ""
+
+
+def _early_end(calls: dict[str, object], full: float) -> tuple[bool, float, str]:
+    """The end of a turn: (early end on, its short pause, what keeps a turn open as "speech" or "loudness"). A short
+    pause set by hand must be below the full pause (end_of_turn_seconds); the default one under a low full pause is
+    simply never reached."""
+    early = calls.get("early_end", True)
+    if not isinstance(early, bool):
+        raise ConfigError("calls.early_end must be true or false")
+    low, high = EARLY_END_PAUSE
+    seconds = calls.get("early_end_pause_seconds", 0.6)
+    if isinstance(seconds, bool) or not isinstance(seconds, int | float) or not low <= seconds <= high:
+        raise ConfigError(f"calls.early_end_pause_seconds must be from {low:g} to {high:g}")
+    if "early_end_pause_seconds" in calls and seconds >= full:
+        raise ConfigError("calls.early_end_pause_seconds must be below calls.end_of_turn_seconds")
+    pause = calls.get("pause", "no speech")
+    if not isinstance(pause, str) or pause not in PAUSE:
+        raise ConfigError(PAUSE_ERROR)
+    return early, float(seconds), PAUSE[pause]
 
 
 def _calls_settings(calls: object, *, voice: bool) -> _CallsSettings:
@@ -1313,6 +1345,7 @@ def _calls_settings(calls: object, *, voice: bool) -> _CallsSettings:
     if isinstance(per_day, bool) or not isinstance(per_day, int) or not 1 <= per_day <= 10:
         raise ConfigError("calls.max_calls_per_day must be a whole number from 1 to 10")
     barge, interrupt_old, barge_unread = _interrupt(calls)
+    early_end, early_pause, pause = _early_end(calls, numbers["end_of_turn_seconds"])
     settings: _CallsSettings = {
         "calls_enabled": True,
         "calls_speed": float(speed),
@@ -1329,6 +1362,9 @@ def _calls_settings(calls: object, *, voice: bool) -> _CallsSettings:
         "calls_barge": barge,
         "calls_interrupt_old": interrupt_old,
         "calls_barge_unread": barge_unread,
+        "calls_early_end": early_end,
+        "calls_early_end_pause_seconds": early_pause,
+        "calls_pause": pause,
     }
     if "signal_cli" in paths:
         settings["calls_signal_cli"] = paths["signal_cli"]

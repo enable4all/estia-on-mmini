@@ -1,5 +1,6 @@
 import array
 import asyncio
+import http.client
 import json
 import math
 import re
@@ -436,6 +437,109 @@ async def test_the_check_of_whose_program_it_is_counts_within_the_detectors_own_
 )
 def test_the_speech_detectors_state_from_the_health(health: dict[str, str] | None, state: str) -> None:
     assert detector_state(health) == state
+
+
+# the turn detector (Smart Turn v3.2, POST /turn): the last 8 s of the caller's 16 kHz audio, most recent sample last,
+# no query and no state; a call never waits for it longer than the speech detector (VAD_TIMEOUT)
+WINDOW = CHUNK * 10  # 2.56 s
+
+
+async def test_turn_posts_the_window_and_returns_p() -> None:
+    with FakeVoiceService() as service:
+        service.turn, service.turn_p = "ready", 0.91
+        client = VoiceClient(service.url, voice="af_heart", speed=1.1)
+        assert await client.turn(WINDOW) == 0.91
+        service.turn_p = 0
+        assert await client.turn(bytes(256_000)) == 0.0  # 8 s, the whole window
+        method, path, headers, body = service.requests[0]
+        assert (method, path, body) == ("POST", "/turn", WINDOW)  # no query: the window is all it gets
+        assert headers["content-type"] == "application/octet-stream"
+
+
+@pytest.mark.parametrize(
+    ("turn", "answer", "window"),
+    [
+        (None, None, WINDOW),  # an older service: no /turn (404)
+        ("loading", None, WINDOW),  # 503 not_ready while the model loads
+        ("unavailable", None, WINDOW),  # 503: its download, check or load failed
+        ("ready", None, WINDOW[:101]),  # 400 bad_window: an odd length
+        ("ready", None, bytes(256_002)),  # 400: over 8 s
+        ("ready", b"not json", WINDOW),
+        ("ready", b'{"p": true}', WINDOW),  # a bool is no probability
+        ("ready", b'{"p": "high"}', WINDOW),
+        ("ready", b'{"p": 1.5}', WINDOW),
+        ("ready", b'{"p": -0.1}', WINDOW),
+        ("ready", b'{"p": NaN}', WINDOW),
+        ("ready", b"[0.9]", WINDOW),
+    ],
+    ids=["older", "loading", "unavailable", "odd", "too-long", "not-json", "bool", "text", "above-1", "below-0", "nan",
+         "a-list"],
+)  # fmt: skip
+async def test_turn_failures_are_kinds_never_raised(
+    tmp_path: Path, turn: str | None, answer: bytes | None, window: bytes
+) -> None:
+    status = recorder(tmp_path)
+    with FakeVoiceService() as service:
+        service.turn, service.turn_answer = turn, answer
+        client = VoiceClient(service.url, voice="af_heart", speed=1.1, status=status)
+        assert await client.turn(window) == "http"
+    assert status.snapshot() == {}  # the turn detector is not the voice: a failure never marks the voice as failing
+
+
+@pytest.mark.parametrize("state", ["loading", "unavailable", "ready"])
+def test_the_fake_refuses_a_bad_window_before_its_state_as_the_service_does(state: str) -> None:
+    # voice-service's Server.turn: TurnWindow's refusal comes first, 400 bad_window whatever the model's state; a GET
+    # is 405 (Route), never 404
+    def answer(service: FakeVoiceService, method: str, body: bytes) -> tuple[int, bytes]:
+        connection = http.client.HTTPConnection("127.0.0.1", int(service.url.rsplit(":", 1)[1]), timeout=5)
+        try:
+            connection.request(method, "/turn", body=body)
+            response = connection.getresponse()
+            return response.status, response.read()
+        finally:
+            connection.close()
+
+    with FakeVoiceService() as service:
+        service.turn = state
+        for window in (b"", WINDOW[:101], bytes(256_002)):
+            assert answer(service, "POST", window) == (400, b'{"error":"bad_window"}')
+        assert answer(service, "GET", b"")[0] == 405
+
+
+async def test_a_turn_detector_that_does_not_answer_is_http_and_a_slow_one_a_timeout() -> None:
+    assert await VoiceClient(closed_port_url(), voice="af_heart", speed=1.1).turn(WINDOW) == "http"
+    with FakeVoiceService() as service:
+        service.turn, service.turn_delay = "ready", 0.8
+        started = time.monotonic()
+        assert await VoiceClient(service.url, voice="af_heart", speed=1.1, peer=hers).turn(WINDOW) == "timeout"
+        assert time.monotonic() - started < 0.6  # a call never waits for the detector: VAD_TIMEOUT
+    assert VAD_TIMEOUT == 0.3
+
+
+async def test_nothing_goes_to_a_turn_detector_that_is_not_hers() -> None:
+    def theirs(port: int, local: int, seconds: float) -> bool | None:
+        return False
+
+    with FakeVoiceService() as service:
+        service.turn = "ready"
+        assert await VoiceClient(service.url, voice="af_heart", speed=1.1, peer=theirs).turn(WINDOW) == "http"
+        assert service.requests == []
+
+
+@pytest.mark.parametrize(
+    ("health", "state"),
+    [
+        ({"stt": "ready", "tts": "ready", "vad": "ready", "turn": "ready"}, "ready"),
+        ({"stt": "ready", "tts": "ready", "vad": "ready", "turn": "loading"}, "loading"),
+        ({"stt": "ready", "tts": "ready", "vad": "ready", "turn": "unavailable"}, "unavailable"),
+        ({"stt": "ready", "tts": "ready", "vad": "ready"}, "old voice service"),  # built before the turn detector
+        (None, "not ready"),
+        ({"stt": "ready", "tts": "ready", "turn": "something new"}, "not ready"),
+    ],
+)
+def test_detector_state_reads_turn(health: dict[str, str] | None, state: str) -> None:
+    assert detector_state(health, part="turn") == state
+    assert detector_state({"turn": "ready"}) == "old voice service"  # the speech detector stays the default part
 
 
 # the voice port: in her own user, a program of the owner's could hold 127.0.0.1:8150 whenever her voice service is not

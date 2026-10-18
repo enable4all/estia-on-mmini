@@ -124,6 +124,31 @@ async def test_payload_has_effort_tools_and_schema(base_url: str) -> None:
     assert body["stream"] is False
 
 
+async def test_every_request_sends_googles_top_p(base_url: str) -> None:
+    """Without top_p in the request, Ollama's OpenAI layer sends 1.0 (openai/openai.go:769-773, 0.40.4), over the
+    model's own 0.95, Google's setting for Gemma 4 (with temperature 1.0 and top_k 64, which stay as they are)."""
+    from local_assistant.gemma import TOP_P
+
+    gemma = OllamaGemma(base_url, "local-worker")
+    await gemma.chat([{"role": "user", "content": "hi"}], max_tokens=50)
+    await gemma.chat([], max_tokens=5, temperature=0.8, json_schema={"type": "object"}, reasoning_effort="high")
+    assert TOP_P == 0.95
+    assert [request["body"]["top_p"] for request in FakeOllama.requests] == [0.95, 0.95]
+    assert "top_k" not in FakeOllama.requests[0]["body"]  # the OpenAI layer has no top_k: the model's 64 applies
+
+
+def test_completion_tokens_and_the_reasoning_fields_size_are_parsed() -> None:
+    """For the empty answers' log (17 Oct): what the model generated, and how much went to a reasoning field (its size
+    only: the text is never kept)."""
+    body = completion_json("")
+    body["choices"][0]["message"]["reasoning"] = "a hidden thought"
+    body["choices"][0]["finish_reason"] = "length"
+    parsed = parse_completion(body)
+    assert (parsed.completion_tokens, parsed.reasoning_chars, parsed.finish_reason) == (5, 16, "length")
+    assert parse_completion(completion_json("ok")).reasoning_chars == 0
+    assert "hidden" not in repr(parsed)
+
+
 async def test_tool_calls_are_parsed(base_url: str) -> None:
     call = {"id": "call_1", "type": "function", "function": {"name": "remember", "arguments": '{"fact": "x"}'}}
     FakeOllama.replies = [(200, completion_json("", [call]))]

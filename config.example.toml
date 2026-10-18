@@ -181,13 +181,20 @@ disk_free_min_percent = 10
 #tunnel = "~/Library/Application Support/local-assistant/vendor/signal-call-tunnel/signal-call-tunnel/target/release/signal-call-tunnel"
 #socket_dir = "~/Library/Application Support/local-assistant/calls"   # default; ~/.la-calls if a long home folder makes this too long. Set by hand: under 65 characters (Unix sockets)
 #speed = 1.05                 # Kokoro speed on calls (voice notes keep [voice] speed)
-#end_of_turn_seconds = 2.3    # a pause this long ends your turn (laid back: room to think)
+#end_of_turn_seconds = 2.3    # the full pause: this long ends your turn (laid back: room to think)
+#early_end = true             # a turn that sounds finished ends after a short pause: Smart Turn, a small model on the
+#                             # Mac, hears a turn's last 8 seconds; fairly sure, she waits 1.5 seconds; unsure, she waits
+#                             # the full pause. false: always the full pause
+#early_end_pause_seconds = 0.6 # the short pause, from 0.3 to 1.5 and below end_of_turn_seconds
+#pause = "no speech"          # what keeps a turn open: "no speech" (the default: typing, dishes or traffic that goes on
+#                             # counts as pause; a noise right after the last word and other voices still keep it
+#                             # open) or "quiet" (any sound keeps it open)
 #idle_prompt_seconds = 90     # "Take your time, I'm here." after this much silence (once, then at most every 10 minutes)
 #idle_hangup_seconds = 600    # then goodbye
 #max_call_minutes = 60
 #summary = true               # a short summary text after a call with 2+ turns
 #fillers = false              # "hmm, let me think" lines while she thinks (off: she answers when ready)
-#acknowledge = true           # a short "Got it." or "On it." once a request of 5+ words is taken in (not before a device answer, never two in a row)
+#acknowledge = true           # a short "Got it." or "On it." once a request of 5+ words is taken in, or when an empty answer is asked again (not before a device answer, never two in a row)
 #answer_after_seconds = 5     # let it ring (about twice) before she answers
 #wake_call = true             # "call me" reminders place a Signal call (the text always comes first); false: texts only
 #max_calls_per_day = 3        # call reminders a day (a second try two minutes later belongs to the same one)

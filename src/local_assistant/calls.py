@@ -35,7 +35,20 @@ from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from local_assistant import prompts
-from local_assistant.call_audio import FRAME_S, RATE, Barge, CallAudio, faint_noise, pcm48_to_wav16k, wav_to_pcm48
+from local_assistant.call_audio import (
+    EARLY_BARGE_S,
+    EARLY_KINDS,
+    FRAME_S,
+    LISTEN_FLOOR_FACTOR,
+    LISTEN_MIN_RMS,
+    RATE,
+    Barge,
+    CallAudio,
+    TurnEnd,
+    faint_noise,
+    pcm48_to_wav16k,
+    wav_to_pcm48,
+)
 from local_assistant.config import DEFAULT_NAME
 from local_assistant.language import (
     BUT,
@@ -103,6 +116,8 @@ class Voice(Protocol):
 
     async def vad(self, chunk: bytes, *, stream: str) -> float | str: ...
 
+    async def turn(self, window: bytes) -> float | str: ...
+
 
 @dataclass(frozen=True)
 class Turn:
@@ -122,8 +137,22 @@ class Host(Protocol):
 
     def call_ended(self) -> None: ...
 
-    async def call_turn(self, aci: str, text: str, on_tools: Callable[[], None], *, practice: bool = False) -> Turn:
-        """What the user said: the answer (`practice`: a turn of a practice call, the call's own flag)."""
+    async def call_warm_up(self, aci: str, *, practice: bool = False) -> None:
+        """While the call rings, or once a call she placed is picked up: the model loads and reads the first turn's
+        prompt up to the caller's words, so that turn finds it ready (`practice`: the call's own flag). Run once a call
+        in the background: the call never waits for it, and its end leaves it to finish."""
+
+    async def call_turn(
+        self,
+        aci: str,
+        text: str,
+        on_tools: Callable[[], None],
+        *,
+        practice: bool = False,
+        on_retry: Callable[[], None] | None = None,
+    ) -> Turn:
+        """What the user said: the answer (`practice`: a turn of a practice call, the call's own flag). `on_retry` is
+        called once when the model's first try came back empty, before it is asked again."""
         ...
 
     def call_interrupted(self, reply_id: int, heard: str) -> None: ...
@@ -161,6 +190,12 @@ class CallSettings:
     # what stops her when the caller talks over her ([calls] interrupt): "speech" ("only speech", the default) or
     # "loudness" ("any sound"); call_audio.Barge's names
     barge: str = "speech"
+    # the early end of a turn (owner, 17 Oct; call_audio.TurnEnd): Smart Turn asked once a pause at early_end_pause_s
+    # ([calls] early_end, early_end_pause_seconds), and what keeps a turn open ([calls] pause): "speech" ("no speech",
+    # the default: noise in a pause counts as pause) or "loudness" ("quiet": any sound)
+    early_end: bool = True
+    early_end_pause_s: float = 0.6
+    pause: str = "speech"
 
 
 # Whisper writes noise as words: sound labels (*sad music*, [Music]) and, on a short sound, its favourite fillers
@@ -640,6 +675,31 @@ def takes_leave(text: str, *, name: str, language: str = ENGLISH) -> bool:
     return False
 
 
+# An early end's words that end like more is coming (owner, 17 Oct): a comma, an ellipsis or a dash at the end (Whisper's
+# marks of a sentence left open; 、 is Japanese's comma), or a last word that goes on (language.CONTINUING: "to",
+# "naar"), a "but" (language.BUT) or a filler ("um", "äh"), in the call's language or English
+_OPEN_ENDS = (",", "、", "…", "...", "-", "–", "—")
+HOLD_MAX_S = 120.0  # a turn joined in holds is at most this long (one listen's cap; Whisper takes up to 3 minutes)
+
+
+@functools.cache
+def _open_words(language: str) -> frozenset[tuple[str, ...]]:
+    codes = dict.fromkeys((language, ENGLISH))
+    words = [word for code in codes for word in (*CONTINUING.get(code, ()), *BUT.get(code, ()))]
+    return _phrases([*words, *FILLERS], language)
+
+
+def goes_on(text: str, language: str = ENGLISH) -> bool:
+    """Whether the caller's words end like more is coming (see _OPEN_ENDS): "I want to call," "I want to go to", "It is
+    nice but", "Ik ga naar". A sentence that ends with a word such as "home" or "on" counts too: holding it only waits
+    out today's full pause."""
+    end = text.rstrip().rstrip("\"')]”’»」』").rstrip()
+    if end.endswith(_OPEN_ENDS):
+        return True
+    units = _units(end, language)
+    return any(len(units) >= len(words) and units[-len(words) :] == words for words in _open_words(language))
+
+
 def _parts(text: str) -> list[str]:
     """Text to speak on a call, sentence by sentence (even a one-word answer)."""
     return sentences(spoken_text(text, min_chars=1, rest="")) or ([text.strip()] if text.strip() else [])
@@ -715,6 +775,9 @@ class _Call:
     dropped: bool = False
     unfinished: bool = False  # the call ended while an answer was still being worked on
     acknowledged_last: bool = False  # the last request got a "got it": the next one gets none
+    # the call's end-of-turn rules, given to every listen of hers (never the one after a barge-in); None: both off
+    turn_end: TurnEnd | None = None
+    warm_up: asyncio.Task[None] | None = None  # the model's warm-up for this call (one at most)
 
 
 class CallManager:
@@ -760,11 +823,14 @@ class CallManager:
         self._call: _Call | None = None
         self._dial: _Dial | None = None  # a call she is placing, until it is picked up or ends
         self._task: asyncio.Task[None] | None = None
+        # warm-ups still running, held here so that one outlives its call (asyncio keeps only weak references)
+        self._warm_ups: set[asyncio.Task[None]] = set()
         self._audio: CallAudio | None = None
         self._clips: dict[tuple[str, str], bytes] = {}  # canned lines at 48 kHz by (language, text) (no user data)
         self._last: tuple[float, int] | None = None  # the last call: wall start, minutes
         self._not_ready_at: float | None = None
         self._detector = "not ready"  # the speech detector's state at the last readiness check (detector_state)
+        self._turn_detector = "not ready"  # the turn detector's (Smart Turn), read with it
         self.saying = ""  # the clip being spoken now
         self.said: list[str] = []  # clips finished (played whole or cut off), latest last; the newest 20 kept
 
@@ -776,9 +842,10 @@ class CallManager:
     def speaking(self) -> bool:
         return self._audio is not None and self._audio.speaking.is_set()
 
-    def status_line(self, next_call: str = "", detector: str = "") -> str:
+    def status_line(self, next_call: str = "", detector: str = "", turn: str = "") -> str:
         """/status: whether she is in a call, the last one, the speech detector's state (`detector`, when speech stops
-        her) and (from the reminders) the next call she will place."""
+        her or holds the pause), the turn detector's (`turn`, with early end) and (from the reminders) the next call
+        she will place."""
         if self._call is not None:
             line = f"Calls: in a call since {self._hhmm(self._call.started_wall)}"
         else:
@@ -787,15 +854,25 @@ class CallManager:
                 line += f" (last call {self._hhmm(self._last[0])}, {self._last[1]} min)"
         if detector:
             line += f" · speech detector: {detector}"
+        if turn:
+            line += f" · turn detector: {turn}"
         return f"{line} · next call {next_call}" if next_call and self._call is None else line
 
+    async def detectors(self) -> tuple[str, str]:
+        """The two detectors' states for /status, from one health read (voice.detector_state: ready, loading,
+        unavailable, old voice service or not ready): the speech detector's when speech stops her ([calls] interrupt =
+        "only speech") or holds the pause (pause = "no speech"), the turn detector's with early end; "" for one that
+        nothing waits for."""
+        s = self.settings
+        speech, early = s.barge == "speech" or s.pause == "speech", s.early_end
+        if not speech and not early:
+            return "", ""
+        health = await self._voice.health()
+        return (detector_state(health) if speech else "", detector_state(health, part="turn") if early else "")
+
     async def detector(self) -> str:
-        """The speech detector's state for /status when speech stops her ([calls] interrupt = "only speech", the
-        default): ready, loading, unavailable, old voice service or not ready (voice.detector_state); "" with any sound
-        (loudness)."""
-        if self.settings.barge != "speech":
-            return ""
-        return detector_state(await self._voice.health())
+        """The speech detector's state for /status (see `detectors`); "" when nothing waits for it."""
+        return (await self.detectors())[0]
 
     def _hhmm(self, stamp: float) -> str:
         return datetime.fromtimestamp(stamp, self._tz).strftime("%H:%M")
@@ -960,17 +1037,37 @@ class CallManager:
 
     async def _voice_ready(self) -> bool:
         health = await self._voice.health()
-        self._detector = detector_state(health)  # checked just before every call: the call's barge-in uses it
+        # checked just before every call: the call's barge-in and end of turn use them
+        self._detector = detector_state(health)
+        self._turn_detector = detector_state(health, part="turn")
         return voice_ready(health)
 
-    def _barge(self) -> Barge:
-        """The call's barge-in rules: the speech detector (one detector state per call) when the service has it ready,
-        else loudness, said once when speech should have stopped her."""
+    def _barge(self, stream: str) -> Barge:
+        """The call's barge-in rules: the speech detector on the call's `stream` (one detector state per call) when the
+        service has it ready, else loudness, said once when speech should have stopped her or held the pause."""
+        s = self.settings
         if self._detector != "ready":
-            if self.settings.barge == "speech":
+            if s.barge == "speech" or s.pause == "speech":
                 log.info("calls: speech detector %s; loudness decides this call", self._detector)
-            return Barge(self.settings.barge)
-        return Barge(self.settings.barge, functools.partial(self._voice.vad, stream=uuid.uuid4().hex))
+            return Barge(s.barge)
+        return Barge(s.barge, functools.partial(self._voice.vad, stream=stream))
+
+    def _turn_end(self, stream: str) -> TurnEnd | None:
+        """The call's end-of-turn rules (call_audio.TurnEnd): Smart Turn when early end is on and its detector is
+        ready (else the full pause, said once), and the pause by speech on the call's barge-in `stream` when it is on
+        and the speech detector is ready (else loudness: `_barge` said so). None with both off: today's listen."""
+        s = self.settings
+        if not s.early_end and s.pause != "speech":
+            return None
+        judge = None
+        if s.early_end and self._turn_detector == "ready":
+            judge = self._voice.turn
+        elif s.early_end:
+            log.info("calls: turn detector %s; the full pause decides this call", self._turn_detector)
+        detect = None
+        if s.pause == "speech" and self._detector == "ready":
+            detect = functools.partial(self._voice.vad, stream=stream)
+        return TurnEnd(judge, detect, early_pause_s=s.early_end_pause_s, early_end=s.early_end, pause=s.pause)
 
     async def _not_ready(self, aci: str) -> None:
         now = self._clock()
@@ -986,6 +1083,7 @@ class CallManager:
     async def _run_call(self, call: _Call, opening: _Opening | None = None) -> None:
         """An incoming call (rings, then answered), or one she placed that was picked up (`opening`)."""
         self._host.call_started(call.aci, practice=call.practice)
+        self._warm_up(call)  # after the start (the app's glance is read from it), before the ringing
         log.info("calls: answering" if opening is None else "calls: the call placed was picked up")
         audio: CallAudio | None = None
         tasks: list[asyncio.Task[Any]] = []
@@ -1001,7 +1099,9 @@ class CallManager:
             self._reached(call.aci)  # connected: no "voice ready" note owed to this caller
             path = socket_path(accepted, connected, self.settings.socket_dir, call.call_id)
             reader, writer = await self._connect(path)
-            audio = CallAudio(reader, writer, self._barge())
+            stream = uuid.uuid4().hex  # one speech detector state for the call: barge-in and the pause by speech
+            audio = CallAudio(reader, writer, self._barge(stream))
+            call.turn_end = self._turn_end(stream)
             self._audio = audio
             tasks = [asyncio.create_task(audio.pump()), asyncio.create_task(self._watch(call, audio))]
             await asyncio.wait_for(audio.started.wait(), CONNECT_SECONDS)
@@ -1022,6 +1122,10 @@ class CallManager:
             if audio is not None:
                 audio.barge.close()
                 log.info("%s", audio.barge.summary())
+                if call.turn_end is not None:
+                    call.turn_end.close()
+                    for line in call.turn_end.summary():
+                        log.info("%s", line)
                 audio.close()
             if not call.ended.is_set():
                 with contextlib.suppress(Exception):
@@ -1036,6 +1140,23 @@ class CallManager:
             self._host.call_ended()
             log.info("calls: ended after %d min, %d turns", minutes, call.user_turns)
             await self._after(call, minutes)
+
+    def _warm_up(self, call: _Call) -> None:
+        """The model's warm-up for this call (Host.call_warm_up), once, in its own task: the call never awaits it, and
+        its end never cancels it (an abort while Ollama loads the model stops Ollama's runner; a finished read is
+        harmless)."""
+        if call.warm_up is not None:
+            return
+        task = asyncio.create_task(self._warming(call), name="call-warm-up")
+        call.warm_up = task
+        self._warm_ups.add(task)
+        task.add_done_callback(self._warm_ups.discard)
+
+    async def _warming(self, call: _Call) -> None:
+        try:
+            await self._host.call_warm_up(call.aci, practice=call.practice)
+        except Exception as exc:  # never into the call: one line, the kind only
+            log.warning("calls: model warm-up failed (%s)", type(exc).__name__)
 
     async def _after(self, call: _Call, minutes: int) -> None:
         with contextlib.suppress(Exception):
@@ -1105,7 +1226,10 @@ class CallManager:
                 wait = s.idle_prompt_s if not prompted else max(1.0, s.idle_hangup_s - s.idle_prompt_s)
                 if waking:
                     wait = s.wake_silence_s
-                clip, info = await audio.listen(end_silence_s=s.end_of_turn_s, no_speech_s=min(wait, left))
+                audio.unwatch()  # a watch after an earlier end is over: what comes now is this listen's
+                clip, info = await audio.listen(
+                    end_silence_s=s.end_of_turn_s, no_speech_s=min(wait, left), turn=call.turn_end
+                )
                 if not clip and waking and wait <= left:
                     log.info("calls: no answer to the wake-up line in %.0f s; goodbye", wait)
                     await self._say_line(audio, self._pick(lines.bye), call.language)
@@ -1143,9 +1267,15 @@ class CallManager:
                         info.get("peak"),
                         info.get("floor"),
                     )
+                    self._no_turn(call)
                     continue
+                self._watch_after(call, audio, info)
                 try:
-                    text = (await self._voice.transcribe(pcm48_to_wav16k(clip), language=call.language)).text
+                    text = await self._hear(call, clip, info)
+                    # typing or noise heard as "thank" or "*music*": silence
+                    noise = is_noise_transcript(text, float(info.get("sustained_s", voiced_s)))
+                    if not noise:
+                        text = await self._hold(call, audio, text, clip, info)
                 except VoiceError:
                     hearing_trouble += 1
                     if hearing_trouble >= 2:
@@ -1153,23 +1283,16 @@ class CallManager:
                     await self._say_line(audio, lines.hearing, call.language)
                     continue
                 hearing_trouble = 0
-                sustained_s = float(info.get("sustained_s", voiced_s))
-                log.info(
-                    "calls: heard %d words (speech %.1f s, voiced %.2f s, sustained %.2f s, peak %s, floor %s)",
-                    len(text.split()),
-                    float(info.get("speech_s", 0.0)),
-                    voiced_s,
-                    sustained_s,
-                    info.get("peak"),
-                    info.get("floor"),
-                )
-                if is_noise_transcript(text, sustained_s):  # typing or noise heard as "thank" or "*music*": silence
+                if noise:
                     log.info("calls: noise heard as words; listening on")
+                    self._no_turn(call)
                     continue
             else:
                 text, pending = pending, None
             if not real_words(text):  # a cough, a noise, a breath: she just keeps listening (no "sorry?")
                 log.info("calls: a sound without words; listening on")
+                if not cutting_in:
+                    self._no_turn(call)
                 continue
             if is_lone_stop(text, name=self.name):
                 await self._host.call_drop_waiting(call.aci)  # like any answer but yes, a stop drops the question
@@ -1185,17 +1308,17 @@ class CallManager:
             # a "got it" only for a request: never before the answer to a device question (it comes at once, and a
             # sound must not seem a yes), never after a few words ("how are you?" needs no "got it"), never on two
             # turns in a row (owner, 16 Oct: repetitive)
-            acknowledge = (
-                s.acknowledge
-                and not question_waiting
-                and not call.acknowledged_last
-                and turn_words(text) >= ACK_MIN_WORDS
-            )
+            may = s.acknowledge and not question_waiting and not call.acknowledged_last
+            acknowledge = may and turn_words(text) >= ACK_MIN_WORDS
             call.acknowledged_last = acknowledge
-            turn = await self._turn(call, audio, said, acknowledge=acknowledge)
-            interruption, heard = await self._speak(call, audio, turn, waiting=turn.asks_yes)
+            # the model's first try came back empty (research, 17 Oct: about 10 s of silence, then the retry): the
+            # same rules but the few words', which would leave only turns that had one at their start; one a turn
+            turn = await self._turn(call, audio, said, acknowledge=acknowledge, on_retry=may and not acknowledge)
+            interruption, heard, taken_at = await self._speak(call, audio, turn, waiting=turn.asks_yes)
             call.lines.append(f"{self.name}: {heard}")
             question_waiting = turn.asks_yes and interruption is None
+            if interruption is not None and not cutting_in:
+                self._taken_over(call, interruption, taken_at)
             if interruption is not None:
                 if turn.reply_id is not None:
                     self._host.call_interrupted(turn.reply_id, heard)
@@ -1210,29 +1333,119 @@ class CallManager:
             ):
                 return  # she said goodbye (or answered the user's wrap-up or goodbye) whole: hung up in _run_call
 
+    async def _hear(self, call: _Call, clip: bytes, info: Mapping[str, Any]) -> str:
+        """What the caller said in `clip` (Whisper, told the call's language); the log has its numbers only."""
+        text = (await self._voice.transcribe(pcm48_to_wav16k(clip), language=call.language)).text
+        voiced_s = float(info.get("voiced_s", 99.0))
+        log.info(
+            "calls: heard %d words (speech %.1f s, voiced %.2f s, sustained %.2f s, peak %s, floor %s)",
+            len(text.split()),
+            float(info.get("speech_s", 0.0)),
+            voiced_s,
+            float(info.get("sustained_s", voiced_s)),
+            info.get("peak"),
+            info.get("floor"),
+        )
+        return text
+
+    async def _hold(self, call: _Call, audio: CallAudio, text: str, clip: bytes, info: Mapping[str, Any]) -> str:
+        """An early end whose words end the call or end like they go on (`_hold_reason`) waits out the full pause
+        after all: a listen for the rest of it in call time (what came in meanwhile is heard first). Nobody speaks: the
+        turn stands. The caller goes on: that is joined to the turn's clip and heard whole, and checked again, up to
+        HOLD_MAX_S of audio (call_audio.TurnEnd: `held`, then `joined`). Returns the turn's words."""
+        turn_end, s = call.turn_end, self.settings
+        while turn_end is not None and info.get("ended") in EARLY_KINDS:
+            room = HOLD_MAX_S - len(clip) / (2 * RATE)
+            reason = self._hold_reason(call, text)
+            if reason is None or room < 1.0:
+                break
+            audio.unwatch()
+            turn_end.held(reason)
+            rest = max(0.0, s.end_of_turn_s - float(info.get("quiet_s", 0.0)))
+            more, more_info = await audio.listen(
+                end_silence_s=s.end_of_turn_s, no_speech_s=rest, max_s=room, turn=turn_end
+            )
+            if not more:
+                log.info("calls: early end held (%s); the turn stands", reason)
+                break
+            log.info("calls: early end held (%s); the caller went on", reason)
+            turn_end.joined()
+            self._watch_after(call, audio, more_info)
+            clip += more
+            info = more_info | {
+                "speech_s": round(len(clip) / (2 * RATE), 2),
+                "voiced_s": round(float(info.get("voiced_s", 0.0)) + float(more_info.get("voiced_s", 0.0)), 2),
+                "sustained_s": round(float(info.get("sustained_s", 0.0)) + float(more_info.get("sustained_s", 0.0)), 2),
+                "peak": max(int(info.get("peak", 0)), int(more_info.get("peak", 0))),
+            }
+            text = await self._hear(call, clip, info)
+        return text
+
+    def _hold_reason(self, call: _Call, text: str) -> str | None:
+        """Why an early end waits out the full pause after all (call_audio.HOLDS): its words would end the call (a
+        goodbye, leave-taking, a wrap-up, asking her to hang up), or they end like more is coming (`goes_on`); None:
+        they stand. A hold only costs today's full pause."""
+        if is_goodbye(text, name=self.name) or self._leaving(call, text) or is_wrap_up(text) or wants_hang_up(text):
+            return "ends the call"
+        return "goes on" if goes_on(text, call.language) else None
+
+    @staticmethod
+    def _no_turn(call: _Call) -> None:
+        """The latest end held noise or no words: no turn for the end lines (call_audio.TurnEnd.noise)."""
+        if call.turn_end is not None:
+            call.turn_end.noise()
+
+    def _watch_after(self, call: _Call, audio: CallAudio, info: Mapping[str, Any]) -> None:
+        """After an early end, while Whisper and the answer work: the caller going on, sustained (as loud as the listen
+        needs: max(4x floor, 450)) and heard as speech by the speech detector when the call has one, within what would
+        have been the full pause was cut off by it (TurnEnd.went_on; CallAudio.watch). Over when she answers, at the
+        next listen or in a hold."""
+        if call.turn_end is None or info.get("ended") not in EARLY_KINDS:
+            return
+        rest = round((self.settings.end_of_turn_s - float(info.get("quiet_s", 0.0))) / FRAME_S)
+        level = max(LISTEN_FLOOR_FACTOR * float(info.get("floor", 0.0)), LISTEN_MIN_RMS)
+        audio.watch(rest, level, call.turn_end.went_on)
+
+    @staticmethod
+    def _taken_over(call: _Call, words: str, at_s: float | None) -> None:
+        """The caller took over her answer to a turn `at_s` into it (after its lead): within EARLY_BARGE_S it counts
+        against the end before it, early or full (TurnEnd.barged_early). Noise and her own voice are no takeover."""
+        if call.turn_end is not None and at_s is not None and at_s <= EARLY_BARGE_S and real_words(words):
+            call.turn_end.barged_early(at_s)
+
     def _leaving(self, call: _Call, text: str) -> bool:
         """The user said goodbye with more than the goodbye, or takes leave: she hangs up once her reply is spoken."""
         return says_goodbye(text, name=self.name, language=call.language) or takes_leave(
             text, name=self.name, language=call.language
         )
 
-    async def _turn(self, call: _Call, audio: CallAudio, text: str, *, acknowledge: bool) -> Turn:
-        """The app's answer. A short "Got it." first when `acknowledge` (the request was taken in). A varied
-        thinking line when the answer takes a moment after that (then a short pause before the answer), a "let me
-        check" line when a tool runs (each at most once). An answer that takes too long, outlives the call or is
-        left by an error is cancelled (never left running beside the next turn or after the call) and any device
-        question it raised is dropped; when the call ended meanwhile, the user gets a note that it was not done."""
+    async def _turn(
+        self, call: _Call, audio: CallAudio, text: str, *, acknowledge: bool, on_retry: bool = False
+    ) -> Turn:
+        """The app's answer. A short "Got it." first when `acknowledge` (the request was taken in), or with
+        `on_retry` as soon as the model's first try came back empty and it is asked again (the caller is not left in
+        silence; it counts as this turn's, so the next request gets none), unless a thinking or checking line came
+        before it. A varied thinking line when the answer takes a moment after that (then a short pause before the
+        answer), a "let me check" line when a tool runs (each at most once). An answer that takes too long, outlives
+        the call or is left by an error is cancelled (never left running beside the next turn or after the call) and
+        any device question it raised is dropped; when the call ended meanwhile, the user gets a note that it was not
+        done."""
         s = self.settings
         tools = asyncio.Event()
-        task = asyncio.create_task(self._host.call_turn(call.aci, text, tools.set, practice=call.practice))
+        retry = asyncio.Event()
+        task = asyncio.create_task(
+            self._host.call_turn(call.aci, text, tools.set, practice=call.practice, on_retry=retry.set)
+        )
         ended = asyncio.create_task(call.ended.wait())
         thought = checked = not s.fillers  # without fillers she simply answers when the answer is ready
+        filled = False  # a thinking or checking line was said: no acknowledgement for a retry after it
         line_end: float | None = None
         started = think_from = self._clock()
         lines = call.spoken
         try:
             if acknowledge:  # "Got it." while the answer is already being worked on: the request was taken in
-                await self._say_line(audio, self._pick_acknowledgement(lines.acknowledge), call.language)
+                ack = self._pick_acknowledgement(lines.acknowledge)
+                await self._say_line(audio, ack, call.language, watch=True)  # the caller may go on over it
                 line_end = think_from = self._clock()  # a thinking line only after a real wait beyond it
             while not task.done():
                 now = self._clock()
@@ -1240,23 +1453,34 @@ class CallManager:
                     log.warning("calls: an answer took over %.0f s", s.turn_timeout_s)
                     await self._abandon(call, task)
                     return Turn(lines.lost)
+                if on_retry and retry.is_set():  # asked again: the acknowledgement now, while the retry runs
+                    on_retry = False
+                    if not filled:  # after "Let me think." or "Let me check." it would come in the wrong order
+                        call.acknowledged_last = True
+                        log.info("calls: an acknowledgement while an empty answer is asked again")
+                        ack = self._pick_acknowledgement(lines.acknowledge)
+                        await self._say_line(audio, ack, call.language, watch=True)
+                        line_end = think_from = self._clock()
+                        continue
                 check = tools.is_set() and not checked
                 think = not thought and not checked and now - think_from >= s.thinking_after_s
                 if check or think:
                     checked = checked or check
-                    thought = True
+                    thought = filled = True
                     line = self._pick(lines.checking if check else lines.thinking)
-                    await self._say_line(audio, line, call.language)
+                    await self._say_line(audio, line, call.language, watch=True)
                     line_end = self._clock()
                     continue
                 waits: set[asyncio.Future[Any]] = {task, ended}
-                waiter: asyncio.Task[bool] | None = None
+                waiters: list[asyncio.Task[bool]] = []
                 if not checked and not tools.is_set():
-                    waiter = asyncio.create_task(tools.wait())
-                    waits.add(waiter)
+                    waiters.append(asyncio.create_task(tools.wait()))
+                if on_retry:
+                    waiters.append(asyncio.create_task(retry.wait()))
+                waits.update(waiters)
                 limit = started + s.turn_timeout_s - now if thought else think_from + s.thinking_after_s - now
                 await asyncio.wait(waits, timeout=max(0.0, limit), return_when=asyncio.FIRST_COMPLETED)
-                if waiter is not None:
+                for waiter in waiters:
                     waiter.cancel()
                 if task.done():
                     break
@@ -1312,13 +1536,21 @@ class CallManager:
         return clip
 
     async def _say_line(
-        self, audio: CallAudio, text: str, language: str, *, barge: bool = False, keep: bool = True
+        self,
+        audio: CallAudio,
+        text: str,
+        language: str,
+        *,
+        barge: bool = False,
+        keep: bool = True,
+        watch: bool = False,
     ) -> str | None:
         """A code-written line in `language`, spoken whole; with barge-in it returns what the caller said over it.
-        `keep`: the clip may be kept for next time (canned lines only, never one with the user's words)."""
+        `keep`: the clip may be kept for next time (canned lines only, never one with the user's words). `watch`: a
+        line while her answer is worked out, so the watch after an early end goes on (`CallAudio.say`)."""
         self.saying = text
         clip = await self._clip(text, language, keep=keep)
-        result = await self._say_checked(audio, faint_noise(LEAD_MS) + clip, barge, hers=(text,))
+        result = await self._say_checked(audio, faint_noise(LEAD_MS) + clip, barge, hers=(text,), watch=watch)
         self._done(text)
         return result[0] if result else None
 
@@ -1326,15 +1558,17 @@ class CallManager:
         self.said = [*self.said[-19:], text]
         self.saying = ""
 
-    async def _speak(self, call: _Call, audio: CallAudio, turn: Turn, *, waiting: bool) -> tuple[str | None, str]:
+    async def _speak(
+        self, call: _Call, audio: CallAudio, turn: Turn, *, waiting: bool
+    ) -> tuple[str | None, str, float | None]:
         """Gemma's answer sentence by sentence (the next one is made while one plays), then code's own words: in
         English, so a device question is always clear (on an English call they simply follow). On a call in another
         language a turn that waits for a device's yes says only code's question: Gemma's words about the device are
         left out (in Dutch it claimed a switch that was still waiting for the yes), and app.call_turn keeps only that
         question in the history too; a turn whose reminder was not set comes with no words of hers at all, only code's
         line why. `waiting`: a device question waits for the yes (turn.asks_yes): its last sentence is said whole, and
-        a yes word over the ones before answers it. Returns what the caller said over it (or None) and what they heard
-        of it."""
+        a yes word over the ones before answers it. Returns what the caller said over it (or None), what they heard
+        of it, and how far into her answer (after the lead) they took over (or None)."""
         if call.language == ENGLISH:
             spoken = [(_parts(f"{turn.text} {turn.code_text}"), ENGLISH)]
         elif turn.asks_yes and turn.code_text.strip():
@@ -1344,7 +1578,7 @@ class CallManager:
         said = [(part, language) for parts_, language in spoken for part in parts_]
         parts = [part for part, _ in said]
         if not parts:
-            return None, ""
+            return None, "", None
         clips: asyncio.Queue[bytes | VoiceError] = asyncio.Queue(maxsize=1)
 
         async def produce() -> None:
@@ -1359,6 +1593,7 @@ class CallManager:
                     return
 
         producer = asyncio.create_task(produce())
+        played_s = 0.0  # her answer's sentences before this one, whole, in seconds
         try:
             for index, part in enumerate(parts):
                 item = await self._next_clip(clips, audio)
@@ -1373,11 +1608,12 @@ class CallManager:
                 )
                 self._done(part)
                 if result is not None:
-                    text, fraction = result
+                    text, fraction, stop_s = result
                     cut = part[: int(len(part) * fraction)].rsplit(" ", 1)[0] if fraction < 1 else part
                     heard = " ".join([*parts[:index], cut]).strip()
-                    return text, f"{heard} …".strip()
-            return None, " ".join(parts)
+                    return text, f"{heard} …".strip(), max(0.0, played_s + stop_s - len(lead) / (2 * RATE))
+                played_s += len(item) / (2 * RATE)
+            return None, " ".join(parts), None
         finally:
             producer.cancel()
             self.saying = ""
@@ -1400,21 +1636,24 @@ class CallManager:
         fresh: bool = True,
         hers: tuple[str, ...] = (),
         waiting: bool = False,
-    ) -> tuple[str, float] | None:
+        watch: bool = False,
+    ) -> tuple[str, float, float] | None:
         """Say `pcm` (her sentences `hers`: the one before and the one being said); when the caller talks over it,
-        listen and check the words: an interruption returns (what they said, how much of the clip went out); a cough,
+        listen and check the words: an interruption returns (what they said, how much of the clip went out, and the
+        stop's place in the clip in seconds); a cough,
         a noise or her own voice (compared with what she played of `hers` up to the stop) resumes a little before the
         stop. Her own voice also raises the level a stop needs, once a call (call_audio.Barge.her_own_voice); it never
         reaches Gemma. A listener's acknowledgement alone ("okay", "mm-hm") resumes too, unless `hers` asks something
         or a device question is `waiting`: then it answers her (owner, 14 Oct). Each acknowledgement takes her further
         on: a little before the stop, never back to where she resumed (a stop that soon would replay the same audio
-        for good), and after MAX_FALSE_BARGE of them in one clip from the stop itself."""
+        for good), and after MAX_FALSE_BARGE of them in one clip from the stop itself. `watch` (without barge-in): the
+        watch after an early end goes on over it (`CallAudio.say`)."""
         offset = 0
         false_alarms = 0
         carried_on = 0  # acknowledgements in this clip
         resumed = False
         while True:
-            said = await audio.say(pcm[offset:], barge=barge, fresh=fresh and not resumed)
+            said = await audio.say(pcm[offset:], barge=barge, fresh=fresh and not resumed, watch=watch and not barge)
             if not said.barged:
                 return None
             stop = offset + 2 * int(said.played_s * RATE)
@@ -1451,7 +1690,7 @@ class CallManager:
                 taken = "" if noise or own else text  # noise and her own words never reach Gemma
                 if real_words(taken):
                     log.info("calls: taken over (%d words)", turn_words(taken))
-                return taken, fraction
+                return taken, fraction, stop / (2 * RATE)
             false_alarms += 1
             log.info("calls: her own voice heard; carrying on" if own else "calls: a sound without words; carrying on")
             offset = max(0, stop - 2 * int(RESUME_BACK_S * RATE))

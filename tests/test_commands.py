@@ -549,7 +549,7 @@ async def test_a_switch_says_when_the_voice_service_cannot_do_the_language(store
     assert await commands.handle(command(store, "/language nl")) == (
         "Language: Nederlands (nl). From now on I listen and answer in Dutch. Code-written notes stay in English.\n"
         "Voice notes and calls in Dutch need a newer voice service: run scripts/install-voice-daemon.sh on the Mac "
-        "(it asks for sudo: run it yourself)."
+        "(it asks for your Mac password: run it yourself)."
     )
     assert switched == ["nl"] and store.get_state(LANGUAGE_KEY) == "nl"
     installed[0] = ("en", "de")

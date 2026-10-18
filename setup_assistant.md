@@ -150,16 +150,37 @@ Memory: while loaded, the model needs about 18 to 20 GB, so this guide assumes a
 smaller model, Gemma 4 12B (`gemma4:12b-mlx`), which failed some of her safety tests (15 Oct, run twice; SECURITY.md,
 known gaps): setup says what failed and downloads it only on a yes. 32 GB with Gemma 26B is the tested setup.
 
-Then give the model the name the code uses, with a larger context window. Ollama's default window is small on many setups,
-and Ollama cuts a longer prompt without a word. Estia sends about 12,000 tokens of history, so a small window would lose
-the start of a long chat:
+Then give the model the name the code uses, with a larger context window and the prompt Google wrote for its size.
+Ollama's default window is small on many setups, and Ollama cuts a longer prompt without a word. Estia sends about 12,000
+tokens of history, so a small window would lose the start of a long chat. Ollama picks Gemma 4's prompt by the model's
+name, and `local-worker` names no size: without the `RENDERER gemma4-large` line it gets the prompt for Gemma 4's small
+models. That line is Google's prompt for 12B and larger, right for both `-mlx` builds: it ends with an empty "thought"
+block, which Google says keeps these models from starting a hidden thought when thinking is off. With the small prompt,
+about 1 answer in 10 came back empty and was asked again (11 to 17 Oct; the likely cause, not proven):
 
 ```sh
-mf="$(mktemp)" && printf 'FROM gemma4:26b-mlx\nPARAMETER num_ctx 32768\n' > "$mf" && ollama create local-worker -f "$mf"; rm -f "$mf"
+mf="$(mktemp)" && printf 'FROM gemma4:26b-mlx\nPARAMETER num_ctx 32768\nRENDERER gemma4-large\n' > "$mf" && ollama create local-worker -f "$mf"; rm -f "$mf"
 ```
 
 Leave `model` out of the config (2.4), and Estia uses `local-worker`. After your first message, `ollama ps` shows the
 model with its context in the CONTEXT column; it should read 32768.
+
+**`local-worker` made before 0.9.3** has the small models' prompt: doctor shows ! "Model prompt", read from the model's
+own Modelfile in Ollama (nothing of a chat). It is made again once, and only its prompt changes: the same model, the
+same context. Its digest changes with it, so with `model_digest` in the config, her answers pause until the config has
+the new digest. In this order:
+
+1. Stop her: `/usr/bin/sudo /usr/local/estia/bin/estia stop` (before her own user: stop `scripts/run.sh` with Ctrl-C).
+2. Run `scripts/setup.sh` and answer y at "Make local-worker again now?". Setup makes it again from the model it was
+   made from and prints its new digest. It tells that model by what local-worker holds (read from Ollama, never
+   changed): a copy of one of its two models, or one made from it with only a context of its own, as setup made it
+   before 0.9.3. Setup leaves an alias it cannot trace to one of its two models as it is: then
+   make it again by hand with the line above, keeping its context (`ollama show local-worker --parameters` lists
+   `num_ctx` when it has one; without one, leave that line out).
+3. With `model_digest` in the config: replace that line with `model_digest = "sha256:<new digest>"` (in her own user:
+   `/usr/bin/sudo /usr/local/estia/bin/estia config`). Doctor's "Model pin" line shows the digest Ollama lists, too.
+4. Start her: `/usr/bin/sudo /usr/local/estia/bin/estia start`. Doctor then shows no "Model prompt" line, and ✓ for
+   "Model pin".
 
 The model always runs on the Mac. Ollama also offers cloud models, which run on Ollama's servers: their tag ends in
 `-cloud` or `:cloud` (`gpt-oss:120b-cloud`). Such a `model` is refused when the config is read. A name you made yourself
@@ -169,6 +190,10 @@ check sees a cloud model, no message goes to it: answers pause, a note from the 
 (commands and reminders still work), the end of the pause is one more note, and doctor shows ✗ with the fix. An entry
 that cannot be read changes nothing. `local-worker`, made above from a downloaded model, is local. To also notice another
 model put in under the same name, pin its digest with `model_digest` (`config.example.toml`).
+
+Every request to the model names Google's sampling setting for Gemma 4, `top_p` 0.95: Ollama's OpenAI-style interface
+uses 1.0 for a request that names none, over the model's own 0.95. top_k stays the model's own 64, and the temperature
+Google's 1.0, except where a request sets its own (the practice recap: 0).
 
 While it stays loaded, the MLX build keeps earlier conversations in memory (up to 8 GB more). If `ollama ps` shows far
 more memory than expected, `ollama stop <tag>` frees it; the next message loads it again (a few seconds). Doctor's
@@ -1104,6 +1129,61 @@ the first answer waits for it at most 3 seconds more, and a slower calendar join
 cannot be read, for any reason, gives `Calendar today: not read just now.`, and the mail counts stay. The numbers are
 the code's English; she speaks the call's language. A practice call (`/babble`) gets none.
 
+**When your turn ends.** Two parts decide it, both on by default (17 Oct 2026, on every call, practice calls too):
+
+- `early_end = true`: at a short pause (`early_end_pause_seconds`, 0.6 by default, from 0.3 to 1.5 and below
+  `end_of_turn_seconds`) the voice service's turn detector (Smart Turn v3.2, a small model run on the Mac's processor)
+  hears the turn's last 8 seconds and says how sure it is that the sentence is finished, once a pause. At least 80%
+  sure: the turn ends at once. At least 50%, fairly sure, she waits 1.5 seconds of pause. Anything else, unsure, she
+  waits the full pause (`end_of_turn_seconds`, 2.3 by default), and so does no answer within 0.3 seconds. Three failed
+  or late answers in a row mean the full pause for the rest of the call, and the log says so once. Known limits: in
+  tests, an unfinished sentence with a pause of 0.6 seconds or more inside it was judged finished at once about 1 time
+  in 22, and about 1 in 16 when the pause lasted 1.5 seconds; in Polish and Spanish 1 in 15 at once, and with street or
+  café noise about 1 in 9 in German and Russian. Most test voices were computer voices (92%); not yet tested on Signal's
+  call audio.
+- `pause = "no speech"`: the speech detector also rates the sound in a pause, 256 ms at a time. A stretch rated below
+  10% speech, with the next one too (or right after a loud one rated that low), counts as pause. Typing, dishes or
+  traffic that goes on in a pause keeps a turn open for less time (in tests, 1.9 to 4.7 seconds less); a short noise in
+  the first second or so after the last word still keeps it open, and other voices mostly do too. In tests with a short
+  noise after the last word, 37% of turns ended sooner, by 0.26 seconds on average, and no spoken word, whispers
+  included, was taken for noise (200 made turns, computer voices). A failed answer is never counted as pause, and a turn
+  never ends later than with `pause = "quiet"`, where any sound keeps it open. Three failed answers in a row: any sound
+  keeps a turn open for the rest of the call.
+
+After an early end, words that would end the call (a goodbye, leave-taking such as "I have to go", a wrap-up such as
+"that's all", "you can hang up") or that end like more is coming (a comma, an ellipsis or a dash at the end, or a last
+word such as "to", "but" or "um", in the call's language or English) wait out the full pause after all. When you go
+on in that time, both parts are joined and heard as one turn, up to 2 minutes of audio. What you say over her answer
+ends by its own shorter pause (1.2 seconds), as before.
+
+Each call's end logs two lines after the barge-in line, numbers only, for example `calls: early end on (short pause
+0.60 s, full 2.30 s): 14 turns, 9 ended early (sure 8, probably 1); saved 15.1 s, median 1.65 s a turn; went on 2
+(sure 1, probably 1, speech 0), caught by the hold 1, cut off 1 (sure 1, probably 0, speech 0); held 2 (goes on 1,
+ends the call 1); taken over in her first 1.5 s: 0 after an early end, 0 after a full pause; 12 asks (sure 8, probably
+1, not 2, dropped 1), answer median 4 ms, slowest 18 ms, 0 failed; saved per turn 1.68 1.65 0.00 …` and `calls: pause
+by speech: 14 turns, 3 ended sooner than by loudness (2.1 s in all, median 0.70 s), 57 loud frames counted as pause;
+detector 412 chunks, slowest 7 ms, 0 failed`. "Went on" counts the times you kept talking within the full pause after an
+early end, over her "Got it." too: sound the speech detector hears as speech (any sustained sound when it cannot answer,
+and during a hold); "cut off" those no wait caught; "saved per turn" lists each turn's time saved against the full
+pause. `/usr/bin/sudo /usr/local/estia/bin/estia logs -n 5000 | grep "calls: early end on"` lists them. The owner's test
+over all calls: cut off at most 1 turn in 20, and at least 1 second saved per turn on median. `early_end = false` and
+`pause = "quiet"` give the end of turn from before 17 Oct 2026: the full pause of quiet, and no end lines.
+
+The turn detector needs the current voice service (`scripts/install-voice-daemon.sh`, asks for your Mac password: run it
+yourself). Its model (about 17 MB) is downloaded at the first start into
+`voice-models/models/aufklarer/Smart-Turn-v3.2-CoreML` in the voice service's folder (in her own user
+`/var/estia/Library/Application Support/local-assistant`, before the move
+`~/Library/Application Support/local-assistant`), pinned to one commit and checked against its sha256 values at every
+start: a changed or extra file is never loaded, and the folder is set aside and downloaded again once. A download that
+failed is tried again only when the voice service starts again (`/usr/bin/sudo /usr/local/estia/bin/estia stop voice`,
+then `/usr/bin/sudo /usr/local/estia/bin/estia start voice`); her voice log says why it is unavailable
+(`/usr/bin/sudo /usr/local/estia/bin/estia logs voice`). Delete `voice-models/models/aufklarer` (in her own user, with
+admin rights) only when the log says the folder could not be set aside. `curl -s http://127.0.0.1:8150/health` shows it
+as `"turn"`: `ready`, `loading` or `unavailable`; an older voice service has no `"turn"` field. Until it is ready, every
+turn waits the full pause; a call never waits for it. With `early_end = true`, `scripts/doctor.sh` shows a Turn detector
+line (ready, loading, unavailable, old voice service or not ready) with its fix, and `/status` adds its state to the
+Calls line.
+
 **What stops her when you talk over her.** `interrupt` in `[calls]` chooses the rule:
 
 - `interrupt = "only speech"` (the default): the voice service's speech detector (Silero VAD through FluidAudio, on the
@@ -1135,16 +1215,17 @@ or the number of loud frames, the level and the floor. When the level gate turns
 one line per stretch logs the loudest such chunk, for example `calls: speech gated (p 1.00, level 132, floor 40)`. Never
 audio or words.
 
-The speech detector needs the current voice service (`scripts/install-voice-daemon.sh`, asks for your Mac password: run it
-yourself). Its model (about 1 MB) is downloaded at the first start into
-`~/Library/Application Support/local-assistant/voice-models/silero-vad`, pinned to one commit and checked against its
-sha256 values; delete that folder to download it again. `curl -s http://127.0.0.1:8150/health` shows the detector as
-`"vad"`: `ready`, `loading` or `unavailable` (the download failed or the files are not the pinned ones;
-her voice log says which: `/usr/bin/sudo /usr/local/estia/bin/estia logs voice`). An older voice service has no `"vad"` field. Until the detector
-is ready, any sound decides; a call whose detector fails or answers too late three times in a row goes on with any
-sound, and the log says so once. A call never waits for the detector. With `interrupt = "only speech"` (the default),
-`scripts/doctor.sh` shows a Speech detector line (ready, loading, unavailable, old voice service or not ready) with its
-fix, and `/status` adds the state to the Calls line.
+The speech detector needs the current voice service (`scripts/install-voice-daemon.sh`, asks for your Mac password: run
+it yourself). Its model (about 1 MB) is downloaded at the first start into `voice-models/silero-vad` in the same folder
+as the turn detector's, pinned to one commit and checked against its sha256 values; files that are not the pinned ones
+are never loaded: delete that folder (in her own user, with admin rights) to download it again. A download that failed
+is tried again when the voice service starts again. `curl -s http://127.0.0.1:8150/health` shows the detector as
+`"vad"`: `ready`, `loading` or `unavailable` (the download failed or the files are not the pinned ones; her voice log
+says which: `/usr/bin/sudo /usr/local/estia/bin/estia logs voice`). An older voice service has no `"vad"` field. Until
+the detector is ready, any sound decides; a call whose detector fails or answers too late three times in a row goes on
+with any sound, and the log says so once. A call never waits for the detector. With `interrupt = "only speech"` or
+`pause = "no speech"` (both the default), `scripts/doctor.sh` shows a Speech detector line (ready, loading, unavailable,
+old voice service or not ready) with its fix, and `/status` adds the state to the Calls line.
 
 **Her own voice.** A loud speaker next to the microphone (a laptop on Signal Desktop) can play her back and stop her.
 After every stop, the transcript is compared with what she had already said: the sentence before and the current one
@@ -1928,7 +2009,7 @@ Languages:
 - In another language than English, Gemma's rules get one line: answer only in that language, whatever language you write
   in, keeping names, code and quotes as they are. Voice notes are transcribed and spoken in it, and calls use its greeting,
   "one moment", "sorry, could you say that again?", "take your time" and goodbye, with its short "got it" ("Begrepen.")
-  when she heard a request of five words or more.
+  when she heard a request of five words or more, or when the model's first try came back empty and is asked again.
 - Code-written text stays English: notes, the digest's headings, `/status`, `/help`, errors. On a call the device
   question and the rare lines (the idle and length-cap goodbyes, device results) are spoken in English with Kokoro. When
   a device waits for the yes, she says only that question, and only it is kept (in Dutch Gemma claimed a switch before
@@ -2023,7 +2104,9 @@ Notes you may see:
 - "Estia isn't available right now, try again in a bit." Ollama is unreachable for 2 minutes.
 - "I was offline HH:MM–HH:MM, ask again if you still need something." Once after a restart, instead of answering messages older
   than 10 minutes (including those Signal delivers only after the restart).
-- "Sorry, I got confused. Could you say that again?" When anything unexpected goes wrong. You always hear back.
+- "Sorry, I got confused. Could you say that again?" When anything unexpected goes wrong, also when the model's answer
+  has neither words nor a tool call twice: it is asked once more first, and the log has a line for each try (section 7,
+  "Empty answers"). You always hear back.
 - "Late, I was offline 06:40-09:05:" with a list of reminders: they came due while the bridge was down (see above).
 - "No reminder was set: <why>." at the end of her answer: Gemma tried to set a reminder and none was set; whatever she
   wrote about it is left out. "No reminder was set. Ask me again, or use /remind." as a note: she said one was set when
@@ -2154,6 +2237,7 @@ Notes you may see:
 | The move failed | Her old setup comes back (on a first install nothing is installed). Keep the ✗ line: it names what failed. Fix that, run `scripts/migrate-to-own-user.sh --dry-run` again, then `scripts/install-daemon.sh` |
 | YouTube | Nothing to set up: always on with `read_link`. `/usr/bin/sudo /usr/local/estia/bin/estia doctor` shows a YouTube line: its last read (working, set up but not tested yet, or failing with the fix), then youtube-transcript-api's version in brackets; `/status` shows the same line without the version. "refused by the service": YouTube blocks this Mac for a while after many requests or a bot check; wait. "unreadable answer": YouTube changed; a newer pinned version of `tools/youtube` may be needed. Every video said to have no captions or to be private or removed, while `/status` shows YouTube working: YouTube may have changed too (SECURITY.md, known gaps); try a video you know has captions. "! … the YouTube helper is not set up": before her own user, run `cd tools/youtube && uv sync --frozen`. In her own user, run `/usr/bin/sudo /usr/local/estia/bin/estia-deploy`; if it says the root-run tools differ, read the diff, run `/usr/bin/sudo /usr/local/estia/bin/estia-deploy --update-tools`, then run `/usr/bin/sudo /usr/local/estia/bin/estia-deploy` again. `/usr/bin/sudo /usr/local/estia/bin/estia logs -n 5000 \| grep youtube` has outcome codes, character counts and times, never the video or its title |
 | Documents | With `[documents]`, `/usr/bin/sudo /usr/local/estia/bin/estia doctor` shows a Documents line: the helper built, the folder shared and readable, then her last look (section 3, Documents); `/status` shows the last look. `/docs` lists what she has and why a PDF cannot be read. Share again: `scripts/share-documents.sh` as you (`--dry-run` first; no admin rights); take it back: `scripts/share-documents.sh --revoke`. "macOS refuses it (operation not permitted)": the folder is in Documents, Desktop or Downloads, which macOS guards; use `~/Estia-KB` (section 3, Documents). "the documents helper is not built": in her own user `/usr/bin/sudo /usr/local/estia/bin/estia-deploy` (after `/usr/bin/sudo /usr/local/estia/bin/estia-deploy --update-tools` when it says the root-run tools differ); before, `cd tools/documents && swift build -c release`. A scan over about 190 full pages ends in a timeout: split it, and take the original out of the folder. "! … scanned pages not read (text recognition failed)": text pages are still read; restart her (`/usr/bin/sudo /usr/local/estia/bin/estia restart`), which tries text recognition again, and look for the warm-up in her log. `/usr/bin/sudo /usr/local/estia/bin/estia logs -n 5000 \| grep documents` has counts, codes and times, never a document's name or text |
+| Empty answers | An answer from the model with neither words nor a tool call is asked once more (a short nudge), and on a call she says a short line such as "Got it." meanwhile (not when she said one at the turn's start or on the turn before, not after a "let me think" or "let me check" line, and not when a device question waits). `/usr/bin/sudo /usr/local/estia/bin/estia logs -n 5000 \| grep -E "empty answer\|the retry\|practice re\|filters left nothing"` lists them, one line for each try, numbers only, never words: the kind of answer (call, text, document, practice), the try (1 or 2), why the model stopped (`length`: at the token cap, `stop`: on its own), the tokens it wrote and read, the cap, the tools offered and the tool calls it sent, the characters of its answer with and without spaces, the characters of a hidden-thinking field (0 expected), the time in ms, whether the request ended with a tool result, and the language. A second empty try gives "Sorry, I got confused." "the filters left nothing" is an answer whose only words were ones she must not say (a leaked thinking channel, a notice she wrote as if code had, a written end_call): which filter emptied it, and the length after each |
 | Backup | Not set up yet: the database and her Signal account (`/var/estia/Library/Application Support/local-assistant`, `/var/estia/.local/share/signal-cli`) have no backup |
 
 ## 8. Security

@@ -39,12 +39,12 @@ public struct SpeechRequest: Equatable, Sendable {
 
     public var engine: SpeechEngine { language == Languages.english ? .kokoro : .supertonic }
 
-    /// The text the engine gets: smart apostrophes plain, one line (Kokoro stops at a newline), and in English read
-    /// as people say it (`SpokenEnglish`: chords, numbers, dates, units and the rest as words); other languages keep
-    /// their digits (Supertonic-3 reads them, English words would be wrong).
+    /// The text the engine gets: smart apostrophes plain, one line (Kokoro stops at a newline), and read as people
+    /// say it: English by `SpokenEnglish` (chords, numbers, dates, units and the rest as words), the other ten by
+    /// `SpokenLanguage` in their own words (Supertonic-3 misreads their digits; ja and ko keep the ones it reads right).
     public var spokenInput: String {
         let plain = input.replacingOccurrences(of: "\u{2019}", with: "'").replacingOccurrences(of: "\u{2018}", with: "'")
         let oneLine = plain.components(separatedBy: .newlines).filter { !$0.isEmpty }.joined(separator: " ")
-        return engine == .kokoro ? SpokenEnglish.spoken(oneLine) : oneLine
+        return engine == .kokoro ? SpokenEnglish.spoken(oneLine) : SpokenLanguage.spoken(oneLine, language: language)
     }
 }

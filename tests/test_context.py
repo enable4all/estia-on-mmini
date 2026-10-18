@@ -87,6 +87,28 @@ def test_only_the_newest_message_shows_the_year(store: Store) -> None:
     assert "2026" not in built[0]["content"]  # the system prompt carries no date
 
 
+def test_the_input_before_the_next_message_is_the_next_inputs_prefix(store: Store) -> None:
+    """A call's warm-up (owner, 17 Oct) is built before the caller speaks: no message is the newest yet, so each one
+    comes as it will once the next one is stored (no year, none of her notes), and the next answer's input is that
+    input and the new message, byte for byte (Ollama keeps the prefix it read)."""
+    profile = Profile(store, max_chars=1_000, notes_max_chars=20_000, notes_per_message=1_500)
+    context = ContextBuilder(store, profile, TZ)
+    profile.add("Home: The user grows tomatoes in the back garden.", source_kind="chat")
+    conv = store.current_conversation()
+    asked = say(store, conv, "Should I water the garden today?", T0)
+    store.log_tool_call(asked.id, "remember", '{"fact": "The user has a garden."}', "Saved as fact #2.", True, 5)
+    reply(store, conv, "Yes, it is dry.", asked, T0 + 5_000)
+    glance = prompts.call_glance(["Mail digest: 1 to answer."], at="09:40", calendar=False, mail=True)
+    before = context.build(conv, glance=glance, call=True, newest=False)
+    assert before[1] == {"role": "user", "content": "[Thu 8 Oct 09:32] Should I water the garden today?"}
+    assert context.build(conv, glance=glance, call=True)[1] != before[1]  # the newest: the year and her notes
+    say(store, conv, "[call] And tomorrow?", T0 + 60_000)
+    after = context.build(conv, glance=glance, call=True)
+    assert after[:-1] == before
+    assert [m["role"] for m in after] == ["system", "user", "assistant", "tool", "assistant", "user"]
+    assert after[-1]["content"].endswith("[Thu 8 Oct 2026 09:33] [call] And tomorrow?")
+
+
 def test_snapshot_is_frozen_until_refreshed(store: Store) -> None:
     profile, context = make(store)
     before = context.snapshot()

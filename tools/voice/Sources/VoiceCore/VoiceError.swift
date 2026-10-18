@@ -5,6 +5,8 @@ public enum VoiceError: Error, Equatable, Sendable {
     case notAudio, tooLong, unreadable, notReady, failed, unsupportedLanguage
     /// The speech detector's: a stream id or a chunk the bridge got wrong, and a model that will not load.
     case badStream, badChunk, unavailable
+    /// The turn detector's: a window the bridge got wrong (empty, an odd byte count, over 8 s).
+    case badWindow
 
     public var status: Int {
         switch self {
@@ -14,7 +16,7 @@ public enum VoiceError: Error, Equatable, Sendable {
         case .notReady: 503
         case .failed: 500
         case .unsupportedLanguage: 400
-        case .badStream, .badChunk: 400
+        case .badStream, .badChunk, .badWindow: 400
         case .unavailable: 503
         }
     }
@@ -30,6 +32,7 @@ public enum VoiceError: Error, Equatable, Sendable {
         case .badStream: "bad_stream"
         case .badChunk: "bad_chunk"
         case .unavailable: "unavailable"
+        case .badWindow: "bad_window"
         }
     }
 

@@ -78,7 +78,7 @@ public enum HTTP {
 }
 
 public enum Route: Equatable, Sendable {
-    case transcribe, speak, vad, health, methodNotAllowed, notFound
+    case transcribe, speak, vad, turn, health, methodNotAllowed, notFound
 
     public init(_ method: String, _ target: String) {
         let path = target.split(separator: "?", maxSplits: 1).first.map(String.init) ?? target
@@ -86,6 +86,7 @@ public enum Route: Equatable, Sendable {
             "/v1/audio/transcriptions": ("POST", .transcribe),
             "/v1/audio/speech": ("POST", .speak),
             "/vad": ("POST", .vad),
+            "/turn": ("POST", .turn),
             "/health": ("GET", .health),
         ]
         guard let (wanted, route) = routes[path] else { self = .notFound; return }

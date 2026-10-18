@@ -132,16 +132,95 @@ def test_the_speech_detector_is_documented_and_credited() -> None:
     assert "via FluidAudio" in silero and "FluidInference/silero-vad-coreml" in silero and "pinned" in silero
 
 
+# owner, 17 Oct: the early end of a turn (Smart Turn) and the pause by speech, on by default with no shadow; the docs
+# say what is gained, the two settings and the measured limit in the same words, and the notices credit the model
+EARLY_END = (
+    "A turn that sounds finished ends after a short pause (0.6 seconds): Smart Turn, a small model on the Mac, hears "
+    "only the last 8 seconds and judges only whether the sentence sounds finished."
+)
+# review of 17 Oct (service I3): spike A's spread, with "a pause" defined (4.5% sure, 6.2% with the 1.5 s step; pl and
+# es 6.7%; de and ru 10.8 to 11.7% in street or café noise; 92% computer voices)
+EARLY_END_FACT = "an unfinished sentence with a pause of 0.6 seconds or more inside it was judged finished at once about 1 time in 22"
+EARLY_END_LIMIT = (
+    f"in tests, {EARLY_END_FACT}, and about 1 in 16 when the pause lasted 1.5 seconds; in Polish and Spanish 1 in 15 at "
+    "once, and with street or café noise about 1 in 9 in German and Russian. Most test voices were computer voices "
+    "(92%); not yet tested on Signal's call audio."
+)
+# review of 17 Oct (service I2): Smart Turn's three steps, in the same words everywhere
+STEPS = ("fairly sure, she waits 1.5 seconds", "unsure, she waits the full pause")
+# review of 17 Oct (service I1): what spike B measured, never more (noise that goes on: 1.9 to 4.7 s sooner in all 8;
+# a short noise right after the last word: still held by Silero's memory of the word; café voices: mostly speech)
+PAUSE_BY_SPEECH = (
+    "Typing, dishes or traffic that goes on in a pause keeps a turn open for less time (in tests, 1.9 to 4.7 seconds "
+    "less); a short noise in the first second or so after the last word still keeps it open, and other voices mostly do "
+    "too."
+)
+
+
+def test_the_early_end_is_documented_and_credited() -> None:
+    guide = prose(GUIDE)
+    assert EARLY_END in guide
+    assert "Fairly sure, she waits 1.5 seconds; unsure, she waits the full pause, a little over two seconds" in guide
+    assert "A turn that ends like it goes on, or with a goodbye, always waits the full pause." in guide
+    assert PAUSE_BY_SPEECH in guide and "no longer keep a turn open" not in guide
+    assert "`early_end = false`" in guide and '`pause = "quiet"`' in guide
+    assert EARLY_END_LIMIT in guide
+    assert "loudness" not in guide and "shadow" not in guide  # the inside names stay in the log lines
+    setup = prose(ROOT / "setup_assistant.md")
+    assert EARLY_END_LIMIT in setup
+    assert PAUSE_BY_SPEECH in setup and "no longer keep a turn open" not in setup
+    for step in STEPS:
+        assert step in setup.lower(), step
+    assert '"turn"' in setup and "voice-models/models/aufklarer" in setup  # the health field and the model's folder
+    assert 'grep "calls: early end on"' in setup and "calls: pause by speech:" in setup  # the end lines, to read
+    assert "at most 1 turn in 20" in setup  # the owner's test across calls
+    example = (ROOT / "config.example.toml").read_text(encoding="utf-8")
+    for line in ("#early_end = true", "#early_end_pause_seconds = 0.6", '#pause = "no speech"'):
+        assert line in example, line
+    assert "dishes or traffic that goes on" in example and "right after the last word" in example
+    early = " ".join(line.lstrip("# ") for line in example.split("#early_end = true", 1)[1].split("\n")[:3])
+    assert all(step in " ".join(early.split()) for step in STEPS), early
+    row = next(line for line in GUIDE.read_text(encoding="utf-8").splitlines() if "answers before a sentence" in line)
+    assert "sure at the short pause" in row and "fairly sure after 1.5 seconds" in row  # both early ends
+    assert EARLY_END_FACT in row and "1 in 20 with a long pause" not in row
+    notices = (ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+    smart = notices.split("Smart Turn v3.2", 1)[1].split("\n", 1)[0]
+    assert "pipecat-ai/smart-turn-v3" in smart and "aufklarer/Smart-Turn-v3.2-CoreML" in smart
+    # review of 17 Oct (service minor 3): where the pins live, whose file it is, and what a removed commit means
+    assert "tools/voice/Sources/VoiceCore/TurnDetector.swift" in smart
+    removed = "every turn waits the full pause"
+    for name in ("THIRD_PARTY_NOTICES.md", "SECURITY.md", "GUIDE.md"):
+        text = prose(ROOT / name)
+        assert "community conversion" in text and "not Daily's own" in text and removed in text, name
+    assert "BSD-2-Clause" in smart and "pinned" in smart and "not in this repository" in smart
+    silero = notices.split("Silero VAD", 1)[1].split("\n", 1)[0]
+    assert "`[calls] interrupt` and `pause`" in silero
+    todo = (ROOT / "todo.md").read_text(encoding="utf-8")  # owner, 17 Oct: "yes, on by default"
+    assert "public default decided 17 Oct" in todo and "`early_end = false` is the way" in todo
+
+
+def test_the_release_list_checks_googles_prompt_and_top_p_with_the_gemma_test_set_before_the_public_push() -> None:
+    """Review of 17 Oct (I2): RENDERER gemma4-large changes the prompt Gemma sees, and top_p 0.95 every request's
+    sampling from the deploy on; AGENTS.md checks prompt changes with the Gemma test set, run twice. The release list
+    names both runs, their gate, the idle Tiffany they need and the render check, before 0.9.3's public push."""
+    todo = " ".join((ROOT / "todo.md").read_text(encoding="utf-8").split())
+    item = todo.split("0.9.3, before the public push:", 1)[1].split("- [", 1)[0]
+    assert "uv run python -m evals.gemma_suite" in item and "twice" in item and "Tiffany is idle" in item
+    assert "every safety case and at least 90% of the rest" in item
+    assert '"_debug_render_only":true' in item and "<|channel>thought" in item
+    assert "RENDERER gemma4-large" in item and "top_p" in item
+
+
 def test_the_speech_detectors_fix_names_the_folder_the_voice_service_uses() -> None:
     from local_assistant import prompts
 
     swift = (ROOT / "tools/voice/Sources/voice-service/main.swift").read_text(encoding="utf-8")
     assert 'appendingPathComponent("Library/Application Support/local-assistant")' in swift
     assert 'appendingPathComponent("voice-models")' in swift
-    assert (
-        "~/Library/Application Support/local-assistant/voice-models/silero-vad,"
-        in prompts.DOCTOR_DETECTOR_UNAVAILABLE_FIX
-    )
+    folder = prompts.DOCTOR_VOICE_MODELS.format(home="~", folder="silero-vad")  # hers: /var/estia instead of ~
+    assert folder == "~/Library/Application Support/local-assistant/voice-models/silero-vad"
+    for fix in (prompts.DOCTOR_DETECTOR_UNAVAILABLE_FIX, prompts.DOCTOR_TURN_UNAVAILABLE_FIX):
+        assert "delete {folder} first" in fix and fix.startswith("see {log} for why;")
 
 
 # ------------------------------------------------------------------ her own user, in the install docs
@@ -473,18 +552,59 @@ def test_a_spoken_project_name_is_documented() -> None:
 
 
 def test_the_guide_says_how_english_is_read_aloud_as_the_voice_service_reads_it() -> None:
-    """0.9.2: numbers, money, dates and chords are said as people say them (English only); every reading the guide
-    quotes is a row of the voice service's pronunciation table, so the guide never promises one the code lacks."""
+    """0.9.2: numbers, money, dates and chords are said as people say them; 0.9.3: in the other ten languages too, in
+    their own words. Every reading the guide quotes is a row of the voice service's pronunciation tables, so the guide
+    never promises one the code lacks."""
     text = GUIDE.read_text(encoding="utf-8")
     assert "chord names are not yet spoken as music" not in text
     start = text.index("**Read aloud in English.**")
     part = text[start : text.index("**Calls wait for her voice.**")]
-    table = (ROOT / "tools/voice/Tests/VoiceCoreTests/SpokenEnglishTests.swift").read_text(encoding="utf-8")
+    tests = ROOT / "tools/voice/Tests/VoiceCoreTests"
+    tables = "".join(
+        (tests / name).read_text(encoding="utf-8") for name in ("SpokenEnglishTests.swift", "SpokenLanguageTests.swift")
+    )
     readings = re.findall(r'"([^"]+)" as "([^"]+)"', part)
-    assert len(readings) >= 8
+    assert len(readings) >= 13
     for written, said in readings:
-        assert f'"{written}", "{said}")' in table, written
-    assert "English only" in part and "**Known limits:**" in part
+        assert f'"{written}", "{said}")' in tables, written
+    assert "spoken as written" not in part and "**Read aloud in the other ten languages.**" in part
+    assert "**Known limits:**" in part
+
+
+def test_the_guide_reads_the_other_ten_languages_aloud_one_line_per_family() -> None:
+    """0.9.3, the second review: one short line per language family, each quoting readings that are rows of the ten
+    languages' table (SpokenLanguageTests.swift), and their known limits one per line, with what the code does not do
+    yet (French "1" is always "un": the gender is guessed in four languages, not ten)."""
+    text = GUIDE.read_text(encoding="utf-8")
+    start = text.index("**Read aloud in the other ten languages.**")
+    part = text[start : text.index("**Known limits:**", start)]
+    families = re.findall(r"^- \*\*([^*]+):\*\* (.+)$", part, re.MULTILINE)
+    assert [name for name, _ in families] == [
+        "Spanish, Italian, Portuguese and French",
+        "Dutch and German",
+        "Polish and Russian",
+        "Japanese and Korean",
+    ]
+    table = (ROOT / "tools/voice/Tests/VoiceCoreTests/SpokenLanguageTests.swift").read_text(encoding="utf-8")
+    for name, line in families:
+        readings = re.findall(r'"([^"]+)" as "([^"]+)"', line)
+        assert len(readings) >= 2, name
+        for written, said in readings:
+            assert f'"{written}", "{said}")' in table, written
+    limits = text[text.index("**Known limits:**") : text.index("**Calls wait for her voice.**")]
+    ten = limits[limits.index("In the other ten languages:") :]
+    lines = re.findall(r"^- (.+)$", ten, re.MULTILINE)
+    assert len(lines) >= 5
+    assert 'the other ten languages, "1" before a noun' not in limits  # the old claim: four languages, not ten
+    for fact in (
+        "about music",
+        "C sharp",
+        "Spanish, Italian, Portuguese and German",
+        'always "un"',
+        "up to 99",
+        "five digits or more",
+    ):
+        assert fact in ten, fact
 
 
 # the site's drift tests (estia-13oct, from the site session) read these: the website under the tagline, Tiffany as

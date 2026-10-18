@@ -1,7 +1,8 @@
 """Voice notes: what audio a file holds, the local voice service (tools/voice), the spoken text, AAC.
 
 The voice service listens (WhisperKit) and speaks (Kokoro for English, Supertonic-3 for the other languages) on the
-Neural Engine, and on a call tells how likely the caller's last 256 ms are speech (Silero VAD through FluidAudio);
+Neural Engine, and on a call tells how likely the caller's last 256 ms are speech (Silero VAD through FluidAudio) and
+how sure it is that the caller's sentence is finished (Smart Turn v3.2, on the CPU);
 the bridge only talks HTTP to it on 127.0.0.1, in one language at a time, and only over a connection whose other end a
 program of its own account holds (`peer_is_ours`): in her own user a program of the owner's could take the port while
 her service is not bound, and get the audio and send back words that count as the user's. Spoken answers are cleaned
@@ -217,11 +218,21 @@ class VoiceClient:
         only): "timeout" (no answer within VAD_TIMEOUT) or "http" (no service, an older one, a model still loading, a
         refusal or an answer that is not a probability). Never raises into the call and never marks the voice as
         failing (part_status)."""
+        return await self._probability(f"/vad?stream={stream}", chunk)
+
+    async def turn(self, window: bytes) -> float | str:
+        """How sure Smart Turn is that the caller's sentence is finished, from 0 to 1: `window` is the turn's last 8 s
+        at most (16 kHz mono s16le, the most recent sample last; no query, no state). On a failure its kind, as `vad`'s
+        (call_audio.TurnEnd counts them): "timeout" (no answer within VAD_TIMEOUT) or "http" (no service, an older one,
+        a model loading or unavailable, a refused window or an answer that is not a probability). Never raises into
+        the call and never marks the voice as failing."""
+        return await self._probability("/turn", window)
+
+    async def _probability(self, path: str, body: bytes) -> float | str:
+        """A detector's answer on a call: {"p": 0-1} within VAD_TIMEOUT, else "timeout" or "http"."""
         try:
-            status, body = await self._request(
-                "POST", f"/vad?stream={stream}", chunk, "application/octet-stream", seconds=VAD_TIMEOUT
-            )
-            p = json.loads(body).get("p") if status == 200 else None
+            status, answer = await self._request("POST", path, body, "application/octet-stream", seconds=VAD_TIMEOUT)
+            p = json.loads(answer).get("p") if status == 200 else None
         except VoiceUnavailableError as exc:
             return "timeout" if _timed_out(exc) else "http"
         except Exception:
@@ -302,19 +313,20 @@ class VoiceClient:
         self._not_hers = now
 
 
-DETECTOR_STATES = ("ready", "loading", "unavailable")  # what the voice service's health says as "vad"
+DETECTOR_STATES = ("ready", "loading", "unavailable")  # what the voice service's health says as "vad" and "turn"
 
 
-def detector_state(health: Mapping[str, object] | None) -> str:
-    """The speech detector's state from the voice service's health: "ready", "loading" (the model loads or downloads
-    at start), "unavailable" (its model did not download or failed its check: it needs downloading again), "old voice
-    service" (built before the detector) or "not ready" (no answer, or a state this bridge does not know). Anything
-    but "ready" means loudness stops her on calls meanwhile."""
+def detector_state(health: Mapping[str, object] | None, part: str = "vad") -> str:
+    """A detector's state from the voice service's health (`part`: "vad", the speech detector, or "turn", Smart Turn):
+    "ready", "loading" (the model loads or downloads at start), "unavailable" (its model did not download or failed its
+    check: it needs downloading again), "old voice service" (built before that detector) or "not ready" (no answer, or
+    a state this bridge does not know). Anything but "ready" means, on calls meanwhile, loudness for the speech detector
+    (it stops her, and keeps a turn open) and the full pause for the turn detector."""
     if health is None:
         return "not ready"
-    if "vad" not in health:
+    if part not in health:
         return "old voice service"
-    state = health["vad"]
+    state = health[part]
     return state if isinstance(state, str) and state in DETECTOR_STATES else "not ready"
 
 
