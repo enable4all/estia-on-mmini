@@ -99,6 +99,8 @@ struct Italian: Pack {
                          words: ["Dom", "Fam", "Lab"], dash: ", ",
                          music: ["accordi", "canzon", "chitarr", "pianoforte", "ukulele", "tonalità", "capotasto",
                                  "progressione", "strof", "ritornello", "spartit", "melodi", "music", "intro",
-                                 "riff"])
+                                 "riff"],
+                         forms: ChordWords.Forms(sharp: "diesis", flat: "bemolle", noThird: "senza terza"),
+                         marks: ChordWords.Marks(noChord: "senza accordo", again: "ripetere") { [self] n in cardinal(n, .feminine) + " volte" })
     }
 }

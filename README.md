@@ -5,7 +5,7 @@
   <img src="docs/brand/estia-hero-light.png" alt="A stone garden seen from above, its gravel raked in rings around a Mac mini" width="100%">
 </picture>
 
-**An insanely secure AI thinking partner living at home, on your own Mac.** Estia (Εστία, the hearth) runs on one Mac at home and is reached only through Signal: encrypted texts, voice notes and calls. Name her what you like. Ours is called Tiffany. Estia started as Tiffany, our own thinking partner, before she was opened up for every home. Her Signal picture is her name's first letter with Estia's orange full stop, accents left out (Ángela gets an a.); a first letter outside a to z even then, such as Greek or Chinese, keeps Estia's e.
+**An insanely secure & private thinking partner, living at home.** Estia (Εστία, the hearth) runs on one Mac at home and is reached only through Signal: encrypted texts, voice notes and calls. Name her what you like. Ours is called Tiffany. Estia started as Tiffany, our own thinking partner, before she was opened up for every home. Her Signal picture is her name's first letter with Estia's orange full stop, accents left out (Ángela gets an a.); a first letter outside a to z even then, such as Greek or Chinese, keeps Estia's e.
 
 Website: [estia.fun](https://estia.fun)
 
@@ -78,6 +78,8 @@ One line and one example each. Every detail and limit: [What she can do](GUIDE.m
 - **Projects.** Open to-do items and recent changes from a project on the Mac. An extra, off by default. Example: "What's next on \<project>?"
 
 - **Documents.** An answer from your PDFs that names the document and the page. An extra, off by default. Example: "What does my lease say about pets?"
+
+- **Transposing chords.** Chords transposed or moved for a capo, a chord's notes and the key of given chords, worked out on the Mac and given in a note from the code, not from the AI. An extra, off by default. Example: "Get the chords of Spooky and transpose them 4 semitones higher".
 
 ## Install
 

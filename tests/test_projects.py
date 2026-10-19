@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from local_assistant import prompts
+from local_assistant import projects, prompts
 from local_assistant.config import Config
 from local_assistant.projects import ProjectError, Projects, head_tail, scan_context
 from tests.conftest import ME
@@ -654,6 +654,35 @@ async def test_access_counts_folders_and_repositories_she_cannot_read(root: Path
             (root / name / ".git" / "objects").chmod(0o755)
             (root / name / ".git" / "config").chmod(0o644)
     assert access.state == "open" and access.readme is None and access.unreadable == 3
+
+
+@pytest.mark.parametrize("git_answers", [False, True], ids=["git", "a-git-that-answers-anyway"])
+@pytest.mark.parametrize("closed", ["config", "objects", "git-folder", "whole-repository"])
+async def test_an_unreadable_repository_counts_once_whatever_git_answers(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, closed: str, git_answers: bool
+) -> None:
+    """Counted by its file modes, not by git's answer: another git version answered for a closed config (2 of 3
+    counted on the owner's laptop, 18 Oct)."""
+    if git_answers:
+        fake = tmp_path / "bin" / "git"
+        fake.parent.mkdir()
+        fake.write_text("#!/bin/sh\nexit 0\n")
+        fake.chmod(0o755)
+        monkeypatch.setattr(projects, "GIT", str(fake))
+    alpha = root / "alpha"
+    target = {
+        "config": alpha / ".git" / "config",
+        "objects": alpha / ".git" / "objects",
+        "git-folder": alpha / ".git",
+        "whole-repository": alpha,
+    }[closed]
+    mode = target.stat().st_mode & 0o7777
+    target.chmod(0)
+    try:
+        access = await make(root).access()
+    finally:
+        target.chmod(mode)
+    assert access.state == "open" and access.unreadable == 1
 
 
 async def test_access_with_repositories_but_no_tracked_readme(tmp_path: Path) -> None:

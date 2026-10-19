@@ -104,6 +104,8 @@ struct Portuguese: Pack {
                          words: ["Sim", "Em", "Dom", "Mim", "Fam", "Lab"], dash: ", ",
                          music: ["acorde", "canç", "músic", "music", "guitarra", "violão", "piano", "cavaquinho",
                                  "ukulele", "tonalidade", "capotraste", "progressão", "estrofe", "refrão", "melodi",
-                                 "partitura", "intro", "riff"])
+                                 "partitura", "intro", "riff"],
+                         forms: ChordWords.Forms(sharp: "sustenido", flat: "bemol", noThird: "sem terça"),
+                         marks: ChordWords.Marks(noChord: "sem acorde", again: "repetir") { [self] n in cardinal(n, .feminine) + " vezes" })
     }
 }

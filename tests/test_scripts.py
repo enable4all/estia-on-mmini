@@ -836,6 +836,7 @@ def test_estia_deploy_dry_run_changes_nothing(tmp_path: Path) -> None:
     ):
         subprocess.run(argv, cwd=checkout, check=True)
     fake_release(root, checkout)
+    uv = fake_uv(root)
     before = snapshot(tmp_path)
     env = {
         "PATH": f"{stubs}:/usr/bin:/bin",
@@ -845,8 +846,16 @@ def test_estia_deploy_dry_run_changes_nothing(tmp_path: Path) -> None:
     }
     done = run_script("estia-deploy", "--dry-run", env=env)
     assert done.returncode == 0, done.stdout + done.stderr
-    assert "would run:" in done.stdout and "would switch" in done.stdout and "uv python install 3.13" in done.stdout
+    assert "would run:" in done.stdout and "would switch" in done.stdout and f"{uv} python install 3.13" in done.stdout
     assert not log.exists() and snapshot(tmp_path) == before
+
+
+def fake_uv(root: Path) -> Path:
+    """uv at Homebrew's fixed path in the fake tree: the build steps name it, so no test needs the Mac's own uv."""
+    folder = root / "opt/homebrew/bin"
+    folder.mkdir(parents=True, exist_ok=True)
+    stub(folder, "uv", "exit 0")
+    return folder / "uv"
 
 
 def fake_home(home: Path, *, projects: bool = False) -> None:
@@ -873,10 +882,12 @@ def test_the_migration_dry_run_changes_nothing_and_never_calls_sudo(tmp_path: Pa
     home, root = tmp_path / "home", tmp_path / "root"
     fake_home(home, projects=True)
     (home / "dev" / "alpha").mkdir(parents=True)
+    uv = fake_uv(root)
     before = snapshot(tmp_path)
     env = {"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(home), "ESTIA_ROOT": str(root), "ESTIA_TEST_ROOT": str(root)}
     done = run_script("migrate-to-own-user.sh", "--dry-run", env=env)
     assert done.returncode == 0, done.stdout + done.stderr
+    assert f"{uv} python install" in done.stdout  # the fake tree's uv, never the Mac's own
     # her user may already exist on the Mac running the tests (an earlier move): then only its settings are set again
     made = "would run: /usr/sbin/sysadminctl -addUser _estia" in done.stdout
     record = "/Users/" + "_estia"  # the directory-service record, not a home folder
@@ -899,9 +910,11 @@ def test_the_migration_dry_run_without_projects_shares_nothing(tmp_path: Path) -
     home, root = tmp_path / "home", tmp_path / "root"
     fake_home(home)
     (home / "dev" / "alpha").mkdir(parents=True)
+    uv = fake_uv(root)
     env = {"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(home), "ESTIA_ROOT": str(root), "ESTIA_TEST_ROOT": str(root)}
     done = run_script("migrate-to-own-user.sh", "--dry-run", env=env)
     assert done.returncode == 0, done.stdout + done.stderr
+    assert f"{uv} python install" in done.stdout
     assert "config: projects: off (no [projects] in your config)" in done.stdout
     assert "+a" not in done.stdout  # no ACL entry for her, and no folder suggested
     assert "Projects are off (no [projects] in the config): nothing to share." in done.stdout

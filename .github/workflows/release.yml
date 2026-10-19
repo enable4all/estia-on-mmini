@@ -1,6 +1,11 @@
-# A pushed version tag (v0.9.1, …) becomes a GitHub release, its notes taken from the tag's own message. GitHub
-# Actions publishes it, so the release names no person's account. Only GitHub's own `gh` runs here, no other action.
-# Started by hand (Actions, "Run workflow") for a tag pushed before this file worked.
+# A pushed version tag (v0.9.4, …) becomes a GitHub release, its notes taken from the tag's own section of
+# CHANGELOG.md: from "## [0.9.4]" to the next "## [" (or the links at the file's end), so the notes are reviewed with
+# the code; the page around them is .github/release-page.md ({{VERSION}} and {{SECTION}} filled in: the tagline, the
+# section under "What changed in", then what is in 0.9; owner, 18 Oct: "leave also the 0.9"). A tag whose CHANGELOG.md has no such section stops here, before anything is published. GitHub Actions
+# publishes it, so the release names no person's account. Only GitHub's own `gh` runs here, no other action.
+# Started by hand (Actions, "Run workflow"), it runs a tag again after a failed run. It reads CHANGELOG.md as that tag
+# has it: a tag from before the file (v0.9.3 and older) stops at that read, and a tag without its section stays so
+# until the tag is moved to a commit that has it.
 name: release
 on:
   push:
@@ -8,7 +13,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: The version tag to release (v0.9.1)
+        description: The version tag to release (v0.9.4)
         required: true
 permissions:
   contents: write
@@ -20,8 +25,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag || github.ref_name }}
-        # gh reads a tag's message only from a local clone; GitHub's API gives it without one
+        # CHANGELOG.md as the tag has it, from GitHub's API: no checkout, no other action
         run: |
-          sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha)
-          gh api "repos/$GITHUB_REPOSITORY/git/tags/$sha" --jq .message |
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --notes-file - --title "Estia ${TAG#v}"
+          set -euo pipefail
+          version="${TAG#v}"
+          gh api "repos/$GITHUB_REPOSITORY/contents/CHANGELOG.md?ref=$TAG" -H "Accept: application/vnd.github.raw+json" > CHANGELOG.md
+          awk -v version="$version" '!found && index($0, "## [" version "]") == 1 { found = 1; next } found && (/^## \[/ || /^\[.*\]: /) { exit } found { print }' CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "::error::CHANGELOG.md at $TAG has no section for $version: the tag needs a commit whose CHANGELOG.md has '## [$version] - YYYY-MM-DD' with its notes"
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/contents/.github/release-page.md?ref=$TAG" -H "Accept: application/vnd.github.raw+json" > page.md
+          awk -v version="$version" 'FNR == NR { section = section $0 "\n"; next } $0 == "{{SECTION}}" { printf "%s", section; next } { while ((at = index($0, "{{VERSION}}")) > 0) $0 = substr($0, 1, at - 1) version substr($0, at + 11); print }' notes.md page.md > release.md
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --notes-file release.md --title "Estia $version"

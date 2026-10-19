@@ -124,6 +124,8 @@ struct French: Pack {
                          words: ["Dom", "Fam", "Lab"], dash: ", ",
                          music: ["accords", "chanson", "guitare", "piano", "ukulélé", "ukulele", "tonalité",
                                  "capodastre", "couplet", "refrain", "mélodie", "musique", "partition", "progression",
-                                 "intro", "riff"])
+                                 "intro", "riff"],
+                         forms: ChordWords.Forms(sharp: "dièse", flat: "bémol", noThird: "sans tierce"),
+                         marks: ChordWords.Marks(noChord: "sans accord", again: "répéter") { [self] n in cardinal(n, .feminine) + " fois" })
     }
 }

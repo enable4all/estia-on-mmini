@@ -70,7 +70,7 @@ next to it. Keep your results in a note of your own, not in the repository, and 
 | 47 | Say only "stop" while she talks | She goes quiet and listens; no apology speech | |
 | 48 | "Switch off the heater" (an ask-first plug) | She asks you to say yes; nothing switches until you say yes after her question; a "Devices: …" text arrives | |
 | 48b | Repeat 48 and say a quick "yes" the moment she stops asking | It counts: "Done: …" follows at once, with no "Got it." before it | |
-| 49 | Stay silent for 90 s, typing on a laptop near the phone for part of it | The typing gets no answer; then "Take your time, I'm here." | |
+| 49 | Stay silent for 90 s, typing on a laptop near the phone for part of it; then talk to someone in the room; then "<her name>, what time is it?"; later, stay silent for 10 minutes | The typing gets no answer; then "Take your time, I'm here. Say <her name> when you need me."; the talk gets no answer; her name gets one; "I'm still here." after 10 minutes, and the call stays open | |
 | 50 | Hang up after 2+ turns | A "📞 Call summary" text with the main points | |
 | 50b | Ask for something, then hang up before she answers | A text: "The call ended before I finished your last request, so I stopped working on it. …" | |
 | 51 | Text her during a call | Answered right after the call | |

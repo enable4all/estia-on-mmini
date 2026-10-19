@@ -15,6 +15,99 @@ enum PronunciationTable {
         // chords run first; the number passes leave them alone
         ("chords", "C G7 Am F", "C major, G seven, A minor, F major"),
         ("chords", "Em7 - Cadd9 - G/B - D/F#", "E minor seven, C add nine, G over B, D over F sharp"),
+        // the chord speech audit (18 Oct): a semicolon (a table's bar lines, as the bridge says them), a slash with
+        // spaces, "…", "‖" and "⏸" between chords are a pause too; beat slashes after the last chord stay (silent)
+        ("chords", "C; G; Am", "C major, G major, A minor"),
+        ("chords", "C; G; Am; F.", "C major, G major, A minor, F major."),
+        ("chords", "Play C / / / G / / / Am / / / F / / /.", "Play C major, G major, A minor, F major / / /."),
+        ("chords", "Verse: C / / /; G / / /; Am / / /; F / / /.", "Verse: C major, G major, A minor, F major / / /."),
+        ("chords", "G… C… D… Em.", "G major, C major, D major, E minor."),
+        ("chords", "Am ‖ F ‖ C ‖ G", "A minor, F major, C major, G major"),
+        ("chords", "Strum G ⏸ C ⏸\u{FE0F} Am.", "Strum G major, C major, A minor."),
+        ("chords", "Strum G 𝄐 C.", "Strum G major, C major."),  // a fermata: hold, then go on
+        ("chords", "Plan A; then lunch.", "Plan A; then lunch."),
+        // a semicolon or a slash stays as written between letters said as letters (the review, 18 Oct)
+        ("chords", "Take route A; B is closed.", "Take route A; B is closed."),
+        ("chords", "Pick A / B / C.", "Pick A / B / C."),
+        ("chords", "Grades: A; B; A; C.", "Grades: A; B; A; C."),
+        ("chords", "Wait… A moment.", "Wait… A moment."),
+        // marks as words (the same audit): "N.C." is "no chord", "%" (the bar again) "repeat", a repeat after chords
+        // or a bracket "twice" ("x3": "three times"); an "A" that opens a run of chords is the chord, never the article
+        ("chords", "Intro: N.C., then G", "Intro: no chord, then G major"),
+        ("chords", "N.C. G D Em", "no chord, G major, D major, E minor"),
+        ("chords", "The intro is NC, then G.", "The intro is no chord, then G major."),
+        ("chords", "The song ends on N.C.", "The song ends on no chord."),
+        ("chords", "G; %; C; %.", "G major, repeat, C major, repeat."),
+        ("chords", "Verse: G D Em C (x2)", "Verse: G major, D major, E minor, C major, twice"),
+        ("chords", "Am F C G x3", "A minor, F major, C major, G major, three times"),
+        ("chords", "[Chorus] x2", "[Chorus] twice"),
+        ("chords", "Chorus x2, then the bridge.", "Chorus twice, then the bridge."),  // after a section's name
+        ("chords", "Rate it x2 on the song.", "Rate it times two on the song."),
+        ("chords", "(G D Em C) x2", "(G major, D major, E minor, C major) twice"),
+        ("chords", "Then the chorus again (x2).", "Then the chorus again twice."),
+        // after a bracket only at the end of its clause: inside one it is a quantity (the review, 18 Oct); after a
+        // section's name anywhere
+        ("chords", "Buy strings (x2) for the guitar.", "Buy strings (times two) for the guitar."),
+        ("chords", "Chorus 2x then outro.", "Chorus twice then outro."),
+        ("chords", "A D E A", "A major, D major, E major, A major"),
+        ("chords", "A D E A. Then the chorus.", "A major, D major, E major, A major. Then the chorus."),
+        ("chords", "Raleigh, N.C. is lovely.", "Raleigh, N.C. is lovely."),
+        ("chords", "NC State won.", "NC State won."),
+        ("chords", "A guitar shop in Raleigh, N.C., sells it.", "A guitar shop in Raleigh, N.C., sells it."),  // a place
+        ("chords", "The band is from Charlotte, NC.", "The band is from Charlotte, NC."),
+        // "NC" is "no chord" only among chords, and "N.C." alone in a sentence about music only after a colon, a
+        // section's name, "on", "is" or "with" (the review, 18 Oct): elsewhere it is the state
+        ("chords", "I played guitar in NC last year.", "I played guitar in NC last year."),
+        ("chords", "The band's songs are popular in NC and SC.", "The band's songs are popular in NC and SC."),
+        ("chords", "My guitar has an NC switch.", "My guitar has an NC switch."),
+        ("chords", "A guitar shop in Raleigh NC sells it.", "A guitar shop in Raleigh NC sells it."),
+        ("chords", "The NC chord symbol means no chord.", "The NC chord symbol means no chord."),
+        ("chords", "My guitar teacher lives in N.C.", "My guitar teacher lives in N.C."),
+        ("chords", "We drove to N.C. and played guitar there.", "We drove to N.C. and played guitar there."),
+        ("chords", "Intro: NC", "Intro: NC"),
+        ("chords", "Intro: N.C.", "Intro: no chord."),
+        ("chords", "The intro is N.C.", "The intro is no chord."),
+        ("chords", "Start the song with N.C.", "Start the song with no chord."),
+        ("chords", "Plan B x2", "Plan B times two"),
+        ("chords", "What % of people?", "What % of people?"),
+        ("chords", "What % of the song is the chorus?", "What % of the song is the chorus?"),  // "%" needs chords
+        ("chords", "A D chord is easy.", "A D chord is easy."),
+        ("chords", "A G7 is a dominant chord.", "A G seven is a dominant chord."),
+        ("chords", "A minor chord is sad.", "A minor chord is sad."),
+        ("chords", "A, B or C?", "A, B or C?"),
+        ("chords", "The A B C of cooking.", "The A, B, C of cooking."),  // letters in a row: a list, never chords
+        ("chords", "C D E F G are the notes.", "C, D, E, F, G are the notes."),
+        ("chords", "The notes are G B D F.", "The notes are G, B, D, F."),  // notes, never chords
+        // a row of bare letters is chords only as a sentence of its own (the review, 18 Oct): inside a sentence they
+        // are notes, a tuning or a list, as before
+        ("chords", "Standard tuning is E A D G B E.", "Standard tuning is E, A, D, G, B, E."),
+        ("chords", "Tune the strings to E A D G B E.", "Tune the strings to E, A, D, G, B, E."),
+        ("chords", "Am is A C E.", "Am is A, C, E."),
+        ("chords", "The E minor pentatonic scale is E G A B D.", "The E minor pentatonic scale is E, G, A, B, D."),
+        ("chords", "G major is spelled G B D.", "G major is spelled G, B, D."),
+        ("chords", "Am7 has A C E G in it.", "A minor seven has A, C, E, G in it."),
+        ("chords", "Play the arpeggio C E G C.", "Play the arpeggio C, E, G, C."),
+        ("chords", "Vitamins A C E keep you healthy.", "Vitamins A, C, E keep you healthy."),
+        ("chords", "Seats A C E are free.", "Seats A, C, E are free."),
+        ("chords", "My answers: A C B D.", "My answers: A, C, B, D."),
+        ("chords", "A C E are the vitamins.", "A, C, E are the vitamins."),
+        ("chords", "G | C | D", "G major, C major, D major"),
+        ("chords", "| G | C | D |", "| G major, C major, D major |"),
+        // the missing forms (the same audit): "-" after the root is minor (jazz), a minor chord with a major seventh,
+        // and alterations or "no3" in brackets
+        ("chords", "The next chord is C-7.", "The next chord is C minor seven."),
+        ("chords", "Then CmMaj7.", "Then C minor major seven."),
+        ("chords", "Then Cm(maj7).", "Then C minor major seven."),
+        ("chords", "Then C7(b9).", "Then C seven flat nine."),
+        ("chords", "Then Cm7(b5).", "Then C minor seven flat five."),
+        ("chords", "Then C(no3).", "Then C no third."),
+        ("chords", "Try Cmaj7(#11) and G7(b9,#11).", "Try C major seven sharp eleven and G seven flat nine sharp eleven."),
+        ("chords", "Then Cm(add9).", "Then C minor add nine."),
+        ("chords", "Take the A-7 south.", "Take the A-seven south."),  // no music: a road
+        // with a sharp or flat it is a chord anywhere: no road is named "F#-7" (the review, 18 Oct)
+        ("chords", "Then F#-7.", "Then F sharp minor seven."),
+        ("chords", "Next, Eb-7.", "Next, E flat minor seven."),
+        ("chords", "Option A(2) here.", "Option A(two) here."),
         // cardinals up to trillions; a comma after a number stays (a pause)
         ("big numbers", "1,000,000", "one million"),
         ("big numbers", "1,250,000 people", "one million two hundred fifty thousand people"),

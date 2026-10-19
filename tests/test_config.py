@@ -589,7 +589,7 @@ def test_calls_section_with_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyP
         1.05,
         2.3,
     )  # owner, 17 Oct: 0.5 s less than 2.8 ("2.8 is a lot right...?")
-    assert (cfg.calls_idle_prompt_seconds, cfg.calls_idle_hangup_seconds, cfg.calls_max_minutes) == (90, 600, 60)
+    assert (cfg.calls_idle_prompt_seconds, cfg.calls_max_minutes) == (90, 60)
     assert cfg.calls_summary
 
 
@@ -617,7 +617,9 @@ def test_calls_settings() -> None:
     assert (cfg.calls_java_home, cfg.call_tunnel) == (Path("/opt/jdk"), Path.home() / "t/sct")
     assert cfg.call_socket_dir == Path("/tmp/c")
     assert (cfg.calls_speed, cfg.calls_end_of_turn_seconds) == (1.0, 2.5)
-    assert (cfg.calls_idle_prompt_seconds, cfg.calls_idle_hangup_seconds, cfg.calls_max_minutes) == (60, 300, 30)
+    assert (cfg.calls_idle_prompt_seconds, cfg.calls_max_minutes) == (60, 30)
+    # a config from before keeps working: silence never ends a call now (owner, 18 Oct), so the old key does nothing
+    assert not hasattr(cfg, "calls_idle_hangup_seconds")
     assert not cfg.calls_summary
 
 

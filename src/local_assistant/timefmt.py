@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
 
@@ -47,6 +47,12 @@ def local_date(iso_utc: str, tz: ZoneInfo) -> str:
     """'8 Oct 2026' for a UTC ISO timestamp from the database."""
     moment = datetime.fromisoformat(iso_utc).astimezone(tz)
     return f"{moment.day} {moment:%b %Y}"
+
+
+def short_date(iso_utc: str, tz: ZoneInfo, *, today: date) -> str:
+    """'16 Oct' for a UTC ISO timestamp from the database in `today`'s year, else '16 Oct 2025'."""
+    moment = datetime.fromisoformat(iso_utc).astimezone(tz)
+    return f"{moment.day} {moment:%b}" if moment.year == today.year else f"{moment.day} {moment:%b %Y}"
 
 
 def local_datetime(iso_utc: str, tz: ZoneInfo) -> str:

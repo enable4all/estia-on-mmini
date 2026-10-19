@@ -318,7 +318,8 @@ Edit the file:
 6. Everything else can stay commented out until you turn that part on (section 3). `[projects]` is an extra too, off
    by default: setup asks whether she should see projects on this Mac (most people: no), then the folder and the level
    (section 3, Projects). `[documents]` (your PDFs) is an extra, off by default, that setup does not ask about yet
-   (section 3, Documents). One exception: reminders are on without a `[reminders]`
+   (section 3, Documents). `[chords]` (transposing chords) is an extra, off by default, that `scripts/setup.sh
+   --extras` adds (section 3, Transposing chords). One exception: reminders are on without a `[reminders]`
    section (section 4, "Reminders and wake-up calls"): at most 50 open and 20 new a day (`max_open`, `max_per_day`);
    `enabled = false` turns them off, and then her rules, tools and commands are exactly as without them. The messages she starts herself are
    opt-in (section 4, "Messages she starts herself"): off until `[initiative] enabled = true` or until you type
@@ -1253,15 +1254,23 @@ its length, `calls: taken over (3 words)`.
 
 **Goodbyes.** In English, a goodbye ("bye-bye", "good-bye", "talk to you later", "take care") ends the call once her
 answer is spoken, also with closing words after it ("okay, goodbye, I'm going to check the log now") and also when her
-answer asks something; only a device question waiting for a yes keeps the call open. Leave-taking ends the call the same
-way, as a phrase of its own ("Okay, I have to go"), not inside a longer sentence ("I have to go to the dentist"): "I
-have to go" or "I'm hanging up" in English, "ik moet gaan" in Dutch, "ich muss los" in German, and a few clear phrases
-in the other languages ("je dois y aller", "じゃあ、切るね"). A wrap-up ("that's all") ends it too, unless she asks something.
+answer asks something; a device question waiting for a yes keeps the call open until it is answered, and after a plain
+answer ("yes", "no thanks") the call ends. Leave-taking ends the call the same way, as a phrase of its own ("Okay, I
+have to go"), not inside a longer sentence ("I have to go to the dentist"): "I have to go" or "I'm hanging up" in
+English, "ik moet gaan" in Dutch, "ich muss los" in German, and a few clear phrases in the other languages ("je dois y
+aller", "じゃあ、切るね"). A wrap-up ("that's all") ends it too, unless she asks something. Leaving with a reason counts too
+("I have something to do", "something came up", "I have to run"), in each of the 11 languages; "something came up" only
+with nothing but "sorry" or "thanks" before it, so an apology ("Sorry I didn't call earlier. Something came up.") keeps
+the call open. Asking her to end the call ("let's end the call", "we can stop here", "let's call it a day") ends it once
+her answer is spoken, also when her answer asks something, in each of the 11 languages. Her own goodbye ("Bye!", "Talk soon!"), closing wish ("Enjoy your evening!") or offer to wait ("I'll be here when you're ready.") ends the call too, unless her answer asks something, once the caller has been quiet for 3 seconds: anything said in those 3 seconds keeps the call open and is answered; not on a practice call. Stage directions in her answers ("(pause)", "(laughs)", "*smiles*") are never spoken, on a call or
+in a voice note, and never sent in a text; bold words, code and a title in brackets ("(Applause) by Lady Gaga") stay,
+and so does a capitalised one inside a sentence ("Also (Pause) weiter"), which is still said.
 A plain goodbye ("okay, good bye", "bye now") gets the code's own bye, without the model; a goodbye with more is
 answered by the model first (a reminder asked for is set), then the call ends. Closing words are words with no question
-in them and no "wait", "but", "actually", "hold on" or "before you go"; a goodbye after a colon is quoted speech ("tell
-Alex: take care") and ends nothing. Leave-taking counts in the call's language and in English; "Yes, I have to go"
-answers her and is no leave-taking.
+in them and no "wait", "but", "actually", "hold on", "one more thing" or "before you go", in English or in the call's
+language ("Moment", "nog één ding", "una cosa más"); a goodbye after a colon is quoted speech ("tell Alex: take care")
+and ends nothing. Leave-taking counts in the call's language and in English; "Yes, I have to go" answers her and is no
+leave-taking.
 
 **Wake-up calls.** With `[calls]` on, a reminder with "call me" (or `/remind call 07:00 wake up`) also places a Signal
 call: the text first, always, then the call. `wake_call = false` in `[calls]` keeps those reminders as wake-up texts (a
@@ -1622,6 +1631,28 @@ macOS judges on its own (Remote Login's "Allow full disk access for remote users
 it" while she reads fine, or pass while she is refused; her log says what she gets. The fix: `[documents] folder =
 "/Users/<your user>/Estia-KB"` in her config, `scripts/share-documents.sh`, then a restart.
 
+### Transposing chords (extra, off by default)
+
+Estia works out chords on the Mac: transposed, moved for a capo, a chord's notes and the key of given chords, given in
+a note from the code, not from the AI (GUIDE.md, "Transposing chords"). Off without `[chords]`: no chords tool is
+offered, and her rules and requests are byte for byte as before. Nothing to install: it is Estia's own code, with no
+download and no program from elsewhere. `scripts/setup.sh --extras` lists it, and a yes adds the section to your config
+(a copy of the old one is kept). In her own user, setup prints the line instead (her config is hers alone); add it as
+her, then restart her:
+
+```sh
+/usr/bin/sudo /usr/local/estia/bin/estia config     # add the line [chords]
+/usr/bin/sudo /usr/local/estia/bin/estia restart
+```
+
+On a call the result is said after her words, and after the call one message from the code holds the exact chords and
+the page they came from. Her log keeps the action, a count, the time and an error code, never chords, keys, song names
+or sources; after a web search the tool log keeps no chords either. Its tool and rules add about 440 tokens to every
+text's request and about 390 to a call's (measured with web search and calls on). Known gap: the test of calls with the
+chords tool on and off (40 tries each, 18 Oct) showed no clear harm, but 40 tries cannot rule it out; it runs again with
+more tries once a fix for hanging up is in, and that decides whether the chords tool stays on calls (AGENTS.md,
+Commands).
+
 ### Personality (soul.md)
 
 Without a style file of yours, Estia has a built-in style, chosen with `style` under `[personality]` in the config
@@ -1687,7 +1718,8 @@ calls say only the words, never a crossed-out one.
 | Command | What it does |
 |---|---|
 | `/new` | Start a fresh conversation. The profile stays and old chats remain searchable; learning from the closed conversation runs a minute later |
-| `/profile` | Numbered facts with where they came from (learned from chat, you asked, from a link) and the date |
+| `/profile` | Your facts, numbered, with where they came from (you asked, from a link) and the date, and how full your part is; then one line on her notes: how many, how full, and the 1,500 characters a message carries |
+| `/profile notes` | Her notes, numbered, with the date (the year only when not this year); last, the facts of yours moved there to make room, with where they came from |
 | `/fix N new text` | Correct fact N in place: same number, the text checked like a "remember" fact, and from then on it counts as yours ("you asked"). The change log keeps the old text |
 | `/forget N` · `/forget words` | Remove fact N, or the facts containing the words (asks for a number if several match). Takes effect at once |
 | `/learn <link>` | Learn about you from a page (e.g. your public LinkedIn profile): the bridge reads it, one structured model call takes out the facts about you, and you get the exact list of what was saved and what was already known. A YouTube link gets "/learn does not read YouTube links: it keeps what it reads, and a video's captions are never kept. Send the link without /learn for a summary." |
@@ -2049,7 +2081,8 @@ Language practice (`/babble`):
   its summary, and practice keeps running. Goodbye words on a call are recognised in English only. Leave-taking as a
   phrase of its own ("Okay, I have to go"), not inside a longer sentence ("I have to go to the dentist"), ends a call in
   English and in the call's language once her reply is spoken ("I have to go", "ik moet gaan", "ich muss los", "je
-  dois y aller"); otherwise, in another language, hang up yourself.
+  dois y aller"), and so does asking her to end the call ("let's end the call", "laten we ophangen"); otherwise, in
+  another language, hang up yourself.
 - The recap: one structured call (JSON schema, temperature 0) over your practice turns (the latest 40, at most 12,000
   characters), at most 3 points {said, better, why}, the why in your `/language`. The code keeps a point only when
   "said" is verbatim in one of your turns, "better" differs by more than punctuation or capitals, the change is small
@@ -2087,8 +2120,9 @@ Voice notes (in the current language):
 - Send a voice note: the bridge fetches it, the voice service on the Mac transcribes it, and Gemma answers the transcript as
   if it were typed (the history keeps "[voice] what you said"). The audio is deleted afterwards.
 - The text answer comes first. Then the same answer comes as a Signal voice note (Kokoro in English, Supertonic-3
-  otherwise; cleaned for speaking: no code, links, lists or emoji; a command such as /reminders is said as "slash
-  reminders"), cut at a sentence after 1,500 characters ("The rest is in the text."). Notes are never spoken.
+  otherwise; cleaned for speaking: no code, links, lists, emoji or stage directions such as "(pause)"; a command such
+  as /reminders is said as "slash reminders"), cut at a sentence after 1,500 characters ("The rest is in the text.").
+  Notes are never spoken.
 - `/voice auto` (the default: voice answers for voice notes), `/voice on` (every answer), `/voice off`; `/voice echo on` first
   shows what was heard (`🎙️ "…"`); `/voice` shows the settings.
 - Notes: "I couldn't make out that voice note, could you say it again or type it?" (too short or silent), "That voice note is

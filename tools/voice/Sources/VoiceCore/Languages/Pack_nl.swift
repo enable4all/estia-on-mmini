@@ -104,6 +104,8 @@ struct Dutch: Pack {
         ChordWords.Style(roots: .dutch, sharp: "is", flat: "es", minor: "mineur", seventh: "zeven",
                          majorSeventh: "majeur zeven", joins: ["en", "of"], words: [], dash: ", ",
                          music: ["akkoorden", "liedje", "lied", "gitaar", "piano", "ukelele", "ukulele", "toonsoort",
-                                 "capo", "couplet", "refrein", "melodie", "muziek", "intro", "riff"])
+                                 "capo", "couplet", "refrein", "melodie", "muziek", "intro", "riff"],
+                         forms: ChordWords.Forms(sharp: "kruis", flat: "mol", noThird: "zonder terts"),
+                         marks: ChordWords.Marks(noChord: "geen akkoord", again: "herhalen") { [self] n in cardinal(n, .plain) + " keer" })
     }
 }

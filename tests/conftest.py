@@ -38,14 +38,27 @@ def amsterdam_time(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest
 
 
 @pytest.fixture(autouse=True)
+def stable_locale(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A child helper sees a UTF-8 LANG, so its Python never coerces the locale into its own environment (PEP 538
+    adds LC_CTYPE when LANG is unset or C): a helper's environment is the same from any shell. C.UTF-8: there on
+    macOS and on every glibc Linux, where en_US.UTF-8 may not be installed."""
+    monkeypatch.setenv("LANG", "C.UTF-8")
+    for key in ("LC_ALL", "LC_CTYPE"):
+        monkeypatch.delenv(key, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def no_live_system(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
     """Tests never read the owner's Mac: system paths (/Library/LaunchDaemons, /usr/local/estia, /var/estia) resolve
-    under an empty root of their own (ESTIA_ROOT), the live voice service is never asked, and the evals' EVAL_
+    under an empty root of their own (ESTIA_ROOT), and so do the fixed tool paths (ESTIA_TEST_ROOT: Homebrew's uv,
+    hostsec.tool_root), the live voice service is never asked, and the evals' EVAL_
     settings of the shell are dropped (EVAL_SOUL may name the live soul.md). A test that needs "/"
     says so (monkeypatch.delenv("ESTIA_ROOT")) and reads nothing there."""
     from local_assistant import ownuser
 
-    monkeypatch.setenv("ESTIA_ROOT", str(tmp_path_factory.mktemp("estia-root")))
+    root = str(tmp_path_factory.mktemp("estia-root"))
+    monkeypatch.setenv("ESTIA_ROOT", root)
+    monkeypatch.setenv("ESTIA_TEST_ROOT", root)  # the fixed tool paths too (Homebrew's uv): never the Mac's own
     for key in ("EVAL_SOUL", "EVAL_STYLE", "EVAL_LANGUAGE", "EVAL_NAME", "EVAL_MODEL", "EVAL_BASE_URL"):
         monkeypatch.delenv(key, raising=False)  # a developer's exported EVAL_SOUL may name the live soul.md
     real = ownuser.voice_health

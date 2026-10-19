@@ -198,6 +198,10 @@ struct Russian: Pack {
                          minor: "минор", seventh: "семь", majorSeventh: "мажор семь", joins: ["и", "или"], words: [],
                          dash: ", ",
                          music: ["аккорд", "песн", "гитар", "пианино", "фортепиано", "укулеле", "тональност",
-                                 "каподастр", "куплет", "припев", "мелоди", "музык", "интро", "рифф"])
+                                 "каподастр", "куплет", "припев", "мелоди", "музык", "интро", "рифф"],
+                         forms: ChordWords.Forms(sharp: "диез", flat: "бемоль", noThird: "без терции"),
+                         marks: ChordWords.Marks(noChord: "без аккорда", again: "повторить") { [self] n in
+                             cardinal(n, .masculine) + (plural(Num(String(n))) == .few ? " раза" : " раз")
+                         })
     }
 }

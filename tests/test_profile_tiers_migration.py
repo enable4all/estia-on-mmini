@@ -540,11 +540,18 @@ async def test_profile_and_status_show_an_install_past_the_limit_as_it_is(old: t
     profile = two_part(store)
     _, commands = commands_for(store, profile)
     shown = await commands.handle(command(store, "/profile"))
-    assert shown.startswith(prompts.PROFILE_HEADER.format(used=profile.used_chars(), limit=LIMIT))
-    notes_header = prompts.PROFILE_NOTES_HEADER.format(used=profile.notes_used_chars(), limit=NOTES_LIMIT)
-    yours_part, notes_part = shown.split(notes_header)
+    mine = round(100 * profile.used_chars() / LIMIT)
+    assert shown.startswith(prompts.PROFILE_HEADER.format(used=profile.used_chars(), limit=LIMIT, percent=mine))
+    notes_part = await commands.handle(command(store, "/profile notes", T0 + 2))
+    noted = round(100 * profile.notes_used_chars() / NOTES_LIMIT)
+    assert notes_part.startswith(
+        prompts.PROFILE_NOTES_HEADER.format(
+            used=profile.notes_used_chars(), limit=NOTES_LIMIT, percent=noted, per_message=1_500
+        )
+    )
     for fid, (kind, _) in kept.items():
-        assert f"#{fid} " in (notes_part if kind == "chat" else yours_part)
+        assert f"#{fid} " in (notes_part if kind == "chat" else shown)
+        assert f"#{fid} " not in (shown if kind == "chat" else notes_part)
     line = next(
         row for row in (await commands.handle(command(store, "/status", T0 + 1))).splitlines() if "Profile:" in row
     )
@@ -560,9 +567,9 @@ async def test_a_moved_fact_is_never_shown_as_learned_from_chat(store: Store) ->
     profile.apply(
         [Op("remove", fact_id=aunt.added[0]), Op("add", text=NEW)], source_kind="remember", remove_to_notes=True
     )
-    shown = await commands.handle(command(store, "/profile"))
+    shown = await commands.handle(command(store, "/profile notes"))
     line = next(row for row in shown.splitlines() if row.startswith(f"#{aunt.added[0]} "))
-    assert "learned from chat" not in line
+    assert "learned from chat" not in line and "(you asked, " in line
 
 
 # what the user asks to remember is theirs, also when she already noted it

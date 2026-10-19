@@ -30,6 +30,7 @@ from local_assistant.voice import (
     sniff,
     spoken_text,
     to_m4a,
+    without_stage_directions,
 )
 from tests.fakes.fake_voice import FakeVoiceService, wav
 
@@ -142,6 +143,162 @@ def test_music_signs_are_spoken_emoji_are_not() -> None:
     assert spoken_text("Sunny ☀️ today 😀, a ♥ and a ♪ tune.") == "Sunny today, a and a tune."
 
 
+@pytest.mark.parametrize(
+    ("answer", "spoken"),
+    [
+        # owner, 18 Oct: her "(pause)" between chords was read aloud; the "..." around it stays, and between two
+        # chords it is a comma (the chord speech audit, the same day), so the chords stay one run with a pause
+        ("Try this one: Am... (pause) ... F... (pause) ... C.", "Try this one: Am, F, C."),
+        ("Sure! (laughs) That one is a classic.", "Sure! That one is a classic."),
+        ("Okay *smiles* here it comes.", "Okay here it comes."),
+        ("[pause] Then the chorus comes in.", "Then the chorus comes in."),
+        ("(short pause) Ready for the bridge?", "Ready for the bridge?"),
+        ("Well (long pause) maybe next week.", "Well maybe next week."),
+        ("So (a beat) that was the intro.", "So that was the intro."),
+        ("(sighs) Mondays are long ones.", "Mondays are long ones."),
+        ("That is lovely *(smiles)* to hear.", "That is lovely to hear."),
+        ("Claro (pausa) seguimos con el coro.", "Claro seguimos con el coro."),
+        ("Also (kurze Pause) weiter geht es.", "Also weiter geht es."),
+        ("Хорошо (пауза) идём дальше.", "Хорошо идём дальше."),
+        ("Oké (lacht) dat was een goeie.", "Oké dat was een goeie."),
+        ("Bien sûr (rires) on continue.", "Bien sûr on continue."),
+        ("はい（間）次のコードです。", "はい次のコードです。"),
+        ("좋아요 (웃음) 다음 코드예요.", "좋아요 다음 코드예요."),
+        # brackets that are no stage direction stay
+        ("Play C (live version) after that.", "Play C (live version) after that."),
+        ("Use the (G shapes) for the verse.", "Use the (G shapes) for the verse."),
+        ("Then the chorus again (x2).", "Then the chorus again (x2)."),
+        ("Call me back (if you want).", "Call me back (if you want)."),
+        ("[Verse 1] Em, C, G and D.", "[Verse 1] Em, C, G and D."),
+    ],
+)
+def test_stage_directions_are_never_spoken(answer: str, spoken: str) -> None:
+    assert spoken_text(answer, min_chars=1) == spoken
+
+
+@pytest.mark.parametrize(
+    ("answer", "spoken"),
+    [
+        # the chord speech audit (18 Oct): "..." became "." and each chord a sentence of its own, so "G." was read
+        # "Jay" and "Am." "M"; between two chords "..." is a comma, and the voice service spells them as one run
+        ("C... G... Am...", "C, G, Am."),
+        ("Then C ... G ... Am.", "Then C, G, Am."),
+        ("Do... Sol... Lam...", "Do, Sol, Lam."),
+        ("Em7... Cadd9... G/B... D/F#...", "Em7, Cadd9, G/B, D/F#."),
+        ("Cm7(b5).... F7(b9)....", "Cm7(b5), F7(b9)."),
+        ("C...G...Am", "C,G,Am."),  # without spaces too (the review, 18 Oct: "C, G.Am.")
+        ("U.S.A... C is next.", "U.S.A. C is next."),  # an abbreviation's letter is no chord
+        # and before a joining word and a chord (the review, 18 Oct: "G... then C" left the lone "G.", read "Jay")
+        ("G... then C.", "G, then C."),
+        ("Start on G... then C... then D.", "Start on G, then C, then D."),
+        ("Play C... then G... then Am.", "Play C, then G, then Am."),
+        ("The chords are C... G... and Am...", "The chords are C, G, and Am."),
+        ("Empieza en Sol... luego Do... luego Re.", "Empieza en Sol, luego Do, luego Re."),
+        ("Joue Do... puis Sol.", "Joue Do, puis Sol."),
+        ("Spiel C... dann G.", "Spiel C, dann G."),
+        # after words it stays as before, and before a joining word and a word too
+        ("I am not sure... maybe later.", "I am not sure. maybe later."),
+        ("G... then the chorus.", "G. then the chorus."),
+        ("Wait... then C.", "Wait. then C."),
+        ("Wait... A moment.", "Wait. A moment."),
+        ("Hmm... Am I late?", "Hmm. Am I late?"),
+    ],
+)
+def test_dots_between_chords_are_a_comma(answer: str, spoken: str) -> None:
+    assert spoken_text(answer, min_chars=1, rest="") == spoken
+
+
+@pytest.mark.parametrize(
+    ("answer", "spoken"),
+    [
+        # a comma after a dotted abbreviation's last dot stays: the dot is the abbreviation's, the comma a pause (the
+        # chord speech audit, 18 Oct: "N.C., then G" lost its pause before "then")
+        ("Intro: N.C., then G.", "Intro: N.C., then G."),
+        ("Fruit, e.g., apples.", "Fruit, e.g., apples."),
+        # and so does a semicolon (a table's bar line, as the bridge says it: the review, 18 Oct)
+        ("Intro: N.C.; G.", "Intro: N.C.; G."),
+        # any other run of marks is one mark, as before
+        ("Wait.. what?!", "Wait. what?"),
+        ("Done!.", "Done!"),
+    ],
+)
+def test_a_comma_after_an_abbreviation_stays(answer: str, spoken: str) -> None:
+    assert spoken_text(answer, min_chars=1, rest="") == spoken
+
+
+def test_chords_with_dots_between_are_spoken_as_one_part() -> None:
+    assert sentences(spoken_text("C... G... Am...", min_chars=1, rest="")) == ["C, G, Am."]
+    assert sentences(spoken_text("Start on G... then C... then D.", min_chars=1, rest="")) == [
+        "Start on G, then C, then D."
+    ]
+    # a table's bar lines are said as "; " (the voice service makes them a pause between chords, never "CGMF")
+    assert sentences(spoken_text("| C | G | Am | F |", min_chars=1, rest="")) == ["C; G; Am; F."]
+    # "N.C." in a bar keeps its bar line (the review, 18 Oct: "N.C." was a part of its own, read as letters)
+    assert sentences(spoken_text("| N.C. | G | C | D |", min_chars=1, rest="")) == ["N.C.; G; C; D."]
+    assert sentences(spoken_text("| N.C. | Sol | Re | Mim |", min_chars=1, rest="")) == ["N.C.; Sol; Re; Mim."]
+
+
+@pytest.mark.parametrize(
+    ("text", "sent"),
+    [
+        # in a text too (she never needs one there); the rest of the line as written, French spacing kept
+        ("Em... (pause) ... C... (pause) ... D.", "Em... C... D."),
+        ("That's funny (laughs).", "That's funny."),
+        ("C'est drôle (rires) !", "C'est drôle !"),
+        ("(laughs) Sure, here it is.", "Sure, here it is."),
+        ("*smiles*\nHere is the list.", "Here is the list."),
+        ("Hi **Alex**, *(beat)* the plan:", "Hi **Alex**, the plan:"),
+        ("Read [pause](https://example.com) first.", "Read [pause](https://example.com) first."),  # a link
+        ("Use **bold** and *italic* here.", "Use **bold** and *italic* here."),
+        ("Chords (G shapes): G, C, D (x2).", "Chords (G shapes): G, C, D (x2)."),
+    ],
+)
+def test_stage_directions_are_left_out_of_her_text(text: str, sent: str) -> None:
+    assert without_stage_directions(text) == sent
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # review 18 Oct: bold, a starred plain word, code and a title in brackets are never a stage direction
+        "1. **Beat** the eggs with the sugar.",
+        "Press **Pause** in Spotify to stop.",
+        "Tap the *pause* button.",
+        "Don't forget to *smile*!",
+        "Enjoy the *ride*!",  # Italian's "laughs" is an English word too
+        "Drück in Spotify auf **Pause**.",
+        "Tippe auf *Pause*.",
+        "Pulsa *pausa* para parar.",
+        "Appuie sur **Pause** pour arrêter.",
+        "```python\ntime.sleep(pause)\nif (silence): pass\n```",
+        "Call `player.pause(beat)` first.",
+        "Then time.sleep(pause) waits.",
+        "(Applause) by Lady Gaga is next.",
+        "Play (Smile) next.",
+        "Put on (Ride) by Twenty One Pilots.",
+    ],
+)
+def test_what_only_looks_like_a_stage_direction_stays(text: str) -> None:
+    assert without_stage_directions(text) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "sent"),
+    [
+        ("Great question! (Laughs) Let me think.", "Great question! Let me think."),  # capitalised, between sentences
+        ("Sure. *Smiles* Here you go.", "Sure. Here you go."),
+        ("Okay *laughing* that was a good one.", "Okay that was a good one."),  # a starred -ing form
+        ("Run `ls` first. (pause) Then the next one.", "Run `ls` first. Then the next one."),
+    ],
+)
+def test_a_stage_direction_beside_code_or_capitalised_between_sentences_goes(text: str, sent: str) -> None:
+    assert without_stage_directions(text) == sent
+
+
+def test_a_bold_word_is_spoken_as_written() -> None:
+    assert spoken_text("Press **Pause** in Spotify to stop.", min_chars=1) == "Press Pause in Spotify to stop."
+
+
 def test_every_command_in_help_is_spoken_as_a_command() -> None:
     named = set(re.findall(r"(?<![\w/])/([a-z]+)\b", prompts.HELP))
     assert named and named <= set(COMMANDS), named - set(COMMANDS)
@@ -223,6 +380,18 @@ def test_sentences_split_spoken_text_for_speaking_one_by_one() -> None:
         ("No. 5 is next. Then 6.", ["No. 5 is next.", "Then 6."]),
         ("No. That's it.", ["No.", "That's it."]),
         ("I said no. 5 people agreed.", ["I said no.", "5 people agreed."]),  # a lower-case "no." is the word
+        # "N.C." (no chord) inside a sentence of chords (the chord speech audit, 18 Oct): one part, so its run goes on
+        ("Intro: N.C. then G.", ["Intro: N.C. then G."]),
+        ("The song ends on N.C. Then the outro.", ["The song ends on N.C.", "Then the outro."]),
+        # nor before chords (the review, 18 Oct: "N.C. G C D" was the parts "N.C." and "G C D.")
+        ("N.C. G C D.", ["N.C. G C D."]),
+        ("Intro: N.C. Am F C G.", ["Intro: N.C. Am F C G."]),
+        ("N.C. G.", ["N.C. G."]),
+        ("N.C. G, C, D.", ["N.C. G, C, D."]),
+        ("N.C. Sol Re Mim.", ["N.C. Sol Re Mim."]),
+        # a word after the first chord-like word: a new sentence
+        ("N.C. A good start.", ["N.C.", "A good start."]),
+        ("Vivo en N.C. La casa es grande.", ["Vivo en N.C.", "La casa es grande."]),
         ("Bonjour. Ça va ? Oui, très bien !", ["Bonjour.", "Ça va ?", "Oui, très bien !"]),
         ("Hallo. Wie geht's? Gut!", ["Hallo.", "Wie geht's?", "Gut!"]),
     ],

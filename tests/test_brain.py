@@ -313,8 +313,46 @@ async def test_an_answer_the_filters_leave_empty_is_logged_with_the_filter_and_t
     [line] = warnings_of(caplog)
     assert line == (
         f"message {message.id}: the filters left nothing (without_thinking emptied it; chars raw 18, "
-        "without_thinking 0, without_fake_notices 0, without_written_end_call 0)"
+        "without_thinking 0, without_fake_notices 0, without_stage_directions 0, without_written_end_call 0)"
     )
+
+
+async def test_her_stage_directions_are_never_sent_or_kept(store: Store) -> None:
+    # owner, 18 Oct: her "(pause)" was read aloud on a call; in a text she never needs one either, and the stored
+    # answer has none, so her history does not teach them
+    brain = measured(store, FakeGemma(text("Sure! (laughs) Am... (pause) ... F... (pause) ... C.")))
+    reply = await brain.answer(store.current_conversation(), incoming(store, "the chords again please"))
+    assert reply.text == "Sure! Am... F... C."
+
+
+async def test_code_bold_and_plain_starred_words_in_her_text_stay(store: Store) -> None:
+    # review 18 Oct: the filter took "**Beat**" out of a recipe step and "(pause)" out of code
+    answer = (
+        "1. **Beat** the eggs.\n2. Tap the *pause* button.\n```python\ntime.sleep(pause)\n```\nOr `player.pause(beat)`."
+    )
+    brain = measured(store, FakeGemma(text(answer)))
+    reply = await brain.answer(store.current_conversation(), incoming(store, "how?"))
+    assert reply.text == answer
+
+
+async def test_an_answer_of_only_a_stage_direction_is_named_as_the_filter(
+    store: Store, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("INFO", logger="local_assistant.brain")
+    brain = measured(store, FakeGemma(text("*smiles*")))
+    reply = await brain.answer(store.current_conversation(), incoming(store, "hi"))
+    assert reply.text == prompts.CONFUSED
+    [line] = warnings_of(caplog)
+    assert "(without_stage_directions emptied it; chars raw 8, without_thinking 8, without_fake_notices 8," in line
+
+
+async def test_a_practice_answer_has_no_stage_directions(store: Store) -> None:
+    gemma = FakeGemma(text("¡Muy bien! (sonríe) ¿Y qué haces el sábado?"))
+    _, _, brain = make(store, gemma)
+    reply = await brain.answer(
+        store.current_conversation(), incoming(store, "Vivo en Sevilla."), practice=practice_turn()
+    )
+    assert reply.text == "¡Muy bien! ¿Y qué haces el sábado?"
 
 
 async def test_a_written_end_call_alone_is_named_as_the_filter(store: Store, caplog: pytest.LogCaptureFixture) -> None:

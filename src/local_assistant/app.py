@@ -24,7 +24,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO
 
-from local_assistant import hostsec, prompts
+from local_assistant import chords, hostsec, prompts
 from local_assistant.babble import Babble, Session, tidy
 from local_assistant.brain import Brain
 from local_assistant.calendar_feed import CalendarFeed
@@ -32,6 +32,7 @@ from local_assistant.calendar_graph import OutlookCalendars
 from local_assistant.calendar_tools import GLANCE_NOT_READ, CalendarTools
 from local_assistant.calendar_watch import CalendarWatch
 from local_assistant.calls import CallManager, CallSettings, Turn, speakable, voice_ready, whole_sentences
+from local_assistant.chords import ChordTool
 from local_assistant.commands import (
     VOICE_ECHO_KEY,
     VOICE_MODE_KEY,
@@ -453,7 +454,6 @@ class App:
                     socket_dir=cfg.call_socket_dir,
                     end_of_turn_s=cfg.calls_end_of_turn_seconds,
                     idle_prompt_s=cfg.calls_idle_prompt_seconds,
-                    idle_hangup_s=cfg.calls_idle_hangup_seconds,
                     max_s=cfg.calls_max_minutes * 60,
                     summary=cfg.calls_summary,
                     fillers=cfg.calls_fillers,
@@ -536,6 +536,10 @@ class App:
             CaptionHelper(cfg.youtube_helper, cfg.youtube_helper_timeout, status=self.part_status), gemma
         )
         self._busy: dict[int, asyncio.Task[None]] = {}  # each answer's busy note, until it is sent or not needed
+        # [chords]: a call's chords results with each turn's Sources note, for the message after the call; then the
+        # last call's, which its summary is checked against
+        self._call_chords: list[tuple[chords.Result, str]] = []
+        self._chords_after: list[chords.Result] = []
         # documents: the PDFs in the owner's ~/Estia-KB and the ones the user sends, read by tools/documents (no AI
         # model) into her index; off without [documents]
         self.documents: Documents | None = None
@@ -563,6 +567,7 @@ class App:
             reminders=self.reminders,
             videos=self.videos,
             documents=self.documents,
+            chords=ChordTool(language=lambda: self.language) if cfg.chords_enabled else None,  # off without [chords]
             base_schemas=tool_schemas(
                 host_label=cfg.host_label, checks=[check.label for check in cfg.health_extra_checks]
             ),
@@ -723,6 +728,7 @@ class App:
             projects=cfg.projects_default if cfg.projects_enabled else "",
             project_levels=[level for level in others if level != cfg.projects_default],
             documents=shown_folder(cfg.documents_folder) if cfg.documents_enabled else "",
+            chords=cfg.chords_enabled,
             security=self._security_level,
         )
 
@@ -757,6 +763,7 @@ class App:
             reminders=cfg.reminders_enabled,
             projects=cfg.projects_enabled,
             documents=cfg.documents_enabled,
+            chords=cfg.chords_enabled,
             language=language,
             practice_last=prompts.practice_last(self.babble.last()),
             capabilities=self.capability_lines(),
@@ -1011,6 +1018,7 @@ class App:
         call reads neither."""
         self._no_call.clear()
         self._calls += 1
+        self._call_chords = []  # [chords]: this call's results, for the message after it
         self.profiler.note_activity()
         if self.initiative is not None:
             self.initiative.note_activity()
@@ -1075,6 +1083,7 @@ class App:
                 glance=glance,
                 reads=reads,
                 on_retry=on_retry,
+                chords_before=[result for result, _ in self._call_chords],
             )
         except GemmaError as exc:
             log.error("call turn: Gemma failed: %s", exc)
@@ -1097,10 +1106,12 @@ class App:
             state.note(said_text)  # her offer of the rundown: a yes to it next turn reads the day
         reply_id = self.store.add_call_reply(conversation_id, aci, kept, said_id)
         device_note = self.devices.take_note() if self.devices else ""
+        # [chords]: the chords note is not sent during the call: said now, texted in one message after it
+        self._call_chords += [(result, reply.sources) for result in reply.chords_results]
         notes = [note for note in (reply.sources, device_note, reply.notice, reply.reminder, reply.device) if note]
         await self._call_notes(aci, conversation_id, said_id, notes)
         log.info("call turn %d answered: %d tool calls", said_id, reply.tool_calls)
-        spoken = (reply.device_spoken, question, code_line, reply.reminder_spoken)
+        spoken = (reply.chords_spoken, reply.device_spoken, question, code_line, reply.reminder_spoken)
         code_text = " ".join(line for line in spoken if line)  # English
         return Turn(said_text, reply_id=reply_id, asks_yes=asks_yes, end_call=reply.end_call, code_text=code_text)
 
@@ -1255,8 +1266,31 @@ class App:
         conversation_id = self.store.current_conversation().id
         await self._send(self.store.add_outgoing(conversation_id, aci, "note", text, None))
 
+    async def call_chords(self, aci: str) -> None:
+        """[chords]: after the call, one message from code: every chords result of the call in call order, its fixed
+        lines word for word (the exact chords, sections as found), then its source: the web page that holds the
+        chords, else the turn's Sources lines. Sent only when a transpose ran; stored as a note, never in her history.
+        The results wait in memory for this call only (a restart during the call loses them: a known gap)."""
+        results, self._call_chords = self._call_chords, []
+        self._chords_after = [result for result, _ in results if result.ok]  # the summary's check reads them
+        if not any(result.moved for result, _ in results):
+            return
+        parts = []
+        for result, sources in results:
+            if not result.ok:
+                continue
+            if result.source is not None:
+                source = f"\nSource: {result.source[0]}: {result.source[1]}"
+            else:
+                listed = [line for line in sources.splitlines()[1:] if line.strip()]
+                source = "\nSources:\n" + "\n".join(listed) if listed else ""
+            parts.append(result.lines + source)
+        await self.call_note(aci, f"{prompts.CHORDS_AFTER_CALL}\n" + "\n\n".join(parts))
+        log.info("calls: the chords message after the call sent (%d results)", len(parts))
+
     async def call_summary(self, aci: str, lines: list[str], minutes: int) -> None:
-        """A short summary of the call as a note (kept out of Gemma's history)."""
+        """A short summary of the call as a note (kept out of Gemma's history). After a call with a chords result, a
+        summary sentence with another chord is left out: code's message holds the exact ones."""
         transcript = "\n".join(lines)[-12_000:]
         messages = [
             {"role": "system", "content": prompts.CALL_SUMMARY_RULES.format(name=self.cfg.name)},
@@ -1268,6 +1302,11 @@ class App:
             log.warning("call summary: Gemma failed: %s", exc)
             return
         summary = completion.content.strip()
+        if summary and self._chords_after:
+            checked = chords.check(summary, results=self._chords_after, sources=[], language=self.language)
+            if checked.left_out:
+                log.warning("call summary: %d sentences with chords not worked out left out", checked.left_out)
+                summary = checked.text
         if summary:
             await self.call_note(aci, prompts.CALL_SUMMARY.format(minutes=minutes, summary=summary))
 
@@ -1375,17 +1414,19 @@ class App:
             len(decision.audio),
             len(decision.documents),
         )
-        with contextlib.suppress(SignalError, NotAllowedError):
-            await self.signal.receipt(aci, timestamp)
         self.profiler.note_activity()
         if self.initiative is not None:
             self.initiative.note_activity()  # a text she is writing waits: Gemma's slot is the user's
+        # queued before anything is awaited: a practice call that ends meanwhile drains the queue first, so a text
+        # stored during the call is its practice turn even while its read receipt is still on its way
         if kind == "command" and not self._no_call.is_set() and text.split()[0].lower() not in WAITING_COMMANDS:
             # during a call a command (no Gemma) is answered at once; /voice name even changes the call's voice
             self._background.add(task := asyncio.create_task(self._command_now(message_id)))
             task.add_done_callback(self._background.discard)
-            return
-        await self.queue.put(message_id)
+        else:
+            self.queue.put_nowait(message_id)
+        with contextlib.suppress(SignalError, NotAllowedError):
+            await self.signal.receipt(aci, timestamp)
 
     async def process(self, message_id: int) -> None:
         message = self.store.message(message_id)
@@ -1506,6 +1547,7 @@ class App:
                     note
                     for note in (
                         reply.sources,
+                        reply.chords,  # [chords]: code's lines, after the page they came from
                         device_note,
                         music_note,
                         *photo_notes,

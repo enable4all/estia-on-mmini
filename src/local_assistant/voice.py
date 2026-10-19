@@ -21,6 +21,7 @@ import os
 import re
 import subprocess
 import time
+import unicodedata
 import urllib.parse
 import uuid
 from collections.abc import Callable, Mapping
@@ -28,8 +29,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from local_assistant import signal_text
-from local_assistant.language import ENGLISH
+from local_assistant import signal_text, theory
+from local_assistant.language import ENGLISH, STAGE_DIRECTIONS, STAGE_SOFT, STAGE_STARRED, made_of
 from local_assistant.part_status import PartStatus
 
 log = logging.getLogger(__name__)
@@ -384,6 +385,170 @@ _BULLET = re.compile(r"^(?:[-*•+]|\d{1,2}[.)])\s+")
 _SENTENCE_END = re.compile(r"[.!?](?=\s|$)|[。！？]")  # Japanese: no space after its sentence ends
 
 
+# a stage direction in her answer: a whole group in brackets, full-width brackets or single stars ("(pause)", "[beat]",
+# "（間）", "*smiles*", "*(laughs)*"); never a link's text ("[pause](…)") or bold ("**Pause**"), and code (a fence or
+# `inline`) is matched first and kept as written
+_STAGE = re.compile(
+    r"(?P<code>```.*?(?:```|\Z)|`[^`\n]*`)"
+    r"|(?P<pre>[ \t]*)"
+    r"(?:\*{1,2}\((?P<starred>[^()\n]{1,40})\)\*{1,2}"
+    r"|\((?P<round>[^()\n]{1,40})\)"
+    r"|\[(?P<square>[^\[\]\n]{1,40})\](?!\()"
+    r"|（(?P<wide>[^（）\n]{1,20})）"
+    r"|(?<![*\w])\*(?P<stars>[^*\s][^*\n]{0,39}?)\*(?![*\w]))"
+    r"(?P<post>[ \t]*)",
+    re.DOTALL,
+)
+_STAGE_WORD = re.compile(r"[^\W\d_]+(?:['’][^\W\d_]+)*")
+_STAGE_BETWEEN = re.compile(r"[\s,;.!…&'’-]+")  # all a stage direction may hold besides its words
+_NO_SPACES = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]")  # Japanese: by characters
+_REPEATED_DOTS = re.compile(r"(\.\.\.|…)(?:[ \t]*(?:\.\.\.|…))+")  # "Em... ... C" once its "(pause)" is out
+_ENDS = ".!?…。！？"  # a sentence's end marks (an ellipsis too)
+# "..." right after a word (at a space, or right after another "...": "C...G...Am"), with the next word and the one after
+# it (a lookahead: "C... G... Am..." is matched word by word)
+_DOTS_BETWEEN = re.compile(
+    r"(?:(?<!\S)|(?<=\.\.\.))([^\s.,;:!?]+)\.{3,}"  # a word, at a space or right after "...", and its "..."
+    r"(?=[ \t]*([^\s.,;:!?]+)(?:[ \t]+([^\s.,;:!?]+))?)"  # the next two words
+)
+# The words that join two chords ("C... then G"): and, or and then in English and the eight languages that spell chords
+_JOINS = frozenset(
+    {
+        *("and", "or", "then", "to"),
+        *("y", "e", "o", "u", "luego", "después"),  # es
+        *("ed", "poi"),  # it
+        *("ou", "depois"),  # pt
+        *("et", "puis", "ensuite"),  # fr
+        *("en", "of", "dan"),  # nl
+        *("und", "oder", "dann"),  # de
+        *("i", "oraz", "lub", "albo", "potem"),  # pl
+        *("и", "или", "потом", "затем"),  # ru
+    }
+)
+_WRAPS = "([\"'“‘)]\"'”’"  # brackets and quotes around a word, never part of a chord
+_MARKS_RUN = re.compile(r"([.,;:!?])[.,;:!?]+")  # a run of marks, said as its first
+_DOTTED = re.compile(r"[^\W\d_]\.[^\W\d_]\Z")  # "N.C", "e.g", "a.m": a dotted abbreviation up to its last dot
+
+
+def _stage_units(text: str) -> tuple[str, ...] | None:
+    """A bracket's words as compared: casefolded, Latin letters without accents, Japanese by characters; None when it
+    holds anything but words and the marks between them (a digit, a sign: "(x2)", "(G7)")."""
+    if _STAGE_BETWEEN.sub("", _STAGE_WORD.sub("", text)):
+        return None
+    words = []
+    for word in _STAGE_WORD.findall(text.replace("’", "'")):
+        word = word.casefold()
+        if all(ord(char) < 0x250 for char in word):
+            word = "".join(char for char in unicodedata.normalize("NFKD", word) if not unicodedata.combining(char))
+        words.append(unicodedata.normalize("NFC", word))
+    return tuple("".join(words)) if _NO_SPACES.search(text) else tuple(words)
+
+
+def _stage_phrases(lists: Mapping[str, tuple[str, ...]]) -> frozenset[tuple[str, ...]]:
+    return frozenset(units for words in lists.values() for word in words if (units := _stage_units(word)))
+
+
+_STAGE_WORDS = _stage_phrases(STAGE_DIRECTIONS)
+_STAGE_STARRED_WORDS = _stage_phrases(STAGE_STARRED)
+_STAGE_SOFT_WORDS = _stage_phrases(STAGE_SOFT)
+
+
+def _cased(char: str) -> bool:
+    """A letter with an upper and a lower case (Latin, Cyrillic); Japanese and Korean have none."""
+    return char.lower() != char.upper()
+
+
+def _attaches(char: str) -> bool:
+    """A character a bracket right beside it belongs to: a cased letter, a digit or "_" ("time.sleep(pause)")."""
+    return char == "_" or char.isdigit() or _cased(char)
+
+
+def _between_sentences(before: str, after: str) -> bool:
+    """Whether a group stands between sentences: after the start of a line or a sentence's end, and before the end of
+    a line, a sentence's end or a sentence's start (a capital, a letter without case, or "¡", "¿", a quote first)."""
+    left = before.rstrip(" \t")
+    left_edge = not left or left.endswith("\n") or left.rstrip("\"'”’)]").endswith(tuple(_ENDS))
+    right = after.lstrip(" \t")
+    starts = right.lstrip("¡¿\"“«'‘(")
+    right_edge = (
+        not right
+        or right[0] == "\n"
+        or right[0] in _ENDS
+        or bool(starts and starts[0].isalpha() and (starts[0].isupper() or not _cased(starts[0])))
+    )
+    return left_edge and right_edge
+
+
+def without_stage_directions(text: str) -> str:
+    """Her answer without its stage directions ("(pause)", "(short pause)", "[beat]", "*smiles*", "(laughs)", "(pausa)",
+    "(пауза)", "（間）"): a whole bracketed group of only the words of language.STAGE_DIRECTIONS and STAGE_SOFT, or a
+    starred one of STAGE_STARRED's (third-person and -ing forms: "*smiles*", never "*pause*" or "*smile*"), in any of
+    the 11 languages (owner, 18 Oct: her "(pause)" between chords was read aloud). One written in lower case goes
+    wherever it stands ("Okay (pause) the next one is G"); a capitalised one only between sentences ("Great! (Laughs)
+    Let me think."), as a title in brackets stays ("(Applause) by Lady Gaga", "Play (Smile) next"). Never bold
+    ("**Beat** the eggs"), code (a fence or `inline`: "time.sleep(pause)"), a bracket right beside a letter or digit,
+    or a link's text (review 18 Oct). The rest stays as written: the punctuation around it ("Em... (pause) ... C..." is
+    "Em... C...", so a call still pauses there), a space before "!" (French), and every bracket that holds anything
+    else ("C (live version)", "(G shapes)", "(x2)", "(if you want)"). Spoken (spoken_text) and sent (brain) alike: she
+    never needs one."""
+    removed = False
+
+    def drop(match: re.Match[str]) -> str:
+        nonlocal removed
+        if match.group("code") is not None:
+            return match.group(0)
+        stars = match.group("stars")
+        inner = stars or next(group for group in match.group("starred", "round", "square", "wide") if group)
+        units = _stage_units(inner)
+        words = _STAGE_STARRED_WORDS if stars else _STAGE_WORDS
+        pre, post = match.group("pre"), match.group("post")
+        before, after = text[: match.start() + len(pre)], text[match.end() - len(post) :]
+        attached = (not pre and before and _attaches(before[-1])) or (not post and after and _attaches(after[0]))
+        first = next((char for char in inner if char.isalpha()), "")
+        capitalised = _cased(first) and first.isupper()
+        if (
+            not units
+            or not made_of(units, words, _STAGE_SOFT_WORDS)
+            or attached
+            or (capitalised and not _between_sentences(before, after))
+        ):
+            return match.group(0)
+        removed = True
+        at_line_start = match.start() == 0 or text[match.start() - 1] == "\n"
+        return "" if at_line_start else post
+
+    cleaned = _STAGE.sub(drop, text)
+    if not removed:
+        return text
+    return _REPEATED_DOTS.sub(r"\1", cleaned).strip()
+
+
+def _dots_between_chords(text: str) -> str:
+    """Three dots between two chords as a comma ("C... G... Am..." is "C, G, Am..."): as a full stop each chord was a
+    sentence of its own, and the voice service read "G." as "Jay" and "Am." as "M" (the chord speech audit, 18 Oct).
+    A chord is what theory's parser reads in some naming ("G", "Am7", "Sol", "Fis"); so is a joining word before one
+    (`_JOINS`: "G... then C" is "G, then C"; the review, 18 Oct). A "..." after or before a word stays as it is
+    ("Wait... A moment.", "G... then the chorus.")."""
+
+    def chord(word: str | None) -> bool:  # as written ("Cm7(b5)"), or without the brackets or quotes around it ("(G")
+        return word is not None and (theory._parses(word) or theory._parses(word.strip(_WRAPS)))
+
+    def comma(found: re.Match[str]) -> str:
+        first, after, then = found.groups()
+        goes_on = chord(after) or (after.casefold() in _JOINS and chord(then))
+        return first + "," if chord(first) and goes_on else found.group(0)
+
+    return _DOTS_BETWEEN.sub(comma, text)
+
+
+def _one_mark(found: re.Match[str]) -> str:
+    """A run of marks as its first ("Wait.. what?!" is "Wait. what?"), but a comma or a semicolon after a dotted
+    abbreviation's last dot stays, a pause ("N.C., then G", "e.g., apples"; the chord speech audit, 18 Oct; "| N.C. | G
+    |" is "N.C.; G.": the review, the same day)."""
+    if found.group(0) in (".,", ".;") and _DOTTED.search(found.string, 0, found.start()):
+        return found.group(0)
+    return found.group(1)
+
+
 def spoken_text(answer: str, max_chars: int = 1500, *, min_chars: int = MIN_SPOKEN, rest: str = REST) -> str:
     """Gemma's answer as something to say aloud, or "" when it should not be spoken (spec 3.3).
 
@@ -391,7 +556,7 @@ def spoken_text(answer: str, max_chars: int = 1500, *, min_chars: int = MIN_SPOK
     code = sum(len(block) for block in _FENCE.findall(answer))
     if code * 2 >= len(answer.strip()):
         return ""
-    text = _FENCE.sub("\n", answer)
+    text = without_stage_directions(_FENCE.sub("\n", answer))
     text = _INLINE.sub(r"\1", _LINK.sub(r"\1", text))
     text = _COMMAND.sub(lambda found: f"slash {found.group(1).lower()}", _URL.sub("", text))  # before paths
     text = _EMOJI.sub("", _PATH.sub("", text))
@@ -422,7 +587,7 @@ def spoken_text(answer: str, max_chars: int = 1500, *, min_chars: int = MIN_SPOK
     sentences = [block if block[-1] in ".!?:;。！？" else block + "." for block in (b.strip() for b in blocks) if block]
     spoken = re.sub(r"\(\s*\)", "", " ".join(sentences))  # brackets that only held a link
     spoken = re.sub(r"\s+([.,;:!?])", r"\1", re.sub(r"\s+", " ", spoken)).strip()
-    spoken = re.sub(r"([.,;:!?])[.,;:!?]+", r"\1", spoken).strip()
+    spoken = _MARKS_RUN.sub(_one_mark, _dots_between_chords(spoken)).strip()
     if len(spoken.rstrip(".")) < min_chars:
         return ""
     if len(spoken) <= max_chars:
@@ -438,8 +603,20 @@ _SENTENCE_GAP = re.compile(r"(?<=[.!?])\s+|(?<=[。！？])\s*")
 # "e.g. Spotify"; the voice service would end a part that stops at "e.g." with a full stop); the others only before a
 # lower-case letter or a digit ("8 a.m. now", "No. 5"), so "At 8 a.m. Then we go." still ends after "a.m.". A
 # lower-case "no." is the word ("I said no. 5 people agreed."; the voice service reads only "no.7" as a number).
+# "N.C." (no chord) too: "Intro: N.C. then G." stays one part, so the voice service reads its chords as one run; and
+# before chords (`_chords_follow`: "N.C. G C D"; the review, 18 Oct).
 _BEFORE_A_NAME = frozenset({"Dr.", "Mr.", "Mrs.", "Ms.", "St.", "vs.", "e.g.", "E.g.", "i.e.", "I.e."})
-_BEFORE_LOWER_CASE = frozenset({"No.", "approx.", "Approx.", "a.m.", "p.m.", "A.M.", "P.M."})
+_BEFORE_LOWER_CASE = frozenset({"No.", "approx.", "Approx.", "a.m.", "p.m.", "A.M.", "P.M.", "N.C."})
+_STRIP_MARKS = ".,;:!?"
+
+
+def _chords_follow(rest: str) -> bool:
+    """Whether `rest` starts with a chord theory's parser reads (in some naming) and then another one or the sentence's
+    end ("G C D", "G.", "Sol Re Mim"), never a word ("A good start", "La casa es grande")."""
+    words = rest.split(None, 2)[:2]
+    if not words or not theory._parses(words[0].strip(_STRIP_MARKS)):
+        return False
+    return len(words) == 1 or words[0][-1] in ".!?" or theory._parses(words[1].strip(_STRIP_MARKS))
 
 
 def sentences(spoken: str) -> list[str]:
@@ -453,6 +630,8 @@ def sentences(spoken: str) -> list[str]:
         last = words[-1].lstrip("(\"'“‘[") if words else ""
         after = text[gap.end() : gap.end() + 1]
         if last in _BEFORE_A_NAME or (last in _BEFORE_LOWER_CASE and (after.islower() or after.isdigit())):
+            continue
+        if last == "N.C." and _chords_follow(text[gap.end() :]):
             continue
         parts.append(text[start : gap.start()])
         start = gap.end()

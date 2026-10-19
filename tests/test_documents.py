@@ -90,7 +90,7 @@ async def test_the_helper_runs_with_fixed_arguments_and_a_clean_environment(
     names = set(json.loads(Path(f"{state}.env").read_text()))
     assert "BRAVE_API_KEY" not in names  # macOS adds its own two to every process
     allowed = {"HOME", "CFFIXED_USER_HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "PATH"}  # CFFIXED_USER_HOME: HOME
-    assert names <= allowed | {"__CF_USER_TEXT_ENCODING", "LC_CTYPE"}
+    assert names <= allowed | {"__CF_USER_TEXT_ENCODING"}  # no LC_CTYPE: the suite pins the locale (conftest)
 
 
 async def test_the_helpers_answer_is_checked(tmp_path: Path, state: Path) -> None:

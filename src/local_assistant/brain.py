@@ -10,6 +10,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from local_assistant import chords as chord_checks
 from local_assistant import prompts
 from local_assistant.babble import PracticeTurn, broken, tidy, users_words
 from local_assistant.claims import (
@@ -25,12 +26,13 @@ from local_assistant.signal_text import MARKERS, unmarked
 from local_assistant.store import Conversation, Message
 from local_assistant.tools import ReminderAttempt, Tools, Turn
 from local_assistant.video import without_copies
+from local_assistant.voice import without_stage_directions
 from local_assistant.web_search import sources
 
 log = logging.getLogger(__name__)
 
 
-INSTANT_TOOLS = frozenset({"remember", "forget", "end_call"})  # no "let me check" on a call for these
+INSTANT_TOOLS = frozenset({"remember", "forget", "end_call", "chords"})  # no "let me check" on a call for these
 DOCUMENT_REPLY_TOKENS = 2_000  # an answer after read_document may run this long: a section in full (16 Oct)
 WARM_UP_TOKENS = 1  # a call's warm-up asks for one token: Ollama reads the prompt and stops
 
@@ -53,6 +55,11 @@ class Reply:
     # call), never in her history
     device: str = ""
     device_spoken: str = ""
+    # [chords]: code's note with the fixed lines of each chords call (or why her chords were left out), never in her
+    # history; and what a call says after her words
+    chords: str = ""
+    chords_spoken: str = ""
+    chords_results: tuple[chord_checks.Result, ...] = ()  # this answer's chords calls (a call keeps them for after it)
 
     @property
     def hers(self) -> str:
@@ -269,13 +276,20 @@ class _Shape:
 
 def _filtered(content: str, message_id: int) -> tuple[str, bool]:
     """Her answer through the filters that leave out what she must not say (a leaked thinking channel, a notice
-    she wrote as if code had, a written end_call), and whether a written end_call ended it. An answer they leave
+    she wrote as if code had, a stage direction such as "(pause)", a written end_call), and whether a written end_call
+    ended it. An answer they leave
     empty is one warning: which filter emptied it, and the length after each (metadata only)."""
     thought = without_thinking(content)
     noticed = without_fake_notices(thought)
-    text, ended = without_written_end_call(noticed)
+    staged = without_stage_directions(noticed)
+    text, ended = without_written_end_call(staged)
     if content.strip() and not text:
-        steps = (("without_thinking", thought), ("without_fake_notices", noticed), ("without_written_end_call", text))
+        steps = (
+            ("without_thinking", thought),
+            ("without_fake_notices", noticed),
+            ("without_stage_directions", staged),
+            ("without_written_end_call", text),
+        )
         log.warning(
             "message %d: the filters left nothing (%s emptied it; chars raw %d, %s)",
             message_id,
@@ -360,6 +374,7 @@ class Brain:
         glance: str = "",
         reads: Sequence[tuple[str, str]] = (),
         on_retry: Callable[[], None] | None = None,
+        chords_before: Sequence[chord_checks.Result] = (),
     ) -> Reply:
         """Gemma's reply to the newest message of the conversation (already stored), with its photos.
 
@@ -371,7 +386,8 @@ class Brain:
         tools, logged and counted like hers and given to her as her own tool calls with their results, so what they
         read is outside text for this answer exactly as when she calls them. `practice`: a /babble turn
         (`_practise`). `on_retry`: called once in an answer, when a try came back empty, before it is asked again (a
-        call says an acknowledgement meanwhile)."""
+        call says an acknowledgement meanwhile). `chords_before`: on a call, its earlier chords results (sources for
+        her chords)."""
         limit_tokens = max_tokens or self._reply_max_tokens
         shown = {**(recent or {}), **({message.id: images} if images else {})}
         retrying = _once(on_retry)
@@ -403,6 +419,7 @@ class Brain:
                 result = await self._tools.call(turn, call.name, call.arguments)
                 messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
         corrected = False
+        chords_nudged = False
         while True:
             limit = self._learn_tool_calls if turn.learned_document_id is not None else self._max_tool_calls
             allow_tools = calls < limit
@@ -444,6 +461,17 @@ class Brain:
                 messages.append({"role": "user", "content": prompts.NOTED_NUDGE})
                 log.warning("message %d: 'Noted' without a save; asking Gemma to correct it", message.id)
                 continue
+            if self._tools.chords_on and not chords_nudged and allow_tools and not on_call:
+                # chords she worked out in her head: once, on texts, back to her (a call answers at once instead)
+                found = self._chords_checked(text, turn, message, chords_before)
+                if found.left_out and not any(result.ok for result in turn.chords):
+                    chords_nudged = True
+                    messages.append({"role": "assistant", "content": completion.content})
+                    messages.append({"role": "user", "content": prompts.CHORDS_NUDGE})
+                    log.warning(
+                        "message %d: her chords not worked out by a chords call; asking Gemma once more", message.id
+                    )
+                    continue
             if turn.forgot:
                 self._context.refresh_snapshot()
             if turn.used_web:
@@ -456,6 +484,9 @@ class Brain:
             ):  # a link planted in outside text never reaches the user tappable, unless they sent it themselves
                 text = defang_links(text, "\n".join([message.text, *turn.allowed_links]))
             text = _without_captions(text, turn)
+            chords_note = chords_spoken = ""
+            if self._tools.chords_on:
+                text, chords_note, chords_spoken = self._chords_note(text, turn, message, chords_before)
             reminder = list(turn.reminder_notes)
             spoken = list(turn.reminder_spoken)
             # per answer, never across turns: a set_reminder that stored nothing gets code's line whatever she wrote;
@@ -497,7 +528,8 @@ class Brain:
             if self._tools.unmade_switch(turn, text):
                 device = prompts.DEVICE_GUARD_ELSE if turn.switched else prompts.DEVICE_GUARD
                 log.warning("message %d: a device change claimed, none made", message.id)
-            text = text or prompts.CONFUSED
+            # nothing of hers left: code's note holds a chords result that worked (review I5), else she got confused
+            text = text or (prompts.CHORDS_DONE if any(result.ok for result in turn.chords) else prompts.CONFUSED)
             return Reply(
                 text=text,
                 tool_calls=calls,
@@ -511,7 +543,36 @@ class Brain:
                 not_set_spoken=not_set_spoken,
                 device=device,
                 device_spoken=device,
+                chords=chords_note,
+                chords_spoken=chords_spoken,
+                chords_results=tuple(turn.chords),
             )
+
+    def _chords_checked(
+        self, text: str, turn: Turn, message: Message, before: Sequence[chord_checks.Result]
+    ) -> chord_checks.Checked:
+        """Her answer's chords against code's results, or the sources' (chords.check)."""
+        sources = [
+            message.text,
+            *self._context.turn_before(message),
+            *(f"{found.title}\n{found.text}" for search in turn.web for found in search.results),
+        ]
+        return chord_checks.check(text, results=turn.chords, sources=sources, language=self._language(), earlier=before)
+
+    def _chords_note(
+        self, text: str, turn: Turn, message: Message, before: Sequence[chord_checks.Result]
+    ) -> tuple[str, str, str]:
+        """[chords]: her sentences with another chord left out; code's note and what a call says (design 3.7)."""
+        found = self._chords_checked(text, turn, message, before)
+        left_out = found.left_out > 0 and not any(result.ok for result in turn.chords)
+        if found.left_out:
+            log.warning("message %d: %d sentences with chords not worked out left out", message.id, found.left_out)
+            text = found.text
+        return (
+            text,
+            chord_checks.note(turn.chords, left_out=left_out),
+            chord_checks.spoken(turn.chords, left_out=left_out),
+        )
 
     async def _practise(
         self,
@@ -560,7 +621,9 @@ class Brain:
             text = practice.fallback
         else:
             text = tidy(
-                without_fake_notices(without_thinking(completion.content)), spoken=practice.spoken, said=message.text
+                without_stage_directions(without_fake_notices(without_thinking(completion.content))),
+                spoken=practice.spoken,
+                said=message.text,
             )
         text, wrote_end_call = without_written_end_call(text)
         end_call = wrote_end_call and self._tools.calls_on and message.text.startswith(prompts.CALL_MARK)

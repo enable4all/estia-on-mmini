@@ -314,6 +314,17 @@ def with_projects(text: str, folder: str, level: str) -> str:
     return f'{text.rstrip(chr(10))}\n\n[projects]\n{root_line}\ndefault = "{level}"\n'
 
 
+def with_chords(text: str) -> str:
+    """A config with [chords] on: the example's commented section switched on where it stands; a config without it
+    gets the section at its end."""
+    if len(_CHORDS_LINE.findall(text)) == 1:
+        return _CHORDS_LINE.sub("[chords]", text)
+    return f"{text.rstrip(chr(10))}\n\n[chords]\n"
+
+
+_CHORDS_LINE = re.compile(r"^# ?\[chords\]$", re.MULTILINE)  # the example's line, commented out
+
+
 def _config_problem(text: str) -> str:
     """Why a config's text would not load ("" when it loads)."""
     try:
@@ -424,6 +435,11 @@ EXTRAS: dict[str, Extra] = {  # new ones go last: the numbers of the others stay
         "  tools/call-tunnel/install-signal-cli-jvm.sh and tools/call-tunnel/build.sh (several GB, a long build);\n"
         "  in her own user then /usr/bin/sudo /usr/local/estia/bin/estia-deploy (it copies the builds into her\n"
         "  release; [calls] before it stops her texts too); then add [calls] (setup_assistant.md, 3, Calls).",
+    ),
+    "chords": Extra(
+        "Chords transposed, moved for a capo, a chord's notes and the key of given chords, worked out on the Mac",
+        "nothing (the chords are worked out on the Mac)",
+        "Nothing to install: setup adds [chords] to her config now (GUIDE.md, Transposing chords).",
     ),
 }
 
@@ -1017,6 +1033,28 @@ class Wizard:
         self.say(prompts.SETUP_PROJECTS_CHOSEN.format(folder=typed, level=level))
         return _Where(typed, folder, level)
 
+    def chords_extra(self) -> None:
+        """Chords picked from the extras: [chords] added to the config (a copy of the old one kept), nothing asked.
+        In her own user her config is hers alone: the line to add and the restart, nothing written. A config that
+        has [chords] already, or does not load, is left alone."""
+        if self.own_user():
+            self.say(prompts.SETUP_CHORDS_HERS.format(edit=prompts.HER_CONFIG_EDIT, save=prompts.NANO_SAVE))
+            return
+        try:
+            text = self.config_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            self.say(prompts.SETUP_CHORDS_NO_CONFIG.format(path=self.config_path))
+            return
+        problem = _config_problem(text)
+        if problem:  # the user's work: never changed
+            self.say(prompts.SETUP_CHORDS_NOT_ADDED.format(path=self.config_path, why=problem))
+            return
+        if parse_config(tomllib.loads(text)).chords_enabled:
+            self.say(prompts.SETUP_CHORDS_ON)
+            return
+        self._write_private(self.config_path, with_chords(text))
+        self.say(prompts.SETUP_CHORDS_ADDED.format(path=self.config_path))
+
     def projects_extra(self) -> None:
         """Projects picked from the extras: the folder and the level asked, then [projects] in the config (a copy of
         the old one kept). In her own user her config is hers alone: the lines to add and the commands, nothing
@@ -1227,7 +1265,9 @@ class Wizard:
             self.say(f"• {name}: {EXTRAS[name].how}")
             if name == "projects":
                 self.projects_extra()
-        if any(name != "projects" for name in picked):  # where each section goes, and when she reads it
+            elif name == "chords":
+                self.chords_extra()
+        if any(name not in ("projects", "chords") for name in picked):  # where each section goes, when she reads it
             if self.own_user():
                 self.say(prompts.SETUP_EXTRAS_HERS.format(edit=prompts.HER_CONFIG_EDIT, save=prompts.NANO_SAVE))
             else:

@@ -157,6 +157,8 @@ struct Polish: Pack {
                          majorSeventh: "major siedem", joins: ["i", "oraz", "lub", "albo"], words: ["Hm"], dash: ", ",
                          music: ["akord", "piosenk", "gitar", "pianin", "fortepian", "ukulele", "tonacj",
                                  "kapodaster", "zwrotk", "refren", "melodi", "muzyk", "utwór", "utworu", "intro",
-                                 "riff"])
+                                 "riff"],
+                         forms: ChordWords.Forms(sharp: "krzyżyk", flat: "bemol", noThird: "bez tercji"),
+                         marks: ChordWords.Marks(noChord: "bez akordu", again: "powtórzyć") { [self] n in cardinal(n, .masculine) + " razy" })
     }
 }

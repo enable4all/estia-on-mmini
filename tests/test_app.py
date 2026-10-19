@@ -419,7 +419,9 @@ async def test_old_messages_after_downtime_get_one_offline_note(
         note, answer = sent(harness.folder)
         assert note.startswith("I was offline ") and answer == "fresh answer"
         assert len(harness.gemma.calls) == 1
-        assert [harness.app.store.message(i).status for i in (1, 2)] == ["failed", "failed"]
+        messages = [harness.app.store.message(i) for i in range(1, 6)]  # 3 in, the note and the answer out
+        statuses = {m.text: m.status for m in messages if m.direction == "in"}
+        assert statuses["are you there?"] == statuses["hello??"] == "failed"  # the note may be stored between them
     finally:
         await stop(harness)
 
@@ -3514,8 +3516,17 @@ async def test_a_message_she_starts_goes_out_with_its_footer(tmp_path: Path, mon
         store.add_followup(ME, "call the dentist", source, now - 60, now + 86_400, at="2026-10-12T10:00:00+00:00")
 
     gemma = FakeGemma(text(json.dumps({"text": "Did you get hold of the dentist?"})))
+    # the other kinds off: the Sunday look back, skipped after 21:00 and logged then, and an improvised note's random
+    # slot follow the real clock (this test failed every Sunday evening from 21:00, 18 Oct)
     harness = await start(
-        tmp_path, monkeypatch, gemma, prepare=planned, initiative_enabled=True, initiative_quiet_hours=""
+        tmp_path,
+        monkeypatch,
+        gemma,
+        prepare=planned,
+        initiative_enabled=True,
+        initiative_quiet_hours="",
+        initiative_lookback=False,
+        initiative_improvise=False,
     )
     try:
         assert harness.app.initiative is not None
@@ -4158,6 +4169,24 @@ async def test_a_practice_voice_note_is_heard_and_answered_in_the_practised_lang
             await stop(harness)
 
 
+def slow_sends(app: App, monkeypatch: pytest.MonkeyPatch, seconds: float = 0.3) -> None:
+    """signal-cli's answer to each send comes `seconds` after the request is logged (a loaded Mac or CI runner): the
+    text counts in sent() while the worker is still answering it."""
+    real = app.signal.send
+
+    async def slow(*args: Any, **kwargs: Any) -> Any:
+        result = await real(*args, **kwargs)
+        await asyncio.sleep(seconds)
+        return result
+
+    monkeypatch.setattr(app.signal, "send", slow)
+
+
+def settled(app: App) -> bool:
+    """No text being answered and none waiting: only then does babble.tick() act (it returns at once while busy)."""
+    return app._worker_idle.is_set() and app.queue.empty()
+
+
 async def test_half_an_hour_without_practice_sends_the_recap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     now = [time.time()]
     gemma = FakeGemma(text("Leuk!"), recap_answer())
@@ -4165,9 +4194,10 @@ async def test_half_an_hour_without_practice_sends_the_recap(tmp_path: Path, mon
     harness = await start(tmp_path, monkeypatch, gemma, clock=lambda: now[0], initiative_quiet_hours="")
     try:
         folder, app = harness.folder, harness.app
+        slow_sends(app, monkeypatch)  # her answer counts in sent() while still being sent; a tick then does nothing
         deliver(folder, "/babble nl", T0)
         deliver(folder, "Ik woon in Utrecht.", T0 + 1)
-        await until(lambda: len(sent(folder)) == 2)
+        await until(lambda: len(sent(folder)) == 2 and settled(app))
         await app.babble.tick()
         assert len(sent(folder)) == 2
         now[0] += 31 * 60
@@ -4313,7 +4343,7 @@ async def test_a_user_back_after_an_idle_end_at_night_gets_the_recap_first(
         folder, app = harness.folder, harness.app
         deliver(folder, "/babble nl", int(now[0] * 1000))
         deliver(folder, "Ik woon in Utrecht.", int(now[0] * 1000) + 1)
-        await until(lambda: len(sent(folder)) == 2)
+        await until(lambda: len(sent(folder)) == 2 and settled(app))
         now[0] += 40 * 60  # 22:20: idle, in quiet hours
         await app.babble.tick()
         held = app.babble.held()
@@ -4357,6 +4387,40 @@ async def test_a_text_typed_during_a_practice_call_is_a_practice_turn_before_pra
             "Ik wil morgen om 7 uur gewekt worden"
         ]
         assert app.babble.running() is None and app.store.open_reminders() == []
+    finally:
+        await stop(harness)
+
+
+async def test_a_text_whose_read_receipt_is_still_on_its_way_when_the_practice_call_ends_is_a_practice_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stored text is in the queue before anything is awaited: its read receipt (a round trip to signal-cli, and
+    through it to Signal's servers) still on its way when the call ends never lets the recap go first and the text
+    become an ordinary turn after practice (the test above failed 1 run in 6, 18 Oct)."""
+    gemma = FakeGemma(text("Leuk! Hoe laat sta je meestal op?"), recap_answer())
+    harness = await start(tmp_path, monkeypatch, gemma, **call_settings(tmp_path))
+    try:
+        folder, app = harness.folder, harness.app
+        deliver(folder, "/babble nl", T0)
+        await until(lambda: len(sent(folder)) == 1)
+        assert app.babble.running(ME) is not None
+        app.call_started(ME)
+        receipt, on_its_way = app.signal.receipt, asyncio.Event()
+
+        async def slow_receipt(aci: str, timestamp: int) -> None:
+            await on_its_way.wait()
+            await receipt(aci, timestamp)
+
+        monkeypatch.setattr(app.signal, "receipt", slow_receipt)
+        deliver(folder, "Ik wil morgen om 7 uur gewekt worden", T0 + 1)
+        await until(lambda: bool(app.store.unanswered_incoming()))
+        app.call_ended()
+        await asyncio.wait_for(app.practice_call_ended(ME), 5)
+        on_its_way.set()
+        await until(lambda: len(sent(folder)) == 3)
+        assert sent(folder)[1] == "Leuk! Hoe laat sta je meestal op?"
+        assert sent(folder)[2].startswith("📚 Practice recap (Dutch, A2)")
+        assert gemma.calls[0]["tools"] is None and app.store.open_reminders() == []
     finally:
         await stop(harness)
 

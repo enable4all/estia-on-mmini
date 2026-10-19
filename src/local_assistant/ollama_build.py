@@ -646,6 +646,11 @@ class Tools:
     def live(self) -> bool:
         return self.root == Path("/")
 
+    def resolve(self, program: str) -> str:
+        """A program's path with every link resolved on this Mac (the Ollama app's /usr/local/bin/ollama links into
+        the app)."""
+        return os.path.realpath(program)
+
     def version(self) -> str | None:
         """/api/version's version ("" when the answer names none); None when nothing answers."""
         if not self.live:
@@ -807,7 +812,7 @@ class Install:
         return ollama_jobs(self.tools.root, None if self.blind else self.home / "Library/LaunchAgents")
 
     def real(self, path: str) -> str:
-        return path if self.blind else os.path.realpath(path)
+        return path if self.blind else self.tools.resolve(path)
 
     def refuse(self, message: str, *, fatal: bool = False) -> None:
         """Setup stops here with the message (`Refusal`; `fatal`: a re-run stops too); a dry run prints it and goes

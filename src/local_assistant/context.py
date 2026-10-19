@@ -172,6 +172,12 @@ class ContextBuilder:
                 return True
         return False
 
+    def turn_before(self, message: Message) -> list[str]:
+        """The texts of the turn before this message (the user's, hers and code's notes)."""
+        if message.seq is None:
+            return []
+        return [found.text for found in self._store.turn_before(message.conversation_id, message.seq)]
+
     def window_tokens_of(self, messages: list[Message]) -> int:
         return sum(self.estimate(message.text) + _MESSAGE_OVERHEAD for message in messages)
 

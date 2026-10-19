@@ -184,7 +184,7 @@ async def test_the_helper_gets_a_clean_environment(tmp_path: Path, monkeypatch: 
     await helper.runner.captions(VIDEO)
     names = set(json.loads(Path(f"{helper.state}.env").read_text()))
     assert "OPENROUTER_API_KEY" not in names and "HTTPS_PROXY" not in names
-    assert names <= {"HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "PATH", "__CF_USER_TEXT_ENCODING", "LC_CTYPE"}
+    assert names <= {"HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "PATH", "__CF_USER_TEXT_ENCODING"}  # conftest: LANG
 
 
 @pytest.mark.parametrize(

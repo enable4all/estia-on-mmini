@@ -1484,7 +1484,7 @@ def test_projects_are_among_the_extras() -> None:
 def test_the_extras_name_every_kind_of_kit_and_every_extra() -> None:
     """Hue and the CalDAV calendars are supported, and documents and calls are extras too (findings 21, 60): the list
     names them, with what each needs that only the person can do."""
-    assert list(EXTRAS)[-2:] == ["documents", "calls"]
+    assert list(EXTRAS)[-3:] == ["documents", "calls", "chords"]
     assert "Hue" in EXTRAS["lights"].title and "Kasa" in EXTRAS["lights"].title
     assert "scripts/hue-pair.sh" in EXTRAS["lights"].how
     for service in ("Google", "Outlook", "iCloud"):
@@ -2218,3 +2218,61 @@ def test_setup_gives_the_personality_hint_after_the_move(
     monkeypatch.setattr("time.sleep", lambda seconds: None)
     assert main(["--config", str(tmp_path / "config.toml")]) == 0
     assert order == ["config", "always on", "security", "extras", "personality"]
+
+
+def test_chords_is_the_last_extra_with_nothing_to_install() -> None:
+    chords = EXTRAS["chords"]
+    assert list(EXTRAS)[-1] == "chords"  # new ones go last: the numbers of the others stay
+    assert chords.how.startswith("Nothing to install: setup adds [chords] to her config now")
+    assert chords.leaves_the_mac == "nothing (the chords are worked out on the Mac)"
+
+
+def test_the_chords_extra_adds_its_section(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    before = render_config(EXAMPLE, BOT, ACI)
+    wizard, asked = extras_wizard(tmp_path, monkeypatch, ["chords"], before)
+    wizard.extras()
+    assert len(asked) == 1  # nothing to ask
+    text = wizard.config_path.read_text(encoding="utf-8")
+    assert parse_config(tomllib.loads(text)).chords_enabled
+    assert len(re.findall(r"^\[chords\]$", text, re.MULTILINE)) == 1
+    assert stat.S_IMODE(wizard.config_path.stat().st_mode) == 0o600
+    assert [copy.read_text(encoding="utf-8") for copy in wizard.config_path.parent.glob("config.toml.bak-*")] == [
+        before
+    ]
+    out = capsys.readouterr().out
+    assert "✓ Chords: [chords] added to" in out and "from her next start" in out
+    assert "add each section there" not in out  # nothing left to add by hand
+
+
+def test_the_chords_extra_leaves_a_config_with_chords_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    before = f'bot_number = "{BOT}"\nallowed_acis = ["{ACI}"]\n\n[chords]\n'
+    wizard, _asked = extras_wizard(tmp_path, monkeypatch, ["chords"], before)
+    wizard.extras()
+    assert wizard.config_path.read_text(encoding="utf-8") == before
+    assert "✓ Chords: on already" in capsys.readouterr().out
+
+
+def test_the_chords_extra_in_her_own_user_shows_the_line_and_writes_nothing(
+    no_system_paths: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    her_own_user(no_system_paths)
+    wizard, _asked = extras_wizard(tmp_path, monkeypatch, ["chords"])
+    wizard.extras()
+    assert not wizard.config_path.exists()
+    out = capsys.readouterr().out
+    assert "[chords]" in out and "/usr/bin/sudo /usr/local/estia/bin/estia config" in out
+    assert "/usr/bin/sudo /usr/local/estia/bin/estia restart" in out
+
+
+def test_the_chords_extra_on_a_config_that_does_not_load_changes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    before = f'bot_number = "{BOT}"\n'
+    wizard, _asked = extras_wizard(tmp_path, monkeypatch, ["chords"], before)
+    wizard.extras()
+    assert wizard.config_path.read_text(encoding="utf-8") == before
+    assert "✗ Chords: not added, the config does not load (allowed_acis" in capsys.readouterr().out

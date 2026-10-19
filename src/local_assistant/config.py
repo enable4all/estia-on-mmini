@@ -381,6 +381,9 @@ class Config:
     documents_look_minutes: float = 60  # how often she lists the folder (and whenever the user asks about documents)
     documents_helper_timeout: float = 75  # the helper stops itself after 60 s a document
     documents_helper: tuple[str, ...] = field(default_factory=_default_documents_helper)  # without arguments
+    # chords: transposed, moved for a capo, a chord's notes and the key of given chords, worked out by code on the Mac
+    # (theory.py); an extra, off without [chords] (an empty section): without it no tool, rules section or list line
+    chords_enabled: bool = False
 
     # voice calls (the JVM signal-cli + our signal-call-tunnel build, see tools/call-tunnel); off without [calls]
     calls_enabled: bool = False
@@ -391,7 +394,6 @@ class Config:
     calls_speed: float = 1.05
     calls_end_of_turn_seconds: float = 2.3  # owner, 15 Oct: room to think (2.8); 17 Oct: 0.5 s less
     calls_idle_prompt_seconds: float = 90
-    calls_idle_hangup_seconds: float = 600
     calls_max_minutes: float = 60
     calls_summary: bool = True
     calls_fillers: bool = False  # "hmm, let me think" lines while she thinks (user: off)
@@ -634,6 +636,7 @@ def parse_config(raw: dict[str, object]) -> Config:
         **_web_settings(raw.get("web")),
         **_maps_settings(raw.get("maps")),
         **_documents_settings(raw.get("documents")),
+        chords_enabled=_chords_on(raw.get("chords")),
         **_reminder_settings(raw.get("reminders")),
         **_initiative_settings(raw.get("initiative")),
         soul_path=DEFAULT_CONFIG_PATH.parent / "soul.md",
@@ -1229,7 +1232,6 @@ class _CallsSettings(TypedDict, total=False):
     calls_speed: float
     calls_end_of_turn_seconds: float
     calls_idle_prompt_seconds: float
-    calls_idle_hangup_seconds: float
     calls_max_minutes: float
     calls_summary: bool
     calls_fillers: bool
@@ -1321,7 +1323,6 @@ def _calls_settings(calls: object, *, voice: bool) -> _CallsSettings:
     for key, default, low, high in (
         ("end_of_turn_seconds", 2.3, 0.5, 5.0),
         ("idle_prompt_seconds", 90, 10, 3600),
-        ("idle_hangup_seconds", 600, 30, 7200),
         ("max_call_minutes", 60, 1, 240),
         ("answer_after_seconds", 5, 0, 20),
     ):
@@ -1351,7 +1352,6 @@ def _calls_settings(calls: object, *, voice: bool) -> _CallsSettings:
         "calls_speed": float(speed),
         "calls_end_of_turn_seconds": numbers["end_of_turn_seconds"],
         "calls_idle_prompt_seconds": numbers["idle_prompt_seconds"],
-        "calls_idle_hangup_seconds": numbers["idle_hangup_seconds"],
         "calls_max_minutes": numbers["max_call_minutes"],
         "calls_summary": summary,
         "calls_fillers": fillers,
@@ -1484,6 +1484,15 @@ class _DocumentsSettings(TypedDict, total=False):
     documents_enabled: bool
     documents_folder: Path
     documents_look_minutes: float
+
+
+def _chords_on(chords: object) -> bool:
+    """[chords]: an empty section turns the extra on; it has no settings."""
+    if chords is None:
+        return False
+    if not isinstance(chords, dict):
+        raise ConfigError("[chords] must be a table")
+    return True
 
 
 def _documents_settings(documents: object) -> _DocumentsSettings:

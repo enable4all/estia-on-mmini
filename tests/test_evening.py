@@ -456,14 +456,15 @@ def test_the_log_takes_the_evening_note_and_an_older_database_moves_up(tmp_path:
 # /initiative on bc353f30…): this harness's install (the defaults, hardened): the chat's and a call's system prompt and
 # her tools, then the chat's with /initiative on
 # 16 Oct, the profile in two parts: her rules as before, the profile's header says 4,000 (its own part); chat
-# 7a8cd927…, call e355cbf5… before (owner, 15 Oct: asking for a joke counts)
+# 7a8cd927…, call e355cbf5… before (owner, 15 Oct: asking for a joke counts); 18 Oct, hearth with the owner's soul.md
+# lines (A/B and the full suite twice): chat 2b726b0f…, call 399fc23f… before
 BEFORE_EVENING_SHA256 = {
-    "chat": "2b726b0fae5bf3a6206d42ba4e50e579e631565545efbe9abbad00d198af1f26",
-    "call": "399fc23f2155d12c0c042f631d4f7da81b4053211611f7bcada975fd2cf15fdf",
+    "chat": "6fd8137b5adf2076b05921dc3f1cf3fb68232546b7bd30518460f631f19017c8",
+    "call": "015017af8f492811219c254a6654aca5c53eef1ce7d3b45ec8b6abcfa5144f1d",
     "tools": "42afa6769c213febcdab193788d983d0543a8158c28f83d3215c5176ee06b7ae",
 }
 BEFORE_EVENING_INITIATIVE_ON_SHA256 = (
-    "f4731c563b4487dcc3b52b83121c0bb5b993d64b50f45208854f775297250d9a"  # 22bef8cf… before 16 Oct
+    "a82b00b5931d7a2052da6390aa227e22cb7bb110e76902434e22eda22eaf696d"  # f4731c56… before 18 Oct, 22bef8cf… before 16
 )
 # the evening note inside the line of the messages she starts, never a line of its own: a line of its own took
 # video_auto from 8 of 8 to 3 of 8, this from 8 of 8 to 7 of 8 (15 Oct, run in turn, a fresh prefix each run). It says

@@ -18,6 +18,8 @@ from zoneinfo import ZoneInfo
 
 from local_assistant import prompts
 from local_assistant.calendar_tools import CalendarTools
+from local_assistant.chords import CHORDS_SCHEMA, ChordTool
+from local_assistant.chords import Result as ChordResult
 from local_assistant.claims import switch_clauses
 from local_assistant.config import DEFAULT_HOST_LABEL, DEFAULT_NAME
 from local_assistant.devices import Devices
@@ -483,6 +485,8 @@ class Turn:
     updated: list[tuple[int, str]] = field(default_factory=list)
     removed: list[tuple[int, str]] = field(default_factory=list)
     moved: list[tuple[int, str]] = field(default_factory=list)  # the user's facts moved into her notes, for room
+    # chords calls in this answer ([chords]), in call order: code's note and a call's spoken line come from them
+    chords: list[ChordResult] = field(default_factory=list)
 
 
 class Tools:
@@ -509,6 +513,7 @@ class Tools:
         reminders: Reminders | None = None,
         videos: VideoReader | None = None,
         documents: Documents | None = None,
+        chords: ChordTool | None = None,
         base_schemas: list[dict[str, Any]] | None = None,
         project_schemas: list[dict[str, Any]] | None = None,
         name: str = DEFAULT_NAME,
@@ -532,6 +537,7 @@ class Tools:
         self._reminders = reminders
         self._videos = videos  # YouTube links: their captions (always on in the app)
         self._documents = documents  # the user's PDFs: off without [documents]
+        self._chords = chords  # chord arithmetic on the Mac: off without [chords]
         self._notify: ToolNote | None = None
         self._profile = profile
         self._tz = tz
@@ -553,7 +559,12 @@ class Tools:
             + (DEVICE_SCHEMAS if self._devices else [])
             + (MUSIC_SCHEMAS if self._music else [])
             + (CALL_SCHEMAS if self._calls else [])
+            + ([CHORDS_SCHEMA] if self._chords else [])
         )
+
+    @property
+    def chords_on(self) -> bool:
+        return self._chords is not None
 
     @property
     def reminders_on(self) -> bool:
@@ -612,8 +623,12 @@ class Tools:
             ok = False
             result = "Error: the tool failed."
         duration_ms = int((time.monotonic() - started) * 1000)
+        logged = arguments
         # mail and calendar text is never stored (specs): the log and later replays get a stub, Gemma the result
-        if name.startswith("mail_"):
+        if name == "chords" and turn.used_web:  # a page's chords, both ways: never stored (Brave's terms, M3)
+            logged = "(chords arguments not kept: chords from a web page)"
+            kept = "(chords result not kept: chords from a web page)"
+        elif name.startswith("mail_"):
             kept = f"({name} result not kept: mail is never stored)"
         elif name.startswith("calendar_"):
             kept = f"({name} result not kept: calendar text is never stored)"
@@ -629,7 +644,7 @@ class Tools:
             kept = f"({name} result not kept: Google Maps content is not stored)"  # Google's terms
         else:
             kept = result[:2000]
-        self._store.log_tool_call(turn.message.id, name, arguments, kept, ok, duration_ms)
+        self._store.log_tool_call(turn.message.id, name, logged, kept, ok, duration_ms)
         log.info("tool %s for message %d: ok=%s, %d ms", name, turn.message.id, ok, duration_ms)
         return result
 
@@ -682,12 +697,24 @@ class Tools:
             return await self._web_tool(turn, self._web, args)
         if name in REMINDER_TOOLS and self._reminders is not None:
             return self._reminder_tool(turn, self._reminders, name, args)
+        if name == "chords" and self._chords is not None:
+            return self._chords_tool(turn, args)
         if name == "end_call" and self._calls:
             if not turn.message.text.startswith(prompts.CALL_MARK):
                 return "Not done: there is no call to end (this is a text message)."
             turn.end_call = True
             return "Done: the call ends after your answer. Say a short goodbye."
         raise ValueError(f"unknown tool {name!r}")
+
+    def _chords_tool(self, turn: Turn, args: dict[str, Any]) -> str:
+        """Chord arithmetic by code (theory.py): the result is kept for code's note, Gemma gets the lines (or the error)
+        and never retypes them."""
+        assert self._chords is not None
+        result = self._chords.run(args, turn.message.text, turn.web, turn.chords)
+        turn.chords.append(result)
+        if not result.ok:
+            raise ValueError(result.problem)
+        return result.for_gemma
 
     def _reminder_tool(self, turn: Turn, reminders: Reminders, name: str, args: dict[str, Any]) -> str:
         """Reminders come only from the user's own words: never in an answer that read outside text (mail, the

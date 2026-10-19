@@ -89,6 +89,12 @@ disk_free_min_percent = 10
 #folder = "/Users/<you>/Estia-KB"  # always your ~/Estia-KB, written in full (the share prints it)
 #look_minutes = 60                 # how often she looks at the folder: 5 to 1440 minutes
 
+# Transposing chords (extra, off without [chords]; an empty section): chords transposed or moved for a capo, a chord's
+# notes and the key of given chords, worked out on this Mac by her own code (no download, no program from elsewhere) and
+# given in a note from the code (GUIDE.md, Transposing chords). scripts/setup.sh --extras switches it on. After a
+# change: restart her.
+#[chords]
+
 # Mail, read-only (Microsoft Graph, delegated Mail.Read). Off without [mail]. Work or school (Microsoft 365) mailboxes only.
 # IDs come from the app registration (Microsoft Entra admin center, "Accounts in this organizational directory only"):
 # Directory (tenant) ID is tenant_id, Application (client) ID is client_id. They are identifiers, not secrets.
@@ -189,8 +195,9 @@ disk_free_min_percent = 10
 #pause = "no speech"          # what keeps a turn open: "no speech" (the default: typing, dishes or traffic that goes on
 #                             # counts as pause; a noise right after the last word and other voices still keep it
 #                             # open) or "quiet" (any sound keeps it open)
-#idle_prompt_seconds = 90     # "Take your time, I'm here." after this much silence (once, then at most every 10 minutes)
-#idle_hangup_seconds = 600    # then goodbye
+#idle_prompt_seconds = 90     # after this much silence: "Take your time, I'm here. Say <her name> when you need me." (at
+#                             # most every 10 minutes), then standby: only a turn with her name is answered, and every 10
+#                             # minutes "I'm still here." until max_call_minutes
 #max_call_minutes = 60
 #summary = true               # a short summary text after a call with 2+ turns
 #fillers = false              # "hmm, let me think" lines while she thinks (off: she answers when ready)

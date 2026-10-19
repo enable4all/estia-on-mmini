@@ -95,6 +95,8 @@ struct Spanish: Pack {
                          words: ["Dom", "Fam", "Lab"], dash: ", ",
                          music: ["acorde", "canci", "guitarr", "piano", "ukelele", "ukulele", "tonalidad", "cejilla",
                                  "trastes", "progresi", "estrofa", "estribillo", "rasgue", "partitura", "melod",
-                                 "músic", "music", "intro", "riff"])
+                                 "músic", "music", "intro", "riff"],
+                         forms: ChordWords.Forms(sharp: "sostenido", flat: "bemol", noThird: "sin tercera"),
+                         marks: ChordWords.Marks(noChord: "sin acorde", again: "repetir") { [self] n in cardinal(n, .feminine) + " veces" })
     }
 }

@@ -147,6 +147,16 @@ def estia_root() -> Path:
     return Path(value) if value else Path("/")
 
 
+def tool_root() -> Path:
+    """The root of the fixed tool paths a release is built with (Homebrew's uv): ESTIA_TEST_ROOT, a test's fake tree
+    (default "/"), as in the owner's scripts. A rehearsal's ESTIA_ROOT never moves them: it builds with the Mac's own
+    uv. Root ignores it, as `estia_root`."""
+    if os.geteuid() == 0:
+        return Path("/")
+    value = os.environ.get("ESTIA_TEST_ROOT", "").strip()
+    return Path(value) if value else Path("/")
+
+
 class Host:
     """Runs fixed argv (absolute tools, no shell) and reads files under `root`. Under another root the system tools are
     refused and printed; in a dry run every change is printed instead of run (reads still run)."""
@@ -934,7 +944,9 @@ def admins(host: Host, owner: str) -> Check:
 def tailscale(
     host: Host, tools: Sequence[str] = TAILSCALE_TOOLS, exists: Callable[[str], bool] = os.path.exists
 ) -> Check:
-    tool = next((path for path in tools if exists(path)), None)
+    """Tailscale's operator and Funnel. Its command is looked for in the host's tree (a test's root: never the Mac's
+    own) and run by its fixed path."""
+    tool = next((path for path in tools if exists(str(host.path(path)))), None)
     if tool is None:
         return Check("tailscale", "ok", "Tailscale", "not installed")
     code, out = host.run([tool, "debug", "prefs"], read_only=True)

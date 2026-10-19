@@ -294,8 +294,8 @@ def test_the_call_rules_come_only_with_calls() -> None:
 def test_call_lines_are_short_and_spoken() -> None:
     lines = (
         *prompts.call_greetings(NAME),
-        prompts.CALL_IDLE,
-        prompts.CALL_IDLE_BYE,
+        prompts.CALL_IDLE.format(name=NAME),
+        prompts.CALL_STILL_HERE,
         prompts.CALL_MAX_BYE,
         prompts.CALL_UNHEARD,
     )
@@ -471,11 +471,13 @@ def test_each_call_style_is_short_and_spoken_and_jokes_only_after_the_caller() -
             "health, money trouble or safety",
             "calm, kind and practical",
         ):
-            assert said in style, (name, said)
+            assert said.casefold() in style.casefold(), (name, said)
         assert all(ord(ch) < 0x2000 for ch in style), name  # no emoji
         lowered = style.casefold()
         assert not any(word in lowered for word in ("hestia", "hearth", "greek", "myth", "fire")), name
-    assert prompts.HEARTH_CALL_STYLE.startswith("Steady, kind and frank")
+    assert prompts.HEARTH_CALL_STYLE.startswith("Steady, warm from the first words")
+    # 18 Oct, from the owner's soul.md: no lists on a call, and a goodbye is one line without a summary
+    assert "no lists" in prompts.HEARTH_CALL_STYLE and "Goodbye: one line, no summary." in prompts.HEARTH_CALL_STYLE
     assert "light touch" in prompts.PLAYFUL_CALL_STYLE
 
 
@@ -678,7 +680,21 @@ def test_hearth_is_steady_frank_and_short_with_one_joke_only_when_asked() -> Non
     can be wrong, no flattery; about playful's length (the evals asked for the AI line and the 😄); no Greek words, no
     mythology, nothing about its name."""
     style = prompts.HEARTH_STYLE
-    assert len(style) < 800 and len(style) < 1.3 * len(prompts.PLAYFUL_STYLE) and "{" not in style
+    # about playful's length until 18 Oct; then the owner's soul.md lines that suit everyone were folded in ("can we use
+    # Tiffany's soul.md for Estias?"): about twice playful's
+    assert len(style) < 1_400 and "{" not in style
+    for said in (
+        "calm and plain",
+        "No gushing, no rows of exclamation marks.",
+        "one to four sentences unless more is asked for",
+        "and only when it moves things on",
+        'never praise the question, the idea or the user ("What a wonderful idea!")',
+        'filler openers ("Certainly!"), no cheerleading, no recap of what the user just said.',
+        "Concrete suggestions over hedging.",
+        "Brainstorming: build on the idea first, then one new angle or challenge, then one question.",
+        "A goodbye gets one short goodbye line, then stop: no summary, no repeat, no list of wishes.",
+    ):
+        assert said in style, said
     assert style.index("answer first") < style.index("joke")
     for said in (
         "same even temper every day",

@@ -98,12 +98,13 @@ def test_another_language_is_one_code_written_line_in_the_rules() -> None:
     assert "Answer only in 日本語 (Japanese)" in prompts.rules(name=NAME, language="ja", calls=True)
 
 
-def test_every_language_has_its_eight_spoken_call_lines() -> None:
+def test_every_language_has_its_nine_spoken_call_lines() -> None:
+    """Eight, and since 18 Oct standby's "I'm still here." (owner)."""
     assert set(prompts.CALL_SPOKEN) == set(CODES)
     for code in CODES:
         spoken = prompts.spoken(code, name=NAME)
         lines = astuple(spoken)
-        assert len(lines) == 8 and len(set(lines)) == 8, code
+        assert len(lines) == 9 and len(set(lines)) == 9, code
         assert all(line.strip() == line and 0 < len(line) < 90 and "\n" not in line for line in lines), code
         assert _plain(LANGUAGES[code].own)[:5] in _plain(spoken.now_speaking), code  # "from now on I speak Dutch"
     for code in ("es", "it", "pt", "nl", "pl", "de", "fr"):  # Latin letters: the voice can say her name
@@ -114,7 +115,12 @@ def test_english_calls_keep_the_richer_lines() -> None:
     english = prompts.call_lines("en", name=NAME)
     assert english.greetings == prompts.call_greetings(NAME) and english.acknowledge == prompts.CALL_ACK_LINES
     assert english.thinking == prompts.CALL_THINKING_LINES and english.checking == prompts.CALL_CHECKING_LINES
-    assert (english.idle, english.lost, english.hearing) == (prompts.CALL_IDLE, prompts.CALL_LOST, prompts.CALL_HEARING)
+    assert (english.idle, english.lost, english.hearing) == (
+        prompts.CALL_IDLE.format(name=NAME),
+        prompts.CALL_LOST,
+        prompts.CALL_HEARING,
+    )
+    assert english.still_here == prompts.CALL_STILL_HERE
     assert english.bye == prompts.CALL_BYE_LINES
 
 
@@ -122,11 +128,12 @@ def test_other_languages_use_their_table_and_their_own_got_it() -> None:
     dutch, spoken = prompts.call_lines("nl", name=NAME), prompts.spoken("nl", name=NAME)
     assert dutch.greetings == (spoken.greeting,) and dutch.acknowledge == ("Begrepen.", "Oké, begrepen.")
     assert dutch.thinking == dutch.checking == (spoken.moment,)
-    assert (dutch.idle, dutch.lost, dutch.hearing, dutch.bye) == (
+    assert (dutch.idle, dutch.lost, dutch.hearing, dutch.bye, dutch.still_here) == (
         spoken.take_your_time,
         spoken.again,
         spoken.again,
         (spoken.bye,),
+        "Ik ben er nog.",
     )
 
 
@@ -350,6 +357,58 @@ def test_every_language_has_its_leave_taking() -> None:
     assert {"i need to go", "i'm off"} <= english
     assert {"ik hang op", "ik moet gaan"} <= set(language.LEAVING["nl"])
     assert {"ich lege auf", "ich muss los"} <= set(language.LEAVING["de"])
+
+
+def test_every_language_has_its_unclear_reasons_and_thanks() -> None:
+    """A reason for leaving that also complains or apologises ("something came up") counts only with nothing but soft
+    words and thanks before it (review 18 Oct), in each of the 11 languages; never "I have things to do"."""
+    assert set(language.LEAVING_UNCLEAR) == set(CODES) and set(language.THANKS) == set(CODES)
+    assert all(language.LEAVING_UNCLEAR[code] and language.THANKS[code] for code in CODES)
+    assert "something came up" in language.LEAVING_UNCLEAR["en"] and "thank you" in language.THANKS["en"]
+    for code in CODES:  # a phrase is clear or unclear, never both
+        assert not set(language.LEAVING[code]) & set(language.LEAVING_UNCLEAR[code]), code
+    every = {phrase for words in (*language.LEAVING.values(), *language.LEAVING_UNCLEAR.values()) for phrase in words}
+    assert not {"i have things to do", "i have to do something", "일이 생겼어요"} & every
+
+
+def test_every_language_says_more_is_coming_in_words_no_closing_phrase_holds() -> None:
+    """On a call, "wait" or "one more thing" after a goodbye, leave-taking or a request to end the call keeps it open
+    (review 18 Oct), in each of the 11 languages; no closing phrase holds one, or it could never end a call."""
+    assert set(language.MORE_COMING) == set(CODES) and all(language.MORE_COMING[code] for code in CODES)
+    assert {"wait", "actually", "one more", "before you go"} <= set(language.MORE_COMING["en"])
+    for code in CODES:
+        closing = (*language.LEAVING[code], *language.LEAVING_UNCLEAR[code], *language.ENDING[code])
+        for more in (*language.MORE_COMING[code], *language.MORE_COMING["en"]):
+            assert not [phrase for phrase in closing if f" {more} " in f" {phrase} "], (code, more)
+
+
+def test_every_language_can_ask_her_to_end_a_call() -> None:
+    """On a call, "let's end the call" or "let's call it a day" ends it after her reply (owner, 18 Oct), in each of the
+    11 languages; the leads beside it ("let's", "please") are never a yes that answers her."""
+    assert set(language.ENDING) == set(CODES) and set(language.ENDING_SOFT) == set(CODES)
+    assert all(language.ENDING[code] for code in CODES)
+    assert {"end the call", "close the call", "hang up", "call it a day", "let's stop here", "let's wrap up"} <= set(
+        language.ENDING["en"]
+    )
+    assert "stop here" not in language.ENDING["en"] and "wrap it up" not in language.ENDING["en"]  # only after a lead
+    assert "end it here" not in language.ENDING["en"] and "let's end it here" in language.ENDING["en"]  # review 18 Oct
+    assert "tot zover" not in language.ENDING["nl"] and "kommen wir zum ende" not in language.ENDING["de"]
+    soft = {word for words in language.ENDING_SOFT.values() for word in words}
+    assert not {"yes", "yeah", "exactly", "true", "fine", "good", "ja", "sí", "oui", "tak", "да", "네", "はい"} & soft
+
+
+def test_every_language_has_its_stage_directions() -> None:
+    """Her "(pause)", "(laughs)" or "*smiles*" is never spoken or sent (owner, 18 Oct), in each of the 11 languages."""
+    assert set(language.STAGE_DIRECTIONS) == set(CODES) and set(language.STAGE_SOFT) == set(CODES)
+    assert all(language.STAGE_DIRECTIONS[code] for code in CODES)
+    assert {"pause", "beat", "laughs", "sighs", "smiles"} <= set(language.STAGE_DIRECTIONS["en"])
+    assert {"short", "long"} <= set(language.STAGE_SOFT["en"])
+    # between stars only third-person and -ing forms (review 18 Oct: "Tap the *pause* button", "Enjoy the *ride*!")
+    assert set(language.STAGE_STARRED) == set(CODES) and all(language.STAGE_STARRED[code] for code in CODES)
+    for code in CODES:
+        assert set(language.STAGE_STARRED[code]) <= set(language.STAGE_DIRECTIONS[code]), code
+    starred = {word for words in language.STAGE_STARRED.values() for word in words}
+    assert {"smiles", "laughing"} <= starred and not {"pause", "smile", "beat", "laugh", "ride", "pausa"} & starred
 
 
 def test_leave_takings_soft_words_are_an_okay_never_a_yes_and_what_goes_on_is_known() -> None:

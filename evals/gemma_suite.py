@@ -50,6 +50,7 @@ import json
 import math
 import os
 import re
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -69,6 +70,7 @@ from local_assistant.babble import OFFERED, Point, PracticeTurn, ask_recap, chec
 from local_assistant.brain import Brain, Reply
 from local_assistant.calendar_feed import CalendarFeed
 from local_assistant.calendar_tools import CalendarTools
+from local_assistant.chords import ChordTool, frets_in
 from local_assistant.claims import NEGATION, claims_a_reminder, claims_a_switch
 from local_assistant.config import (
     DEFAULT_CONFIG_PATH,
@@ -276,6 +278,7 @@ def install_list(
     calendars: Sequence[str] = ("Google",),
     hue: bool = False,
     evening: str = "",
+    chords: bool = False,
 ) -> list[str]:
     """Code's list of what she can do (prompts.capabilities) for the harness's install, which her rules carry as the
     app's do: every part on, as its tools are (projects only with `projects`, documents only with `documents`, in the
@@ -300,6 +303,7 @@ def install_list(
         projects="summary" if projects else "",
         project_levels=("docs",) if projects else (),  # garden-app reads at docs (the harness's projects_docs)
         documents="~/Estia-KB" if documents else "",
+        chords=chords,
         security="hardened",
     )
 
@@ -311,9 +315,10 @@ def harness_rules(
     documents: bool = False,
     hue: bool = False,
     evening: str = "",
+    chords: bool = False,
 ) -> str:
     """Her rules in the harness's install, as the app builds them (`documents`: the document cases only; `hue`: the
-    Hue case only; `evening`: the evening cases only)."""
+    Hue case only; `evening`: the evening cases only; `chords`: the chords cases, or every case with EVAL_CHORDS)."""
     return prompts.rules(
         name=eval_name(),
         calendar=True,
@@ -324,11 +329,12 @@ def harness_rules(
         reminders=True,
         projects=projects,  # an extra: on, as the app is with [projects]; off, as without it
         documents=documents,  # [documents]: the document cases only
+        chords=chords,  # [chords]: the chords cases only, or every case with EVAL_CHORDS=1
         language=eval_language(),
         practice_last=prompts.practice_last(None),  # as the app's rules before any practice
         # what she can do, as the app's rules carry it
         capabilities=install_list(
-            projects=projects, documents=documents, calendars=calendars, hue=hue, evening=evening
+            projects=projects, documents=documents, calendars=calendars, hue=hue, evening=evening, chords=chords
         ),
     )
 
@@ -346,13 +352,18 @@ class Harness:
         hue: bool = False,
         style: str = "",
         evening: str = "",
+        chords: bool = False,
+        tag: str = "",
     ) -> None:
-        """`projects`: on, as the app is with [projects] (the project cases need it); off, as a default install.
+        """`chords`: [chords] on (the chords cases, or every case with EVAL_CHORDS=1: its tool is in every request).
+        `tag`: put first in the system prompt (the A/B gate's runs, `--ab`): no try reuses another's cached prompt.
+        `projects`: on, as the app is with [projects] (the project cases need it); off, as a default install.
         `documents`: on only for the document cases (their tools are in every request: the others keep theirs).
         `hue`: a Philips Hue light beside the TP-Link devices, for the Hue case only (it changes her list).
         `style`: her built-in style while there is no soul.md ("": EVAL_STYLE, else hearth). `evening`: the evening
         note's time while it is on, named in her list (the evening cases only; "": off, the list as before)."""
         self.folder = folder
+        self.chords = chords  # [chords] on: the small install keeps it (what_can_you_do_here, not_set_up_here)
         self.style = style or eval_style()
         self.store = Store.open(folder / "eval.db")
         self.profile = Profile(self.store)
@@ -365,7 +376,8 @@ class Harness:
             self.store,
             self.profile,
             TZ,
-            rules=harness_rules(projects, documents=documents, hue=hue, evening=evening),
+            rules=(f"[{tag}]\n" if tag else "")
+            + harness_rules(projects, documents=documents, hue=hue, evening=evening, chords=chords),
             soul_path=self.soul_path,
             name=eval_name(),
             style=self.style,
@@ -454,11 +466,12 @@ class Harness:
             reminders=self.reminders,
             videos=self.videos,
             documents=self.documents,
+            chords=ChordTool(language=eval_language) if chords else None,
             name=eval_name(),
         )
         self.tools.set_notify(self._note)
         self.gemma = gemma
-        self.brain = Brain(gemma, self.context, self.tools)
+        self.brain = Brain(gemma, self.context, self.tools, language=eval_language)  # the chords check reads it
         self.profiler = Profiler(self.store, self.profile, self.context, gemma, TZ)
         # the messages she starts: the follow-ups found in the idle pass, and her own call with its own rules (her
         # style below them, as in chat); "now" is the time of the last message
@@ -691,6 +704,7 @@ class Case:
     documents: bool = False  # the harness with [documents] (the document cases only)
     hue: bool = False  # the harness with a Philips Hue light (the Hue case only)
     style: str = ""  # her built-in style for this case ("": EVAL_STYLE, else hearth, the default)
+    chords: bool = False  # the harness with [chords] (the chords cases; EVAL_CHORDS=1: every case)
     evening: str = ""  # the evening note on at this time, named in her list (the evening cases only)
 
 
@@ -1517,9 +1531,230 @@ async def web_call(h: Harness) -> tuple[bool, str]:
 
 
 async def web_chords(h: Harness) -> tuple[bool, str]:
-    # chords for a band song: from a chord page found by web search, never invented
+    # chords for a band song: from a chord page found by web search, never invented; with [chords] on (EVAL_CHORDS=1)
+    # her rule says she never writes out the chords the tool gives, so what the user gets is her words and code's note
     reply = await h.say("What are the chords for Spooky by Dusty Springfield? We play it in the band.")
-    return "web_search" in h.tools_used() and "Am7" in reply and "D6" in reply, reply
+    got = f"{reply}\n{h.last_reply.chords if h.last_reply else ''}"
+    return "web_search" in h.tools_used() and "Am7" in got and "D6" in got, got
+
+
+# [chords]: the owner's song flows (17 Oct): the chords from a chord page by web search (the Sources note as today),
+# then code's arithmetic on the page's chords, sections as found; the chords reach the user in code's note
+SPOOKY_TO_EM = ("Em7", "A6", "Bbdim7", "Bm7")  # the page's Am7 · D6 · Ebdim7 · Em7, A minor to E minor (K1: down 5)
+SPOOKY_UP_4 = ("C#m7", "F#6", "Gdim7", "G#m7")  # up 4 semitones, spelled for C♯ minor (T1)
+
+
+def chords_env() -> bool:
+    return os.environ.get("EVAL_CHORDS", "") not in ("", "0")
+
+
+def chords_on(case: Case) -> bool:
+    """[chords] for this case: its own flag, or every case with EVAL_CHORDS=1 (the design's gate: the full suite with
+    the extra on, as the owner's install runs it)."""
+    return case.chords or chords_env()
+
+
+def in_order(text: str, chords: Sequence[str]) -> bool:
+    """The chords as words of the text, in this order."""
+    words = re.findall(r"[^\s·|,.;:()]+", text)
+    found = [word for word in words if word in chords]
+    return found[: len(chords)] == list(chords)
+
+
+def _searched_then_moved(h: Harness) -> bool:
+    used = h.tools_used()
+    return "web_search" in used and "chords" in used and used.index("web_search") < used.index("chords")
+
+
+async def chords_song_to_key(h: Harness) -> tuple[bool, str]:
+    reply = await h.say("Get the chords for Spooky by Dusty Springfield and transpose them from Am to Em")
+    note = h.last_reply.chords if h.last_reply else ""
+    ok = _searched_then_moved(h) and in_order(note, SPOOKY_TO_EM) and "to Em (E minor)" in note
+    return ok, f"{h.tools_used()} | {reply} | {note}"
+
+
+async def chords_song_semitones(h: Harness) -> tuple[bool, str]:
+    reply = await h.say("Get the chords for Spooky by Dusty Springfield and transpose them 4 semitones higher")
+    note = h.last_reply.chords if h.last_reply else ""
+    ok = _searched_then_moved(h) and in_order(note, SPOOKY_UP_4) and "Up 4 (a major third)" in note
+    return ok, f"{h.tools_used()} | {reply} | {note}"
+
+
+async def chords_song_on_a_call(h: Harness) -> tuple[bool, str]:
+    # on a call: said after her words, and code's message after the call (App.call_chords) holds the exact chords
+    reply = await h.say(
+        f"{prompts.CALL_MARK} get the chords for Spooky by Dusty Springfield and transpose them from Am to Em",
+        max_tokens=CALL_TOKENS,
+    )
+    said = h.last_reply.chords_spoken if h.last_reply else ""
+    ok = (
+        _searched_then_moved(h)
+        and in_order(said, SPOOKY_TO_EM)
+        and said.endswith(prompts.CHORDS_LATER)
+        and spoken_ok(reply)
+    )
+    return ok, f"{h.tools_used()} | {reply} | {said}"
+
+
+# the design's other chords cases (review I7): each judged on what the user gets, code's note or what a call says
+SPOOKY_IN_GM = ("Gm7", "C6", "Dbdim7", "Dm7")  # the page's chords with its "Key: Am", down 2 to G minor (K3)
+LET_ME_CHECK = re.compile(r"let me (?:check|see|look)|one moment|hold on|just a (?:sec|moment)", re.IGNORECASE)
+
+
+def chords_note(h: Harness) -> list[str]:
+    """Code's note of the last answer, line by line ([] without one)."""
+    return (h.last_reply.chords if h.last_reply else "").split("\n") if h.last_reply and h.last_reply.chords else []
+
+
+async def chords_transpose(h: Harness) -> tuple[bool, str]:
+    reply = await h.say("Transpose Am F C G up 2")
+    note = chords_note(h)
+    return "Bm G D A" in note and any(line.startswith("Up 2 (a whole tone)") for line in note), f"{reply} | {note}"
+
+
+async def chords_to_key(h: Harness) -> tuple[bool, str]:
+    reply = await h.say("Transpose Am F C G to D minor")
+    note = chords_note(h)
+    return "Dm Bb F C" in note and any("to Dm (D minor)" in line for line in note), f"{reply} | {note}"
+
+
+# a fret in words, which code's check never reads ("the third fret"): English and German, by a fret word
+FRET_WORDS_SAID = {
+    1: ("first", "ersten"),
+    2: ("second", "zweiten"),
+    3: ("third", "dritten"),
+    4: ("fourth", "vierten"),
+    5: ("fifth", "fünften"),
+    6: ("sixth", "sechsten"),
+    7: ("seventh", "siebten"),
+    8: ("eighth", "achten"),
+}
+
+
+def other_fret(reply: str, fret: int, languages: Sequence[str] = ("en", "de")) -> bool:
+    """Her words name a capo fret other than code's (review C2: "Capo im 4. Bund" beside code's Capo 3, all 4 runs):
+    a number by a fret word, as code's check reads it, or one in words before a fret word."""
+    said = [number for language in languages for _, number in frets_in(reply, language)]
+    for number, names in FRET_WORDS_SAID.items():
+        for name in names:
+            if re.search(rf"\b{name}\b[ \t]+(?:\w+[ \t]+)?(?:bund|fret|capo)", reply, re.IGNORECASE):
+                said.append(number)
+    return any(number != fret for number in said)
+
+
+async def chords_capo(h: Harness) -> tuple[bool, str]:
+    reply = await h.say("I want it to sound in Bb, playing G shapes. Which fret for the capo?")
+    note = chords_note(h)
+    return "Capo 3 with G shapes: sounds in B♭ major." in note and not other_fret(reply, 3), f"{reply} | {note}"
+
+
+async def chords_notes(h: Harness) -> tuple[bool, str]:
+    reply = await h.say("Which notes are in a G7 chord?")
+    note = chords_note(h)
+    return "G7: G B D F" in note, f"{reply} | {note}"
+
+
+async def chords_key(h: Harness) -> tuple[bool, str]:
+    reply = await h.say("Which key is the progression Am F C G in?")
+    note = chords_note(h)
+    return any(line.startswith("Likely A minor") for line in note), f"{reply} | {note}"
+
+
+async def chords_web_to_key(h: Harness) -> tuple[bool, str]:
+    # web, then transpose: the page's "Key: Am" read by code (K3), so the step is down 2, not from E minor
+    reply = await h.say("Get the chords for Spooky by Dusty Springfield and play them in G minor")
+    note = "\n".join(chords_note(h))
+    ok = _searched_then_moved(h) and in_order(note, SPOOKY_IN_GM) and "to Gm (G minor)" in note
+    return ok, f"{h.tools_used()} | {reply} | {note}"
+
+
+async def chords_song_key(h: Harness) -> tuple[bool, str]:
+    # a song's key is the page's (web search), never the chords tool's estimate: the page says Key: Am, the estimate
+    # of its chords alone is E minor (F1)
+    reply = await h.say("What key is Spooky by Dusty Springfield in?")
+    used = h.tools_used()
+    named = re.search(r"\bA minor\b|\bAm\b", reply) is not None
+    return "web_search" in used and "chords" not in used and named, f"{used} | {reply}"
+
+
+async def chords_unknown(h: Harness) -> tuple[bool, str]:
+    # a chord the code cannot read: what the user gets names it, never a guess (code refuses a chord in its place,
+    # review I4). Her words, or code's note after a call that worked without it ('"Hm7b" left out'); when no call
+    # worked, her own words must name it (a "Done" there is false)
+    reply = await h.say("Transpose Hm7b Am up 2")
+    note = "\n".join(chords_note(h))
+    worked = any(result.ok for result in h.last_reply.chords_results) if h.last_reply else False
+    accounted = '"Hm7b" left out' in note
+    told = "Hm7b" in reply or (worked and '"Hm7b" is not a chord' in note and accounted)
+    return "chords" in h.tools_used() and told, f"{reply} | {chords_note(h)}"
+
+
+async def chords_in_her_head(h: Harness) -> tuple[bool, str]:
+    # asked so that she may skip the tool: the chords come from code all the same (after the nudge, if she skipped it)
+    reply = await h.say("What's Am F C G a whole tone higher?")
+    note = chords_note(h)
+    return "Bm G D A" in note, f"{h.tools_used()} | {reply} | {note}"
+
+
+async def chords_on_a_call(h: Harness) -> tuple[bool, str]:
+    # on a call: an instant tool (no "let me check" from code), her words speakable, the result said after them
+    reply = await h.say(f"{prompts.CALL_MARK} transpose Am F C G up 2", max_tokens=CALL_TOKENS)
+    said = h.last_reply.chords_spoken if h.last_reply else ""
+    ok = said.startswith("Up 2, a whole tone: Bm G D A.") and spoken_ok(reply) and not LET_ME_CHECK.search(reply)
+    return ok, f"{reply} | {said}"
+
+
+async def chords_no_need(h: Harness) -> tuple[bool, str]:
+    # a chords question with no arithmetic in it: no tool, and an answer that says what a capo does. Never one word:
+    # "fret" failed four right answers of 18 Oct ("clamps onto the neck ... to raise the pitch")
+    reply = await h.say("What does a capo do, in one sentence?")
+    does = re.search(r"\b(?:pitch|higher|raises?|keys?|frets?)\b", reply, re.IGNORECASE) is not None
+    return "chords" not in h.tools_used() and does, f"{h.tools_used()} | {reply}"
+
+
+async def chords_h_moll(h: Harness) -> tuple[bool, str]:
+    # German key words in the user's message win over her reading of them (L4): h-Moll is B minor, written Hm
+    reply = await h.say("Spiel Am F C G in h-Moll")
+    note = chords_note(h)
+    return "Hm G D A" in note and any("to Hm (B minor)" in line for line in note), f"{reply} | {note}"
+
+
+async def chords_b_dur_capo(h: Harness) -> tuple[bool, str]:
+    reply = await h.say("Welcher Bund für B-Dur mit G-Griffen?")
+    note = chords_note(h)
+    return "Capo 3 with G shapes: sounds in B♭ major." in note and not other_fret(reply, 3), f"{reply} | {note}"
+
+
+async def chords_capo_song_key(h: Harness) -> tuple[bool, str]:
+    # review C1: the song's key in words beside a key she works out (G up 3): code once put G major in its place
+    reply = await h.say(
+        "This song is in G major but too low for me; I want it 3 semitones higher. I play G shapes. Capo?"
+    )
+    note = chords_note(h)
+    return "Capo 3 with G shapes: sounds in B♭ major." in note and not other_fret(reply, 3), f"{reply} | {note}"
+
+
+async def chords_capo_sing_in_g(h: Harness) -> tuple[bool, str]:
+    # review I3: the original's key is no key to sound in; she sings in G with G shapes: no capo
+    reply = await h.say("The original recording is in A major, but I sing it in G major. I play G shapes. Which capo?")
+    note = chords_note(h)
+    no_capo = "G shapes with no capo: sounds in G major." in note
+    return no_capo and not other_fret(reply, 0) and "Capo 2" not in reply, f"{reply} | {note}"
+
+
+async def chords_capo_french(h: Harness) -> tuple[bool, str]:
+    # review I5: a phrasing other than the description's example, in French, a key in words before "avec"
+    reply = await h.say("Quel capo pour jouer en si bémol majeur avec des formes de Sol ?")
+    note = chords_note(h)
+    right = any(line.startswith("Capo 3 with ") and line.endswith("sounds in B♭ major.") for line in note)
+    return right and not other_fret(reply, 3, ("en", "fr")), f"{reply} | {note}"
+
+
+async def chords_italian(h: Harness) -> tuple[bool, str]:
+    # do re mi in, do re mi out (L1), never translated to letters
+    reply = await h.say("Trasponi LAm FA DO SOL di un tono sopra")
+    note = chords_note(h)
+    return "SIm SOL RE LA" in note, f"{reply} | {note}"
 
 
 async def web_down(h: Harness) -> tuple[bool, str]:
@@ -2940,20 +3175,30 @@ PARTS_OFF = {  # the parts off in it: never named
 
 
 def small_install(h: Harness) -> None:
-    """The harness as the small install: her rules with its list, and only its tools, as the app gives them."""
+    """The harness as the small install: her rules with its list, and only its tools, as the app gives them; with
+    [chords] when the harness has it (its rules, its list line and its tool)."""
     rules = prompts.rules(
         name=eval_name(),
         reminders=True,
         projects=False,
+        chords=h.chords,
         language=eval_language(),
         practice_last=prompts.practice_last(None),
-        capabilities=prompts.capabilities(**SMALL_INSTALL),
+        capabilities=prompts.capabilities(**SMALL_INSTALL, chords=h.chords),
     )
     h.context = ContextBuilder(
         h.store, h.profile, TZ, rules=rules, soul_path=h.soul_path, name=eval_name(), style=h.style
     )
     h.tools = Tools(
-        h.store, h.profile, TZ, h._fetch, status=h._status, reminders=h.reminders, videos=h.videos, name=eval_name()
+        h.store,
+        h.profile,
+        TZ,
+        h._fetch,
+        status=h._status,
+        reminders=h.reminders,
+        videos=h.videos,
+        chords=ChordTool(language=eval_language) if h.chords else None,
+        name=eval_name(),
     )
     h.tools.set_notify(h._note)
     h.tools.set_consolidate(h.profiler.consolidate_for)
@@ -2965,12 +3210,16 @@ def named_parts(reply: str, parts: dict[str, str]) -> list[str]:
     return [part for part, words in parts.items() if re.search(words, reply, re.IGNORECASE)]
 
 
+CHORDS_PART = {"chords": r"\bchords?\b|transpos"}
+
+
 async def what_can_you_do_here(h: Harness) -> tuple[bool, str]:
-    # she names every part on the list and none that is off
+    # she names every part on the list and none that is off ([chords]: on its list when the harness has it)
     small_install(h)
     reply = await h.say("What can you do?")
-    missing = [part for part in PARTS_ON if part not in named_parts(reply, PARTS_ON)]
-    off = named_parts(reply, PARTS_OFF)
+    on, off_parts = (PARTS_ON | CHORDS_PART, PARTS_OFF) if h.chords else (PARTS_ON, PARTS_OFF | CHORDS_PART)
+    missing = [part for part in on if part not in named_parts(reply, on)]
+    off = named_parts(reply, off_parts)
     return not missing and not off, f"missing: {missing}; off named: {off} | {reply}"
 
 
@@ -3126,6 +3375,28 @@ CASES = [
     Case("web_lookup", "tools", web_lookup),
     Case("web_call", "tools", web_call),
     Case("web_chords", "tools", web_chords),
+    Case("chords_song_to_key", "tools", chords_song_to_key, chords=True),
+    Case("chords_song_semitones", "tools", chords_song_semitones, chords=True),
+    Case("chords_song_on_a_call", "tools", chords_song_on_a_call, chords=True),
+    Case("chords_transpose", "tools", chords_transpose, chords=True),
+    Case("chords_to_key", "tools", chords_to_key, chords=True),
+    Case("chords_capo", "tools", chords_capo, chords=True),
+    Case("chords_notes", "tools", chords_notes, chords=True),
+    Case("chords_key", "tools", chords_key, chords=True),
+    Case("chords_web_to_key", "tools", chords_web_to_key, chords=True),
+    Case("chords_song_key", "tools", chords_song_key, chords=True),
+    Case("chords_unknown", "tools", chords_unknown, chords=True),
+    Case("chords_in_her_head", "tools", chords_in_her_head, chords=True),
+    Case("chords_on_a_call", "tools", chords_on_a_call, chords=True),
+    Case("chords_no_need", "tools", chords_no_need, chords=True),
+    Case("chords_what_can_you_do_here", "chat", what_can_you_do_here, chords=True),
+    Case("chords_not_set_up_here", "chat", not_set_up_here, chords=True),
+    Case("chords_h_moll", "tools", chords_h_moll, chords=True),
+    Case("chords_b_dur_capo", "tools", chords_b_dur_capo, chords=True),
+    Case("chords_italian", "tools", chords_italian, chords=True),
+    Case("chords_capo_song_key", "tools", chords_capo_song_key, chords=True),
+    Case("chords_capo_sing_in_g", "tools", chords_capo_sing_in_g, chords=True),
+    Case("chords_capo_french", "tools", chords_capo_french, chords=True),
     Case("maps_places", "tools", maps_places),
     Case("maps_route", "tools", maps_route),
     Case("maps_call", "tools", maps_call),
@@ -3213,40 +3484,102 @@ def model_settings(config_path: Path = DEFAULT_CONFIG_PATH) -> tuple[str, str]:
     return base_url, model
 
 
-async def run_cases(selected: list[Case]) -> list[Result]:
+async def pinned_gemma() -> PinnedGemma:
+    """The model the evals talk to, pinned as the bridge pins it: never a cloud model."""
     ollama = OllamaGemma(*model_settings())
-    gemma = PinnedGemma(ollama, ModelPin(ollama.model_entry, ""))  # as the bridge: never a cloud model
+    gemma = PinnedGemma(ollama, ModelPin(ollama.model_entry, ""))
     if await gemma.pin.check() is False:
         raise SystemExit(f"evals: not run: {gemma.paused_reason()}")
-    results: list[Result] = []
-    for case in selected:
-        started = time.monotonic()
-        with tempfile.TemporaryDirectory() as folder:
-            harness = Harness(
-                Path(folder),
-                gemma,
-                projects=case.projects,
-                documents=case.documents,
-                hue=case.hue,
-                style=case.style,
-                evening=case.evening,
-            )
-            try:
-                ok, detail = await case.run(harness)
-            except Exception as exc:
-                ok, detail = False, f"{type(exc).__name__}: {exc}"
-            tools = harness.tools_used()
-            harness.store.close()
-        result = Result(case.name, case.group, ok, round(time.monotonic() - started, 1), tools, detail[:600])
-        results.append(result)
-        print(f"{'PASS' if ok else 'FAIL'}  {case.group:<9}{case.name:<22}{result.seconds:>6.1f}s  {','.join(tools)}")
-        if not ok or case.group == "practice":  # a practice case's numbers, pass or fail
-            print("      " + detail.replace("\n", "\n      "))
-    return results
+    return gemma
+
+
+async def run_one(gemma: GemmaClient, case: Case, *, chords: bool, tag: str = "") -> Result:
+    """One case on a fresh harness, printed as it ends."""
+    started = time.monotonic()
+    with tempfile.TemporaryDirectory() as folder:
+        harness = Harness(
+            Path(folder),
+            gemma,
+            projects=case.projects,
+            documents=case.documents,
+            hue=case.hue,
+            style=case.style,
+            evening=case.evening,
+            chords=chords,
+            tag=tag,
+        )
+        try:
+            ok, detail = await case.run(harness)
+        except Exception as exc:
+            ok, detail = False, f"{type(exc).__name__}: {exc}"
+        tools = harness.tools_used()
+        harness.store.close()
+    result = Result(case.name, case.group, ok, round(time.monotonic() - started, 1), tools, detail[:600])
+    print(f"{'PASS' if ok else 'FAIL'}  {case.group:<9}{case.name:<22}{result.seconds:>6.1f}s  {','.join(tools)}")
+    if not ok or case.group == "practice":  # a practice case's numbers, pass or fail
+        print("      " + detail.replace("\n", "\n      "))
+    return result
+
+
+async def run_cases(selected: list[Case]) -> list[Result]:
+    gemma = await pinned_gemma()
+    return [await run_one(gemma, case, chords=chords_on(case)) for case in selected]
+
+
+# ---- the A/B gate (the design's, its section 6): call_goodbye without and with [chords], a fresh tag each try ----
+
+AB_RUNS = 20  # tries per arm (the design's "at least 20 per arm")
+AB_WORSE = 0.05  # worse at a one-sided Fisher p below this: the first release ships without the chords tool on calls
+
+
+def fisher_worse(passes_without: int, passes_with: int, runs: int) -> float:
+    """The one-sided Fisher exact p that the arm with [chords] passes less often than the one without, `runs` tries
+    each: the chance of `passes_with` passes or fewer when the passes of both arms fall at random (hypergeometric)."""
+    total = passes_without + passes_with
+    tables = math.comb(2 * runs, runs)
+    fewer = sum(math.comb(total, k) * math.comb(2 * runs - total, runs - k) for k in range(passes_with + 1))
+    return fewer / tables
+
+
+async def run_ab(case: Case, runs: int, once: Callable[[Case, bool, str], Awaitable[bool]]) -> tuple[int, int, float]:
+    """The case `runs` times without [chords] and `runs` times with it, in turn (the arm going first alternates), each
+    try with a random tag first in its system prompt: the passes of each arm and fisher_worse."""
+    passes = {False: 0, True: 0}
+    for number in range(runs):
+        for chords in (False, True) if number % 2 == 0 else (True, False):
+            passes[chords] += await once(case, chords, secrets.token_hex(4))
+    return passes[False], passes[True], fisher_worse(passes[False], passes[True], runs)
+
+
+def ab_arguments(argv: Sequence[str]) -> tuple[str, int] | None:
+    """`--ab <case> [tries per arm]` (the gate), else None."""
+    if not argv or argv[0] != "--ab" or len(argv) < 2:
+        return None
+    return argv[1], int(argv[2]) if len(argv) > 2 else AB_RUNS
+
+
+async def ab_gate(name: str, runs: int) -> int:
+    """`--ab call_goodbye 100`: the design's gate for the chords tool on calls; exit 1 when it is worse with it."""
+    case = next((case for case in CASES if case.name == name), None)
+    if case is None:
+        raise SystemExit(f"evals: no case {name}")
+    gemma = await pinned_gemma()
+
+    async def once(case: Case, chords: bool, tag: str) -> bool:
+        return (await run_one(gemma, case, chords=chords, tag=tag)).ok
+
+    without, with_chords, p = await run_ab(case, runs, once)
+    print(f"\n{name}: without [chords] {without}/{runs}, with it {with_chords}/{runs}, one-sided Fisher p = {p:.3f}")
+    if p < AB_WORSE:
+        print("GATE FAILED: worse with [chords]; the first release ships without the chords tool on calls")
+        return 1
+    print("GATE PASSED")
+    return 0
 
 
 def select(names: list[str], language: str) -> list[Case]:
-    """The cases by name ("practice": every practice case; "practice_nl": that language's two); without names every
+    """The cases by name ("practice": every practice case; "practice_nl": that language's two; "chords": every chords
+    case); without names every
     case (English), or the safety cases and the language cases."""
     every = CASES + LANGUAGE_CASES + PRACTICE_CASES
     if names:
@@ -3254,6 +3587,8 @@ def select(names: list[str], language: str) -> list[Case]:
         for name in names:
             if name == "practice":
                 wanted |= {case.name for case in PRACTICE_CASES}
+            elif name == "chords":  # every chords case (each has [chords] on its own)
+                wanted |= {case.name for case in CASES if case.chords}
             elif name.removeprefix("practice_") in OFFERED:
                 wanted |= {f"{name}_replies", f"{name}_recap"}
             else:
@@ -3265,6 +3600,9 @@ def select(names: list[str], language: str) -> list[Case]:
 
 
 def main() -> int:
+    gate = ab_arguments(sys.argv[1:])
+    if gate is not None:
+        return asyncio.run(ab_gate(*gate))
     language = eval_language()
     selected = select(sys.argv[1:], language)
     results = asyncio.run(run_cases(selected))

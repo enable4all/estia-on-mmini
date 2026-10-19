@@ -335,6 +335,14 @@ SETUP_PROJECTS_HOME = "That is your home itself: name the folder in it that hold
 SETUP_PROJECTS_NO_FOLDER = "No folder {folder}: type another one, or q for no projects."
 SETUP_PROJECTS_LEVEL = "How much may she read: summary, docs or code? (Enter: summary)"
 SETUP_PROJECTS_BAD_LEVEL = "'{answer}' is not a level: summary, docs or code."
+SETUP_CHORDS_ON = "✓ Chords: on already ([chords] in the config)."
+SETUP_CHORDS_NO_CONFIG = "Chords: no config yet at {path}. scripts/setup.sh writes it; then run --extras again."
+SETUP_CHORDS_ADDED = "✓ Chords: [chords] added to {path}; read from her next start (restart her)."
+SETUP_CHORDS_NOT_ADDED = "✗ Chords: not added, the config does not load ({why}); {path} is unchanged."
+SETUP_CHORDS_HERS = (  # her own user: her config is hers alone
+    "Her config is hers alone, so setup does not write it. To switch chords on, add this line as her, then restart "
+    "her:\n    [chords]\n  {edit}   ({save})\n  /usr/bin/sudo /usr/local/estia/bin/estia restart"
+)
 SETUP_PROJECTS_ON = "✓ Projects: on already ([projects] in the config: root = the folder, default = the level)."
 SETUP_PROJECTS_NO_CONFIG = (
     "Projects: no config yet at {path}. scripts/setup.sh writes it and asks about projects there."
@@ -381,7 +389,7 @@ SETUP_CODE_FAILED = (
 # /help: groups under bold headings (markup, sent as Signal's text styles), a blank line between them
 HELP = """**Conversation**
 /new - start a fresh conversation (I keep your profile and can search our history)
-/profile - show what I know about you
+/profile - show what I know about you (/profile notes: my notes from our chats)
 /fix N text - correct fact number N in your own words
 /forget N - forget fact number N (or /forget words)
 /learn <link> - learn about you from a page, e.g. your LinkedIn profile
@@ -870,11 +878,22 @@ STATUS_MEMORY = "Memory"
 STATUS_PARTS = "Services"
 STATUS_SECURITY = "Security"
 STATUS_REMINDERS = "Reminders and messages I start"
-PROFILE_HEADER = "**Your profile** ({used:,} of {limit:,} characters, always known)"
+# /profile and /profile notes (owner, 18 Oct: "on /profile things are not clear"; the proposal approved that day)
+PROFILE_HEADER = "**Your profile**: I see it with every message ({used:,} of {limit:,} characters, {percent}%)"
 PROFILE_NONE_YET = 'Nothing of yours yet: say "remember that ...".'
-PROFILE_NOTES_HEADER = (
-    "**Notes from your chats** ({used:,} of {limit:,} characters; the ones that may matter come with your message)"
+PROFILE_PER_MESSAGE = (
+    "I see up to {per_message:,} characters of them with each message, the ones that match it first, then the newest."
 )
+PROFILE_NOTES_LINE = (
+    "**My notes from our chats**: {count} {notes} ({used:,} of {limit:,} characters, {percent}%). "
+    + PROFILE_PER_MESSAGE
+    + " /profile notes lists them."
+)
+PROFILE_NOTES_HEADER = (
+    "**My notes from our chats** ({used:,} of {limit:,} characters, {percent}%): " + PROFILE_PER_MESSAGE
+)
+PROFILE_MOVED = "**Moved here from your profile to make room**"
+PROFILE_NO_NOTES = "No notes from our chats yet."
 PROFILE_FOOTER = "Correct one with /fix N new text (a note you fix becomes yours), or remove it with /forget N."
 FIX_USAGE = "Usage: /fix N new text (the fact number from /profile)"
 FIX_NO_FACT = "No profile fact #{number}. See /profile."
@@ -978,6 +997,9 @@ CAPABILITY = {
     "documents": "Documents: answers from your PDFs that name the document and the page; PDFs sent on Signal are saved "
     'on {host}, and /docs lists them. On or off (now: on, folder {folder}). Example: "what does the boiler manual '
     'say about the pressure?"',
+    # [chords]: never the word "music" (the evals read it as Spotify)
+    "chords": "Chords: transposed, moved for a capo, a chord's notes and the key of given chords, worked out on {host} "
+    'and given in a note from the code. Example: "transpose Am F C G up 2"',
     "host": '{Host}: its health in a few lines; real problems come unasked. Example: "how is {host} doing?"',
     "practice": "Language practice: a short conversation in one of eight languages, at level A2 or B1, then a recap of "
     "mistakes. Example: /babble nl",
@@ -1013,6 +1035,7 @@ def capabilities(
     projects: str = "",
     project_levels: Sequence[str] = (),
     documents: str = "",
+    chords: bool = False,
     security: str | None = None,
 ) -> list[str]:
     """What she can do in this install, one "• " line per part that is on (CAPABILITY), in /help's order. `voice`: the
@@ -1025,7 +1048,8 @@ def capabilities(
     `device`: a light or plug's name ("" without [tapo]), `device_brands` the devices' brands by name, each once
     ("TP-Link", "Philips Hue"; TP-Link when left out, as in the config); `projects`: the default level ("" without
     [projects]), `project_levels` the other levels some projects have; `documents`: the documents folder as shown
-    (documents.shown_folder; "" without [documents]); `security`: the Mac's level (hostsec.security_level)."""
+    (documents.shown_folder; "" without [documents]); `chords`: with [chords]; `security`: the Mac's level
+    (hostsec.security_level)."""
     what = [name for on, name in ((digest_calendar, "today's calendar"), (mail, "the mail that needs a reply")) if on]
     now_projects = projects + (f"; some projects: {', '.join(project_levels)}" if project_levels else "")
     brands = list(dict.fromkeys(device_brands)) or ["TP-Link"]
@@ -1063,6 +1087,7 @@ def capabilities(
         (maps, CAPABILITY["maps"]),
         (bool(projects), CAPABILITY["projects"].format(now=now_projects)),
         (bool(documents), CAPABILITY["documents"].format(host=host, folder=documents)),
+        (chords, CAPABILITY["chords"].format(host=host)),
         (True, CAPABILITY["host"].format(Host=host[:1].upper() + host[1:], host=host)),
         (True, CAPABILITY["practice"]),
         (True, CAPABILITY["security"].format(now=CAPABILITY_SECURITY_NOW.get(security, security))),
@@ -1108,10 +1133,20 @@ NOTED_NUDGE = (
     "nothing was saved. If the user asked you to remember something, call remember now. Otherwise give the same "
     'answer without "Noted:".)'
 )
+# [chords] (chords.py): the chords come in code's note, never retyped by her (design 3.7)
+CHORDS_NUDGE = (
+    "(Note from the bridge, not from the user: your answer names chords that no chords call worked out and no "
+    "source holds. Call chords now, or give the same answer without those chords.)"
+)
+CHORDS_LEFT_OUT = "Chords left out: not worked out on the Mac. Ask again."
+CHORDS_DONE = "Done."  # her words, when every sentence of hers was left out after a chords call that worked
+CHORDS_LATER = "The chords come in a message after the call."
+CHORDS_HEAD = "**Chords**"  # code's note: the fixed lines of each chords call
+CHORDS_AFTER_CALL = "**Chords from the call**"  # code's one message after a call that moved chords (E3)
 EMPTY_NUDGE = (
     "(Note from the bridge, not from the user: your previous answer was empty. Answer the user's last message.)"
 )
-DIGEST = "(While we were quiet I noted {count} new {things} about you: /profile shows them.)"
+DIGEST = "(While we were quiet I noted {count} new {things} about you: /profile notes shows them.)"
 MAIL_SIGN_IN = "Mailbox {name} needs a new sign-in: run scripts/mail-login.sh {address} on the Mac."
 # a mailbox not read (failing, last good read older than about two sync rounds): the digest and the mail tools
 MAIL_STALE = "[{name}] not read since {when}: {reason}."
@@ -1353,6 +1388,7 @@ def rules(
     reminders: bool = False,
     projects: bool = False,
     documents: bool = False,
+    chords: bool = False,
     language: str = ENGLISH,
     practice: tuple[str, str] | None = None,
     practice_last: str = "",
@@ -1399,6 +1435,9 @@ def rules(
     if documents:  # before the projects' words go: first after the host's health
         text = text.replace("look at the user's projects, ", "look at the user's projects, read the user's documents, ")
         text = text.replace("\n\nSafety:\n", f"\n\n{_named(DOCUMENT_RULES, host, name)}\n\nSafety:\n")
+    if chords:  # [chords]: code's arithmetic, her words say what was done; the song flow only with web search on
+        section = CHORDS_RULES + (f"\n{CHORDS_WEB_RULE}" if web else "")
+        text = text.replace("\n\nSafety:\n", f"\n\n{section}\n\nSafety:\n")
     if not projects:  # last: the web and maps lines above are placed after the projects' words
         text = text.replace("look at the user's projects, ", "").replace(_PROJECT_BULLETS, PROJECTS_OFF_RULE)
     if capabilities:  # right before Safety, which stays last
@@ -1434,9 +1473,18 @@ something serious is going on: then be calm, kind and practical.
 # sentence of hers to recite: "Are you my friend?" got the line before word for word; that she runs locally is in the
 # rules). Measured, run in turn with a fresh tag (AGENTS.md, Personality): a joke line or a plan line in other words
 # did not change her (no joke when asked for "something fun", a safety concern said again when pushed back)
-HEARTH_STYLE = """Steady, kind and frank: the same even temper every day, never more excited than the news.
-- The real answer first, short and plain; at most one question back. No flattery ("Great question!").
+# 18 Oct (owner: "can we use Tiffany's soul.md for Estias?", "I very much like that Tiffany is less bubbly and to the
+# point now"): his soul.md's lines that suit everyone folded in (calm and plain, one to four sentences, no filler or
+# recap, concrete suggestions, brainstorming, the short goodbye); his name, interests and habits left out
+HEARTH_STYLE = """Steady, kind and frank: calm and plain, the same even temper every day, never more excited than the \
+news. No gushing, no rows of exclamation marks.
+- The real answer first, short and plain: one to four sentences unless more is asked for; detail when asked; at most \
+one question back, and only when it moves things on.
+- No flattery ("Great question!"): never praise the question, the idea or the user ("What a wonderful idea!"); no \
+filler openers ("Certainly!"), no cheerleading, no recap of what the user just said. Concrete suggestions over hedging.
 - A weak or risky plan gets one concern, once, with the reason; then help anyway.
+- Brainstorming: build on the idea first, then one new angle or challenge, then one question.
+- A goodbye gets one short goodbye line, then stop: no summary, no repeat, no list of wishes.
 - Asked for fun or a joke, or when the user banters: end with one short joke or pun, then a 😄. Otherwise no jokes.
 - No joke when the user is worried, sad, stressed or in a crisis, talks about health, money trouble or safety, or \
 something serious is going on: then be calm, kind and practical.
@@ -1448,10 +1496,11 @@ BUILT_IN_STYLES = {"hearth": HEARTH_STYLE, "playful": PLAYFUL_STYLE}
 # turn with a fresh tag and the strict judges: playful's call version call_goodbye 4 of 8 against 0 of 8 with its chat
 # style, call_no_joke 6 of 8 against 2 of 8; hearth's 13 of 33 against 17 of 33 on call_goodbye in four runs (no
 # difference), no joke 24 of 25 against 25 of 25; a shorter call version 0 of 5 on call_goodbye
-HEARTH_CALL_STYLE = """Steady, kind and frank, warm from the first words: short spoken sentences, one idea per turn.
+HEARTH_CALL_STYLE = """Steady, warm from the first words: short spoken sentences, one idea per turn, no lists.
+- Goodbye: one line, no summary.
 - No jokes unless the caller jokes or asks for one.
-- When the caller is worried, sad or stressed, or talks about health, money trouble or safety: calm, kind and \
-practical, never a joke."""
+- When the caller is worried, sad or stressed, or on health, money trouble or safety: calm, kind and practical, never \
+a joke."""
 PLAYFUL_CALL_STYLE = """Curious, with a light touch, warm from the first words: short spoken sentences, one idea per \
 turn.
 - No jokes unless the caller jokes or asks for one; one at most.
@@ -1629,8 +1678,9 @@ CALL_ACK_LINES = (
     "Alright, got it.",
     "Right, got it.",
 )
-CALL_IDLE = "Take your time, I'm here."
-CALL_IDLE_BYE = "I'll hang up now. Call me any time."
+# after 90 s of silence, then standby: only a turn with her name is answered (owner, 18 Oct); {name}: hers
+CALL_IDLE = "Take your time, I'm here. Say {name} when you need me."
+CALL_STILL_HERE = "I'm still here."  # every ten minutes in standby, until the call's length cap (owner, 18 Oct)
 CALL_MAX_BYE = "We've been talking for a long while, so I'll hang up now. Call me back any time."
 CALL_UNHEARD = "Sorry, I didn't catch that."
 # said while Gemma thinks or a tool runs: varied, never the same twice in a row
@@ -1655,13 +1705,14 @@ class Spoken:
     greeting: str  # {name}: her name (spoken() fills it in)
     moment: str  # "one moment" (while she thinks, when those lines are on)
     again: str  # "sorry, could you say that again?"
-    take_your_time: str
+    take_your_time: str  # {name}: hers, where her voice reads Latin letters; else "call me by my name"
     bye: str
     now_speaking: str  # "from now on I speak <language>" (also the voice's warm-up line)
     # the opening of a call she places for a reminder ({time}: "7:00"); the reminder's text follows. Translations
     # need a native speaker's check; Polish and Russian say "calling as agreed" to stay free of grammatical gender.
     wake: str = "Good morning! It's {time}."
     call_reminder: str = "It's {time}. You asked me to call you."
+    still_here: str = CALL_STILL_HERE  # every ten minutes in standby
 
 
 # Calls in one language: these six lines, and its "got it" below. English calls keep the richer lines above;
@@ -1677,106 +1728,117 @@ CALL_SPOKEN: dict[str, Spoken] = {
         "From now on I speak English.",
         "Good morning! It's {time}.",
         "It's {time}. You asked me to call you.",
+        still_here="I'm still here.",
     ),
     "es": Spoken(
         "Hola, soy {name}. ¿Qué puedo hacer por ti?",
         "Un momento.",
         "Perdona, ¿puedes repetirlo?",
-        "Tómate tu tiempo, aquí estoy.",
+        "Tómate tu tiempo, aquí estoy. Di {name} cuando me necesites.",
         "¡Adiós! Hablamos pronto.",
         "A partir de ahora hablo español.",
         "¡Buenos días! Son las {time}.",
         "Son las {time}. Me pediste que te llamara.",
+        still_here="Sigo aquí.",
     ),
     "it": Spoken(
         "Ciao, sono {name}. Cosa posso fare per te?",
         "Un momento.",
         "Scusa, puoi ripetere?",
-        "Fai con calma, sono qui.",
+        "Fai con calma, sono qui. Di' {name} quando hai bisogno di me.",
         "Ciao! A presto.",
         "D'ora in poi parlo italiano.",
         "Buongiorno! Sono le {time}.",
         "Sono le {time}. Mi avevi chiesto di chiamarti.",
+        still_here="Sono ancora qui.",
     ),
     "ko": Spoken(
         "안녕하세요! 무엇을 도와드릴까요?",
         "잠시만요.",
         "죄송해요, 다시 한 번 말씀해 주시겠어요?",
-        "천천히 하세요. 여기 있을게요.",
+        "천천히 하세요. 여기 있을게요. 필요하면 제 이름을 불러 주세요.",
         "좋은 하루 보내세요! 또 이야기해요.",
         "이제부터 한국어로 말할게요.",
         "좋은 아침이에요! 지금 {time}이에요.",
         "지금 {time}이에요. 전화해 달라고 하셨죠.",
+        still_here="아직 여기 있어요.",
     ),
     "pt": Spoken(
         "Olá, é a {name}. Em que posso ajudar?",
         "Um momento.",
         "Desculpe, pode repetir?",
-        "Sem pressa, estou aqui.",
+        "Sem pressa, estou aqui. Diga {name} quando precisar de mim.",
         "Até breve! Tchau.",
         "A partir de agora falo português.",
         "Bom dia! São {time}.",
         "São {time}. Você me pediu para ligar.",
+        still_here="Continuo aqui.",
     ),
     "nl": Spoken(
         "Hoi, met {name}. Wat kan ik voor je doen?",
         "Momentje.",
         "Sorry, wil je dat nog een keer zeggen?",
-        "Neem je tijd, ik ben er.",
+        "Neem je tijd, ik ben er. Zeg {name} als je me nodig hebt.",
         "Doei! Tot snel.",
         "Vanaf nu spreek ik Nederlands.",
         "Goedemorgen! Het is {time}.",
         "Het is {time}. Je vroeg me om je te bellen.",
+        still_here="Ik ben er nog.",
     ),
     "pl": Spoken(
         "Cześć, tu {name}. W czym mogę pomóc?",
         "Chwileczkę.",
         "Przepraszam, możesz powtórzyć?",
-        "Nie spiesz się, jestem tutaj.",
+        "Nie spiesz się, jestem tutaj. Powiedz {name}, kiedy mnie potrzebujesz.",
         "Pa! Do usłyszenia.",
         "Od teraz mówię po polsku.",
         "Dzień dobry! Jest {time}.",
         "Jest {time}. Dzwonię, tak jak było umówione.",
+        still_here="Wciąż tu jestem.",
     ),
     "de": Spoken(
         "Hallo, hier ist {name}. Was kann ich für dich tun?",
         "Einen Moment.",
         "Entschuldige, kannst du das noch mal sagen?",
-        "Lass dir Zeit, ich bin da.",
+        "Lass dir Zeit, ich bin da. Sag {name}, wenn du mich brauchst.",
         "Tschüss! Bis bald.",
         "Ab jetzt spreche ich Deutsch.",
         "Guten Morgen! Es ist {time}.",
         "Es ist {time}. Du wolltest, dass ich dich anrufe.",
+        still_here="Ich bin noch da.",
     ),
     "ja": Spoken(
         "もしもし！どうしましたか？",
         "少々お待ちください。",
         "すみません、もう一度言っていただけますか？",
-        "ゆっくりどうぞ。ここにいますよ。",
+        "ゆっくりどうぞ。ここにいますよ。用があるときは、名前を呼んでくださいね。",
         "では、またお話ししましょう。失礼します。",
         "これからは日本語で話します。",
         "おはようございます！{time}です。",
         "{time}です。お電話するように頼まれていました。",
+        still_here="まだここにいますよ。",
     ),
     "ru": Spoken(
         "Привет! Чем могу помочь?",
         "Минуточку.",
         "Извини, можешь повторить?",
-        "Не торопись, я здесь.",
+        "Не торопись, я здесь. Когда понадоблюсь, позови меня по имени.",
         "Пока! До связи.",
         "Теперь я говорю по-русски.",
         "Доброе утро! Сейчас {time}.",
         "Сейчас {time}. Звоню, как договаривались.",
+        still_here="Я всё ещё здесь.",
     ),
     "fr": Spoken(
         "Salut, c'est {name}. Qu'est-ce que je peux faire pour toi?",
         "Un instant.",
         "Pardon, tu peux répéter?",
-        "Prends ton temps, je suis là.",
+        "Prends ton temps, je suis là. Dis {name} quand tu as besoin de moi.",
         "Au revoir, à bientôt!",
         "À partir de maintenant, je parle français.",
         "Bonjour! Il est {time}.",
         "Il est {time}. Tu m'as demandé de t'appeler.",
+        still_here="Je suis toujours là.",
     ),
 }
 
@@ -1784,7 +1846,9 @@ CALL_SPOKEN: dict[str, Spoken] = {
 def spoken(language: str, *, name: str) -> Spoken:
     """A language's six spoken call lines, the greeting with her name."""
     lines = CALL_SPOKEN[language]
-    return replace(lines, greeting=lines.greeting.format(name=name))
+    return replace(
+        lines, greeting=lines.greeting.format(name=name), take_your_time=lines.take_your_time.format(name=name)
+    )
 
 
 # Each language's natural short "got it", said as soon as a request of a few words is taken in: words, never a hum
@@ -1817,6 +1881,7 @@ class CallLines:
     bye: tuple[str, ...]
     wake: str = Spoken.wake  # the opening of a wake-up call she places ({time})
     call_reminder: str = Spoken.call_reminder  # the opening of another call reminder ({time})
+    still_here: str = CALL_STILL_HERE  # every ten minutes in standby
 
 
 def call_lines(language: str, *, name: str) -> CallLines:
@@ -1828,7 +1893,7 @@ def call_lines(language: str, *, name: str) -> CallLines:
             CALL_ACK_LINES,
             CALL_THINKING_LINES,
             CALL_CHECKING_LINES,
-            CALL_IDLE,
+            CALL_IDLE.format(name=name),
             CALL_LOST,
             CALL_HEARING,
             CALL_BYE_LINES,
@@ -1847,6 +1912,7 @@ def call_lines(language: str, *, name: str) -> CallLines:
         (own.bye,),
         own.wake,
         own.call_reminder,
+        own.still_here,
     )
 
 
@@ -2707,6 +2773,16 @@ PART_FIXES = {
     "error": "see the bridge's log (bridge.log)",
 }
 
+
+# the rules with [chords] (prompts.rules(chords=True)): before Safety; the chords come in code's note, never in her
+# words (design 3.5)
+CHORDS_RULES = """Chords:
+- To transpose given chords, move them for a capo, or give a chord's notes or the key of given chords, always call \
+chords; never work them out yourself. The bridge gives its chords itself: say what was done, never write the chords \
+out. A chord it could not read: say which; never guess."""
+# with web search on too: the song flows (owner, 17 Oct); WEB_RULES and web_search's description stay as they are
+CHORDS_WEB_RULE = """- A song's chords or key: web_search. To transpose a song's chords: web_search, then chords with the \
+page's chords and section names as found."""
 
 # the rules with [documents] (prompts.rules(documents=True)): before Safety
 DOCUMENT_RULES = """Documents:

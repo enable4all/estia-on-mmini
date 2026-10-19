@@ -1946,3 +1946,320 @@ def test_a_refusal_with_cannot_is_no_claim() -> None:
 
     assert not claims_unnegated(RED_CLAIM, "I cannot set the hall light to red.")
     assert claims_unnegated(RED_CLAIM, "I set the hall light to red.")
+
+
+# chords ([chords]): the owner's song flows (17 Oct) are defined here and run with the real model only by hand; every
+# other case keeps its request as before (no chords rule, no chords tool) unless EVAL_CHORDS=1 (the gate's full runs)
+
+
+def test_the_chords_cases_run_with_chords_and_the_others_without(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from evals.gemma_suite import Harness as EvalHarness
+    from evals.gemma_suite import chords_on
+
+    chorded = [case.name for case in CASES if case.chords]
+    assert chorded == list(CHORDS_CASES)  # review I7: the design's cases, every one defined
+    listed = ("chords_what_can_you_do_here", "chords_not_set_up_here")  # her list, as the chat cases it repeats
+    assert all(case.group == ("chat" if case.name in listed else "tools") for case in CASES if case.chords)
+    plain = EvalHarness(tmp_path / "a", FakeGemma())
+    assert "Chords:\n" not in plain.context.system_prompt(plain.store.current_conversation())
+    assert "chords" not in [schema["function"]["name"] for schema in plain.tools.schemas]
+    on = EvalHarness(tmp_path / "b", FakeGemma(), chords=True)
+    rules = on.context.system_prompt(on.store.current_conversation())
+    assert prompts.CHORDS_RULES in rules and "• Chords: transposed" in rules
+    assert "chords" in [schema["function"]["name"] for schema in on.tools.schemas]
+    monkeypatch.delenv("EVAL_CHORDS", raising=False)
+    assert not chords_on(CASES[0]) and chords_on(next(case for case in CASES if case.chords))
+    monkeypatch.setenv("EVAL_CHORDS", "1")  # the gate: the full suite with [chords] on, as the owner's install runs
+    assert chords_on(CASES[0])
+
+
+CHORDS_CASES = (
+    "chords_song_to_key",
+    "chords_song_semitones",
+    "chords_song_on_a_call",
+    "chords_transpose",
+    "chords_to_key",
+    "chords_capo",
+    "chords_notes",
+    "chords_key",
+    "chords_web_to_key",
+    "chords_song_key",
+    "chords_unknown",
+    "chords_in_her_head",
+    "chords_on_a_call",
+    "chords_no_need",
+    "chords_what_can_you_do_here",
+    "chords_not_set_up_here",
+    "chords_h_moll",
+    "chords_b_dur_capo",
+    "chords_italian",
+    "chords_capo_song_key",
+    "chords_capo_sing_in_g",
+    "chords_capo_french",
+)
+SPOOKY_SEARCH = fake_tool("web_search", query="spooky dusty springfield chords")
+MOVE_UP_2 = fake_tool("chords", action="transpose", chords="Am F C G", semitones=2)
+SMALL_LIST = (
+    "I can chat and remember things, read links and YouTube videos, look at photos and voice notes, set reminders, "
+    "write first with check-ins, tell you the Mac's health, language practice with /babble, and /lock for security."
+)
+# each new chords case (review I7): a scripted run it passes and one it fails, on its pass logic alone
+CHORDS_RUNS: dict[str, tuple[list[Any], list[Any]]] = {
+    "chords_transpose": (
+        [MOVE_UP_2, fake_text("Done: up a whole tone.")],
+        [fake_text("Up 2: Bm G D A."), fake_text("It is Bm G D A.")],
+    ),
+    "chords_to_key": (
+        [fake_tool("chords", action="transpose", chords="Am F C G", to_key="Dm"), fake_text("Done: in D minor.")],
+        [fake_text("In D minor: Dm Bb F C."), fake_text("Dm Bb F C.")],  # a wrong to_key: the user's D minor wins
+    ),
+    "chords_capo": (
+        [fake_tool("chords", action="capo", to_key="Bb", shapes="G"), fake_text("Capo on the third fret.")],
+        [fake_text("Put the capo on the third fret.")],
+    ),
+    "chords_notes": (
+        [fake_tool("chords", action="notes", chords="G7"), fake_text("Those are its four notes.")],
+        [fake_text("G7 has G, B, D and F.")],
+    ),
+    "chords_key": (
+        [fake_tool("chords", action="key", chords="Am F C G"), fake_text("Most likely A minor.")],
+        [fake_text("That is C major.")],
+    ),
+    "chords_web_to_key": (
+        [
+            SPOOKY_SEARCH,
+            fake_tool("chords", action="transpose", chords="Am7 · D6 · Ebdim7 · Em7", to_key="Gm"),
+            fake_text("Done: Spooky in G minor."),
+        ],
+        [SPOOKY_SEARCH, fake_text("Spooky in G minor is easy."), fake_text("Spooky in G minor is easy.")],
+    ),
+    "chords_song_key": (
+        [SPOOKY_SEARCH, fake_text("Spooky is in A minor.")],
+        [
+            SPOOKY_SEARCH,
+            fake_tool("chords", action="key", chords="Am7 · D6 · Ebdim7 · Em7"),
+            fake_text("Likely E minor."),
+        ],
+    ),
+    "chords_unknown": (
+        [
+            fake_tool("chords", action="transpose", chords="Hm7b Am", semitones=2),
+            fake_text("I could not read Hm7b: is it Hm7 or Hm7b5?"),
+        ],
+        [fake_tool("chords", action="transpose", chords="Hm7b Am", semitones=2), fake_text("Done, up a whole tone.")],
+    ),
+    "chords_in_her_head": (
+        [MOVE_UP_2, fake_text("Done.")],
+        [fake_text("That is Bm G D A."), fake_text("That is Bm G D A.")],
+    ),
+    "chords_on_a_call": (
+        [MOVE_UP_2, fake_text("Sure, I moved it up a whole tone.")],
+        [MOVE_UP_2, fake_text("Let me check, one moment.")],
+    ),
+    "chords_no_need": (
+        [fake_text("A capo clamps all the strings at one fret, so the guitar sounds higher.")],
+        [fake_tool("chords", action="notes", chords="C"), fake_text("A capo clamps the strings at one fret.")],
+    ),
+    "chords_what_can_you_do_here": (
+        [fake_text(SMALL_LIST.replace(", and /lock", ", transpose chords, and /lock"))],
+        [fake_text(SMALL_LIST)],
+    ),
+    "chords_not_set_up_here": (
+        [fake_text("Mail is not set up here, so I cannot check it.")],
+        [fake_text("No urgent mails today.")],
+    ),
+    "chords_h_moll": (
+        [fake_tool("chords", action="transpose", chords="Am F C G", to_key="Bm"), fake_text("Fertig.")],
+        [fake_text("In h-Moll: Hm G D A."), fake_text("Hm G D A.")],
+    ),
+    "chords_b_dur_capo": (
+        [fake_tool("chords", action="capo", to_key="B-Dur", shapes="G"), fake_text("Im dritten Bund.")],
+        [fake_text("Im dritten Bund.")],
+    ),
+    "chords_italian": (
+        [fake_tool("chords", action="transpose", chords="LAm FA DO SOL", semitones=2), fake_text("Fatto.")],
+        [fake_tool("chords", action="transpose", chords="Am F C G", semitones=2), fake_text("Fatto.")],
+    ),
+    "chords_capo_song_key": (
+        [fake_tool("chords", action="capo", to_key="Bb", shapes="G"), fake_text("Capo 3, with your G shapes.")],
+        [fake_tool("chords", action="capo", to_key="G", shapes="G"), fake_text("No capo needed.")],
+    ),
+    "chords_capo_sing_in_g": (
+        [fake_tool("chords", action="capo", to_key="G", shapes="G"), fake_text("No capo needed.")],
+        [fake_tool("chords", action="capo", to_key="A", shapes="G"), fake_text("Capo 2, like the record.")],
+    ),
+    "chords_capo_french": (
+        [fake_tool("chords", action="capo", to_key="Sib", shapes="Sol"), fake_text("Capo en case 3.")],
+        [fake_text("Mets le capo en case 3.")],
+    ),
+    "web_chords": (  # with [chords] on too: what the user gets, her words or code's note, holds the page's chords
+        [SPOOKY_SEARCH, fake_tool("chords", action="key", chords="Am7 · D6 · Ebdim7 · Em7"), fake_text("Here.")],
+        [SPOOKY_SEARCH, fake_text("I found the song's page.")],
+    ),
+}
+
+
+def test_the_chords_cases_run_by_one_name() -> None:
+    from evals.gemma_suite import select
+
+    assert [case.name for case in select(["chords"], "en")] == list(CHORDS_CASES)
+
+
+@pytest.mark.parametrize("name", list(CHORDS_RUNS))
+async def test_each_chords_case_passes_its_flow_and_fails_another(tmp_path: Path, name: str) -> None:
+    """Review I7: the design's chords cases, defined (not run here: no Gemma), each judged on what the user gets."""
+    from evals.gemma_suite import Harness as EvalHarness
+
+    case = next(case for case in CASES if case.name == name)
+    passing, failing = CHORDS_RUNS[name]
+    for number, (answers, expected) in enumerate(((passing, True), (failing, False))):
+        harness = EvalHarness(tmp_path / str(number), FakeGemma(*answers), chords=True)
+        try:
+            ok, detail = await case.run(harness)
+        finally:
+            harness.store.close()
+        assert ok is expected, (name, expected, detail)
+
+
+HM7B = fake_tool("chords", call_id="a", action="transpose", chords="Hm7b Am", semitones=2)
+B_DUR = fake_tool("chords", action="capo", to_key="B-Dur", shapes="G")
+IN_BB = fake_tool("chords", action="capo", to_key="Bb", shapes="G")
+# the eval's runs of 18 Oct, and rows around them: (case, scripted answers, passes)
+CHORDS_JUDGED: list[tuple[str, list[Any], bool]] = [
+    # chords_unknown: what the user gets names the chord; code's note does after a call that worked without it ("left
+    # out"); when none worked, her own words must. Her guess "Hm7" (the eval's run) is refused by code (review I4), so
+    # nothing worked and her "transposed" is false
+    (
+        "chords_unknown",
+        [
+            HM7B,
+            fake_tool("chords", call_id="b", action="transpose", chords="Hm7 Am", semitones=2),
+            fake_text("I've transposed those up two semitones for you."),
+        ],
+        False,
+    ),
+    (
+        "chords_unknown",
+        [
+            HM7B,
+            fake_tool("chords", call_id="b", action="transpose", chords="Hm7 Am", semitones=2),
+            fake_text("I could not read Hm7b. Did you mean Hm7 or Hm7b5?"),
+        ],
+        True,
+    ),
+    (
+        "chords_unknown",
+        [HM7B, fake_tool("chords", call_id="b", action="transpose", chords="Am", semitones=2), fake_text("Done.")],
+        True,
+    ),
+    ("chords_unknown", [HM7B, fake_text("Done, up a whole tone.")], False),
+    ("chords_unknown", [fake_text("Up 2: C#m7 Bm."), fake_text("Up 2: C#m7 Bm.")], False),  # no tool: a guess
+    # chords_no_need: a right one-sentence answer need not say "fret" (all four of 18 Oct were right)
+    (
+        "chords_no_need",
+        [
+            fake_text(
+                "A capo is a device that clamps onto the neck of a stringed instrument to raise the pitch of the "
+                "strings, allowing you to play in different keys while using easier chord shapes."
+            )
+        ],
+        True,
+    ),
+    ("chords_no_need", [fake_text("A capo clamps all the strings at one fret, so the guitar sounds higher.")], True),
+    ("chords_no_need", [fake_text("I'm not sure what you mean by that.")], False),
+    # review C2: code's note said Capo 3 and her words another fret, in all 4 runs; her fret is now judged too, in
+    # words as well as digits (code's check leaves out a digit, never a word)
+    ("chords_b_dur_capo", [B_DUR, fake_text("Setz den Kapodaster in den 3. Bund.")], True),
+    ("chords_b_dur_capo", [B_DUR, fake_text("Capo im 4. Bund, dann klingt es in B-Dur.")], True),  # left out: "Done."
+    ("chords_b_dur_capo", [B_DUR, fake_text("Setz den Kapodaster in den vierten Bund.")], False),
+    ("chords_b_dur_capo", [B_DUR, fake_text("Das Tool sagt 3, aber du brauchst den vierten Bund.")], False),
+    ("chords_capo", [IN_BB, fake_text("Capo on the third fret.")], True),
+    ("chords_capo", [IN_BB, fake_text("Put the capo on the fourth fret.")], False),
+]
+
+
+@pytest.mark.parametrize(("name", "answers", "expected"), CHORDS_JUDGED)
+async def test_the_chords_cases_judge_the_eval_runs_of_18_oct(
+    tmp_path: Path, name: str, answers: list[Any], expected: bool
+) -> None:
+    from evals.gemma_suite import Harness as EvalHarness
+
+    case = next(case for case in CASES if case.name == name)
+    harness = EvalHarness(tmp_path, FakeGemma(*answers), chords=True)
+    try:
+        ok, detail = await case.run(harness)
+    finally:
+        harness.store.close()
+    assert ok is expected, detail
+
+
+async def test_the_chords_cases_judge_the_flow_and_codes_note(tmp_path: Path) -> None:
+    from evals.gemma_suite import Harness as EvalHarness
+    from evals.gemma_suite import chords_song_on_a_call, chords_song_semitones, chords_song_to_key
+
+    def harness(folder: Path, *answers: Completion) -> EvalHarness:
+        return EvalHarness(folder, FakeGemma(*answers), chords=True)
+
+    to_key = fake_tool("chords", action="transpose", chords="Am7 · D6 · Ebdim7 · Em7", from_key="Am", to_key="Em")
+    done = fake_text("Done: Spooky moved from A minor to E minor; the chords come in the note.")
+    assert (await chords_song_to_key(harness(tmp_path / "a", SPOOKY_SEARCH, to_key, done)))[0]
+    head = fake_text("Spooky in E minor: Em7, A6, Bbdim7 and Bm7.")  # worked out in her head, twice: left out
+    assert not (await chords_song_to_key(harness(tmp_path / "b", SPOOKY_SEARCH, head, head)))[0]
+    no_search = fake_tool("chords", action="transpose", chords="Am7 D6 Ebdim7 Em7", to_key="Em")
+    assert not (await chords_song_to_key(harness(tmp_path / "c", no_search, done)))[0]  # chords from her memory
+
+    up = fake_tool("chords", action="transpose", chords="Am7 · D6 · Ebdim7 · Em7", semitones=4)
+    higher = fake_text("Done: Spooky 4 semitones higher.")
+    assert (await chords_song_semitones(harness(tmp_path / "d", SPOOKY_SEARCH, up, higher)))[0]
+    wrong = fake_tool("chords", action="transpose", chords="Am7 · D6 · Ebdim7 · Em7", semitones=-4)
+    assert not (await chords_song_semitones(harness(tmp_path / "e", SPOOKY_SEARCH, wrong, higher)))[0]
+
+    said = fake_text("Done, Spooky is in E minor now.")
+    assert (await chords_song_on_a_call(harness(tmp_path / "f", SPOOKY_SEARCH, to_key, said)))[0]
+    junk = fake_text("thought")
+    assert not (await chords_song_on_a_call(harness(tmp_path / "g", SPOOKY_SEARCH, to_key, junk)))[0]
+
+
+# the design's call_goodbye gate (review I6): the case without and with [chords], in turn, a random tag first in every
+# system prompt; worse at a one-sided Fisher p < 0.05, and the first release ships without the chords tool on calls
+
+
+def test_fisher_worse_is_the_one_sided_exact_p() -> None:
+    from evals.gemma_suite import fisher_worse
+
+    assert fisher_worse(10, 0, 10) == pytest.approx(1 / 184_756)  # 10 of 10 against 0 of 10: one table in C(20, 10)
+    assert fisher_worse(24, 9, 30) < 0.001  # AGENTS.md, Gotchas: the list on calls, 24 of 30 to 9 of 30
+    assert fisher_worse(18, 18, 20) > 0.5  # no change: far from the gate
+    assert fisher_worse(0, 20, 20) == 1.0  # better with it: never "worse"
+
+
+async def test_the_ab_gate_alternates_the_arms_each_with_its_own_tag() -> None:
+    from evals.gemma_suite import run_ab
+
+    seen: list[tuple[bool, str]] = []
+
+    async def once(case: Case, chords: bool, tag: str) -> bool:
+        seen.append((chords, tag))
+        tries = sum(1 for arm, _ in seen if arm == chords)
+        return not chords or tries % 2 == 1  # without: every try passes; with: the first and the third
+
+    case = next(case for case in CASES if case.name == "call_goodbye")
+    without, with_chords, p = await run_ab(case, 4, once)
+    assert [chords for chords, _ in seen] == [False, True, True, False, False, True, True, False]  # in turn
+    assert len({tag for _, tag in seen}) == 8  # a fresh tag for every try: no cached prompt is reused
+    assert (without, with_chords) == (4, 2) and p == pytest.approx(0.2142857, abs=1e-6)
+
+
+def test_a_tag_comes_first_in_the_system_prompt(tmp_path: Path) -> None:
+    from evals.gemma_suite import Harness as EvalHarness
+    from evals.gemma_suite import ab_arguments
+
+    tagged = EvalHarness(tmp_path / "a", FakeGemma(), tag="3f9a0c1d")
+    assert tagged.context.system_prompt(tagged.store.current_conversation()).startswith("[3f9a0c1d]\n")
+    plain = EvalHarness(tmp_path / "b", FakeGemma())
+    assert not plain.context.system_prompt(plain.store.current_conversation()).startswith("[")
+    assert ab_arguments(["--ab", "call_goodbye", "20"]) == ("call_goodbye", 20)
+    assert ab_arguments(["--ab", "call_goodbye"]) == ("call_goodbye", 20)  # the design's 20 per arm
+    assert ab_arguments(["call_goodbye"]) is None

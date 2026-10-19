@@ -248,6 +248,17 @@ def _cap(line: str) -> str:
     return line if len(line) <= LINE_CHARS else line[: LINE_CHARS - 1] + "…"
 
 
+def _closed_git(path: Path) -> bool:
+    """A repository whose git folder, config or object store is there but closed to this user: counted by the file
+    modes, never by git's answer, which differs between git versions (one answered for a closed config). A .git file
+    (a worktree's) is left to git."""
+    git = path / ".git"
+    if not os.path.isdir(git):
+        return False
+    wanted = ((git, os.R_OK | os.X_OK), (git / "config", os.R_OK), (git / "objects", os.R_OK | os.X_OK))
+    return any(os.path.lexists(item) and not os.access(item, mode) for item, mode in wanted)
+
+
 async def _git(project: Project, *args: str) -> str:
     """git with fixed arguments: no pager, no optional locks, no fsmonitor program."""
     return await run_command(
@@ -303,6 +314,9 @@ class Projects:
         found, unreadable = self._scan()
         readme: str | None = None
         for project in found:
+            if _closed_git(project.path):
+                unreadable += 1
+                continue
             risky = await self._risky_config(project)
             if risky == [UNREADABLE]:
                 unreadable += 1

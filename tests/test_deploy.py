@@ -1160,3 +1160,41 @@ def test_the_configs_default_documents_helper_is_the_one_a_release_holds() -> No
     assert config.Config(bot_number="+306900000000", allowed_acis=frozenset()).documents_helper == (
         str(config.CODE_ROOT / deploy.DOCUMENTS_BINARY),
     )
+
+
+# uv at its fixed paths: Homebrew's (Apple silicon, Intel), then uv's own installer's and cargo's in the builder's home;
+# a test's fake tree (ESTIA_TEST_ROOT) holds the fixed ones, so the suite never takes the uv of the Mac it runs on
+
+
+def fake_uv(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\nexit 0\n")
+    path.chmod(0o755)
+    return path
+
+
+def test_uv_is_found_at_its_fixed_paths_under_the_test_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root, home = tmp_path / "root", tmp_path / "home"
+    monkeypatch.setenv("ESTIA_TEST_ROOT", str(root))
+    who = Builder("alex", home, os.getuid())
+    with pytest.raises(DeployError, match="uv not found"):
+        deploy.find_uv(who)  # the Mac's own /opt/homebrew/bin/uv is never taken
+    installer = fake_uv(home / ".local/bin/uv")
+    assert deploy.find_uv(who) == str(installer)  # uv's own installer, in the builder's home
+    intel = fake_uv(root / "usr/local/bin/uv")
+    assert deploy.find_uv(who) == str(intel)
+    brew = fake_uv(root / "opt/homebrew/bin/uv")
+    assert deploy.find_uv(who) == str(brew)
+
+
+def test_root_takes_uv_only_from_the_real_fixed_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A sudo'd command never takes a path from the environment: ESTIA_TEST_ROOT is a test's, ignored for root."""
+    from local_assistant import hostsec
+
+    monkeypatch.setenv("ESTIA_TEST_ROOT", str(tmp_path))
+    assert hostsec.tool_root() == tmp_path
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    assert hostsec.tool_root() == Path("/")
+    monkeypatch.delenv("ESTIA_TEST_ROOT")
+    monkeypatch.setattr(os, "geteuid", lambda: 501)
+    assert hostsec.tool_root() == Path("/")

@@ -5,6 +5,7 @@ GUIDE.md and README.md give for the two parts."""
 import dataclasses
 import inspect
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,7 @@ from local_assistant.fetcher import Page
 from local_assistant.profile import Op, Profile
 from local_assistant.profiler import Profiler
 from local_assistant.store import Fact, Message, Store
-from local_assistant.timefmt import local_date
+from local_assistant.timefmt import short_date
 from local_assistant.tools import Tools, Turn
 from tests.conftest import ME, T0, TZ
 from tests.fakes.fake_gemma import FakeGemma, text, tool
@@ -69,7 +70,8 @@ def turn(store: Store, words: str, ts: int = T0 + 100_000) -> Turn:
 
 
 def day(fact: Fact) -> str:
-    return local_date(fact.created_at, TZ)
+    """The date /profile shows: without this year's number."""
+    return short_date(fact.created_at, TZ, today=datetime.now(TZ).date())
 
 
 def ops(*operations: dict[str, Any]) -> str:
@@ -92,14 +94,20 @@ async def test_profile_with_only_notes_says_nothing_of_yours_yet_then_the_notes_
     first, second = profile.facts()
     used = len(first.text) + len(second.text)
     assert await commands.handle(command(store, "/profile")) == (
-        "**Your profile** (0 of 4,000 characters, always known)\n"
+        "**Your profile**: I see it with every message (0 of 4,000 characters, 0%)\n"
         "\n"
         'Nothing of yours yet: say "remember that ...".\n'
         "\n"
-        f"**Notes from your chats** ({used} of 12,000 characters; the ones that may matter come with your message)\n"
+        f"**My notes from our chats**: 2 notes ({used} of 12,000 characters, 1%). I see up to 1,500 characters of "
+        "them with each message, the ones that match it first, then the newest. /profile notes lists them.\n"
+        "\n" + prompts.PROFILE_FOOTER
+    )
+    assert await commands.handle(command(store, "/profile notes", T0 + 1)) == (
+        f"**My notes from our chats** ({used} of 12,000 characters, 1%): I see up to 1,500 characters of them with "
+        "each message, the ones that match it first, then the newest.\n"
         "\n"
-        f"#1 {NOTE} (learned from chat, {day(first)})\n"
-        f"#2 The user drinks green tea in the morning. (learned from chat, {day(second)})\n"
+        f"#1 {NOTE} ({day(first)})\n"
+        f"#2 The user drinks green tea in the morning. ({day(second)})\n"
         "\n" + prompts.PROFILE_FOOTER
     )
 
@@ -111,8 +119,8 @@ async def test_profile_with_only_the_users_facts_has_no_notes_section_and_format
     for n, fact in enumerate(texts):
         profile.add(fact, source_kind="link" if n == 2 else "remember")
     listing = await commands.handle(command(store, "/profile"))
-    assert listing.splitlines()[0] == "**Your profile** (1,250 of 4,000 characters, always known)"
-    assert "Notes from your chats" not in listing and prompts.PROFILE_NONE_YET not in listing
+    assert listing.splitlines()[0] == "**Your profile**: I see it with every message (1,250 of 4,000 characters, 31%)"
+    assert "My notes from our chats" not in listing and prompts.PROFILE_NONE_YET not in listing
     assert f"#3 {texts[2]} (from a link, " in listing and f"#1 {texts[0]} (you asked, " in listing
     assert listing.endswith("\n\n" + prompts.PROFILE_FOOTER)
 
@@ -129,18 +137,23 @@ async def test_each_part_is_grouped_on_its_own_and_the_fill_counts_the_category_
     listing = await commands.handle(command(store, "/profile"))
     notes_used = len("Music: The user plays bass in a band.") + len("The user likes tea.")
     assert listing == (
-        f"**Your profile** ({len(YOURS)} of 4,000 characters, always known)\n"
+        f"**Your profile**: I see it with every message ({len(YOURS)} of 4,000 characters, 1%)\n"
         "\n"
         f"#1 {YOURS} (you asked, {day(music)})\n"
         "\n"
-        f"**Notes from your chats** ({notes_used} of 12,000 characters; the ones that may matter come with your "
-        "message)\n"
+        f"**My notes from our chats**: 2 notes ({notes_used} of 12,000 characters, 0%). I see up to 1,500 characters "
+        "of them with each message, the ones that match it first, then the newest. /profile notes lists them.\n"
+        "\n" + prompts.PROFILE_FOOTER
+    )
+    assert await commands.handle(command(store, "/profile notes", T0 + 1)) == (
+        f"**My notes from our chats** ({notes_used} of 12,000 characters, 0%): I see up to 1,500 characters of them "
+        "with each message, the ones that match it first, then the newest.\n"
         "\n"
         "**Music**\n"
-        f"#2 The user plays bass in a band. (learned from chat, {day(music)})\n"
+        f"#2 The user plays bass in a band. ({day(music)})\n"
         "\n"
         "**Other**\n"
-        f"#3 The user likes tea. (learned from chat, {day(tea)})\n"
+        f"#3 The user likes tea. ({day(tea)})\n"
         "\n" + prompts.PROFILE_FOOTER
     )
 
@@ -153,7 +166,7 @@ async def test_an_install_from_before_over_the_users_limit_shows_the_real_fill(s
         roomy.add(sized("old", n, 250), source_kind="remember")
     _, _, commands = make(store, Profile(store, max_chars=1_000))
     listing = await commands.handle(command(store, "/profile"))
-    assert listing.splitlines()[0] == "**Your profile** (1,250 of 1,000 characters, always known)"
+    assert listing.splitlines()[0] == "**Your profile**: I see it with every message (1,250 of 1,000 characters, 125%)"
     assert listing.count(" (you asked, ") == 5
     shown = await commands.handle(command(store, "/status", T0 + 1))
     assert "Profile: 5 facts of yours, 125% full; 0 notes from chats, 0% full" in shown.splitlines()
@@ -166,9 +179,9 @@ async def test_a_fact_moved_to_her_notes_still_says_the_user_asked_for_it(store:
     first = profile.add(YOURS, source_kind="remember").added[0]
     ops_ = [Op("remove", fact_id=first, reason="room"), Op("add", text="The user is allergic to nuts.")]
     assert profile.apply(ops_, source_kind="remember", remove_to_notes=True).moved == [first]
-    listing = await commands.handle(command(store, "/profile"))
+    listing = await commands.handle(command(store, "/profile notes"))
     line = next(line for line in listing.splitlines() if line.startswith(f"#{first} "))
-    assert "learned from chat" not in line
+    assert "learned from chat" not in line and "(you asked, " in line
 
 
 # /status
@@ -203,10 +216,11 @@ async def test_fixing_a_note_makes_it_theirs_in_place_and_in_her_prompt(store: S
     after = context.snapshot()
     assert "#2 The user cycles to work." in after and after.endswith(prompts.NOTES_IN_SNAPSHOT.format(count=1))
     listing = await commands.handle(command(store, "/profile", T0 + 1))
-    yours, notes = listing.split("**Notes from your chats**")
+    yours, notes = listing.split("**My notes from our chats**")
     assert "#2 The user cycles to work. (you asked, " in yours and "#2 " not in notes
+    assert "#2 " not in await commands.handle(command(store, "/profile notes", T0 + 2))
     used = len(YOURS) + len("The user cycles to work.")
-    assert listing.splitlines()[0] == f"**Your profile** ({used} of 4,000 characters, always known)"
+    assert listing.splitlines()[0] == f"**Your profile**: I see it with every message ({used} of 4,000 characters, 2%)"
 
 
 async def test_fixing_the_last_note_leaves_no_notes_section(store: Store) -> None:
@@ -216,7 +230,7 @@ async def test_fixing_the_last_note_leaves_no_notes_section(store: Store) -> Non
         "Fixed: #1 The user cycles to work."
     )
     listing = await commands.handle(command(store, "/profile", T0 + 1))
-    assert "Notes from your chats" not in listing and prompts.PROFILE_NONE_YET not in listing
+    assert "My notes from our chats" not in listing and prompts.PROFILE_NONE_YET not in listing
     assert "notes of yours from earlier chats" not in context.snapshot()
 
 
@@ -248,7 +262,7 @@ async def test_the_category_a_fixed_note_keeps_counts_toward_their_limit(store: 
     shorter = sized("fix", 2, 24)
     assert await commands.handle(command(store, f"/fix 2 {shorter}", T0 + 1)) == f"Fixed: #2 Work: {shorter}"
     listing = await commands.handle(command(store, "/profile", T0 + 2))
-    assert f"**Work**\n#2 {shorter} (you asked, " in listing.split("**Notes from your chats**")[0]
+    assert f"**Work**\n#2 {shorter} (you asked, " in listing.split("**My notes from our chats**")[0]
 
 
 async def test_a_note_fixed_in_its_own_words_becomes_theirs_and_a_copy_of_theirs_is_refused(store: Store) -> None:
@@ -360,7 +374,7 @@ def test_the_notice_lists_saved_updated_removed_and_moved_in_that_order(store: S
 async def test_remember_in_a_full_part_moves_facts_into_her_notes_and_says_so(store: Store) -> None:
     """The real consolidation (Profiler.consolidate_for, Gemma faked): it shows Gemma only the user's part; the two
     facts it takes out move into her notes, never deleted; the reply names both, the turn lists them as moved (not
-    removed), the notice says "Moved to notes", and /profile lists them under her notes."""
+    removed), the notice says "Moved to notes", and /profile notes lists them in its moved group."""
     profile = Profile(store, max_chars=100)
     context = ContextBuilder(store, profile, TZ)
     first = profile.add(sized("own", 1, 40), source_kind="remember").added[0]
@@ -397,8 +411,12 @@ async def test_remember_in_a_full_part_moves_facts_into_her_notes_and_says_so(st
     )
     assert [fact.id for fact in profile.notes()] == [first, second, note]
     _, _, commands = make(store, profile)
-    listing = await commands.handle(command(store, "/profile", T0 + 200_000))
-    assert f"#{first} " in listing.split("**Notes from your chats**")[1]
+    listing = await commands.handle(command(store, "/profile notes", T0 + 200_000))
+    assert (
+        f"#{first} " in listing.split(prompts.PROFILE_MOVED)[1]
+        and f"#{second} " in listing.split(prompts.PROFILE_MOVED)[1]
+    )
+    assert f"#{first} " not in await commands.handle(command(store, "/profile", T0 + 200_001))
 
 
 async def test_a_consolidation_that_only_shortens_their_fact_moves_nothing(store: Store) -> None:

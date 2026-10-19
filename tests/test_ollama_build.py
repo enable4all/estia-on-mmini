@@ -96,6 +96,7 @@ class FakeTools(Tools):
         addresses: tuple[str, ...] = LOCAL,
     ) -> None:
         super().__init__(Path("/"), say=lambda _line: None)
+        self.tmp_path = tmp_path
         self.root = tmp_path / "root"  # /Applications, /opt/homebrew and /Library/LaunchDaemons under the test
         self.versions = list(versions)
         self.programs = [program] if isinstance(program, str) else list(program)
@@ -115,6 +116,32 @@ class FakeTools(Tools):
     @property
     def live(self) -> bool:
         return True
+
+    def resolve(self, program: str) -> str:
+        """Links resolved in this fake Mac, as if its tree were "/": a system path and every link's target, also an
+        absolute one, in its tree (never the Mac the tests run on); a path of the test's own (a home, a folder of
+        its own) where it is."""
+        if program.startswith(str(self.tmp_path) + "/"):
+            return os.path.realpath(program)
+        todo = list(Path(program).relative_to("/").parts)
+        done: list[str] = []
+        links = 0
+        while todo:
+            part = todo.pop(0)
+            if part == "..":
+                done = done[:-1]
+            elif part != ".":
+                here = self.root.joinpath(*done, part)
+                if not os.path.islink(here):
+                    done.append(part)
+                    continue
+                links += 1
+                assert links <= 40, f"a loop of links at {program}"
+                target = Path(os.readlink(here))
+                if target.is_absolute():
+                    done, target = [], target.relative_to("/")
+                todo = [*target.parts, *todo]
+        return "/" + "/".join(done)
 
     def version(self) -> str | None:
         return self.versions.pop(0) if len(self.versions) > 1 else self.versions[0]
@@ -681,6 +708,107 @@ def test_your_own_login_agent_that_runs_ollama_is_named_with_its_gui_restart(tmp
         step.run(32_768)
     assert f"/bin/launchctl kickstart -k gui/{os.getuid()}/com.example.ollama" in str(stopped.value)
     assert "sudo /bin/launchctl kickstart -k gui" not in str(stopped.value) and not tools.changes
+
+
+def recorded_reads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every path the step resolves or looks for, as it asks (os.path's realpath, lexists, exists, isfile, isdir,
+    islink)."""
+    seen: list[str] = []
+    for name in ("realpath", "lexists", "exists", "isfile", "isdir", "islink"):
+        real = getattr(os.path, name)
+
+        def recording(path: str | Path, *args: object, _real: Callable[..., object] = real, **kwargs: object) -> object:
+            seen.append(os.fspath(path))
+            return _real(path, *args, **kwargs)
+
+        monkeypatch.setattr(os.path, name, recording)
+    return seen
+
+
+def outside(paths: Sequence[str], tmp_path: Path) -> list[str]:
+    """The paths that are not the test's own (its tmp_path, or a folder above it)."""
+    mine = str(tmp_path.resolve())
+    return [path for path in paths if not (path.startswith(mine) or mine.startswith(path.rstrip("/") + "/"))]
+
+
+def test_a_login_agent_reads_nothing_of_the_mac_the_tests_run_on(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The job's program (/usr/local/bin/ollama) is resolved in the test's tree: on a Mac with the Ollama app, the
+    live /usr/local/bin/ollama links into it, and this job was named as the app's."""
+    job_file(home / "Library/LaunchAgents", "com.example.ollama", "/usr/local/bin/ollama")
+    tools = FakeTools(tmp_path)
+    step, _said = install(tools, home)
+    seen = recorded_reads(monkeypatch)
+    with pytest.raises(SystemExit, match="another background service runs Ollama"):
+        step.run(32_768)
+    assert seen and outside(seen, tmp_path) == []
+
+
+def test_a_job_whose_program_links_into_the_ollama_app_is_named_as_the_apps(tmp_path: Path, home: Path) -> None:
+    """The Ollama app puts its command at /usr/local/bin/ollama, a link into Ollama.app: in the test's tree too."""
+    tools = FakeTools(tmp_path)
+    program = tools.root / "Applications/Ollama.app/Contents/Resources/ollama"
+    program.parent.mkdir(parents=True)
+    program.write_bytes(MACHO)
+    link = tools.root / "usr/local/bin/ollama"
+    link.parent.mkdir(parents=True)
+    link.symlink_to("../../../Applications/Ollama.app/Contents/Resources/ollama")
+    job_file(home / "Library/LaunchAgents", "com.example.ollama", "/usr/local/bin/ollama")
+    step, _said = install(tools, home)
+    with pytest.raises(SystemExit) as stopped:
+        step.run(32_768)
+    plist = home / "Library/LaunchAgents/com.example.ollama.plist"
+    assert prompts.OLLAMA_JOB_APP.format(plist=plist) in str(stopped.value)
+    assert "Fix: " + prompts.OLLAMA_APP_FIX.format(path="/Applications/Ollama.app") in str(stopped.value)
+
+
+def test_an_absolute_link_into_the_ollama_app_is_followed_in_the_tests_tree(tmp_path: Path, home: Path) -> None:
+    """The real Ollama app links /usr/local/bin/ollama with an absolute target: in the fake Mac it points into the
+    test's tree, never at the Mac the tests run on."""
+    tools = FakeTools(tmp_path)
+    program = tools.root / "Applications/Ollama.app/Contents/Resources/ollama"
+    program.parent.mkdir(parents=True)
+    program.write_bytes(MACHO)
+    link = tools.root / "usr/local/bin/ollama"
+    link.parent.mkdir(parents=True)
+    link.symlink_to("/Applications/Ollama.app/Contents/Resources/ollama")
+    assert tools.resolve("/usr/local/bin/ollama") == "/Applications/Ollama.app/Contents/Resources/ollama"
+    job_file(home / "Library/LaunchAgents", "com.example.ollama", "/usr/local/bin/ollama")
+    step, _said = install(tools, home)
+    with pytest.raises(SystemExit) as stopped:
+        step.run(32_768)
+    plist = home / "Library/LaunchAgents/com.example.ollama.plist"
+    assert prompts.OLLAMA_JOB_APP.format(plist=plist) in str(stopped.value)
+
+
+class BlindTools(FakeTools):
+    """Off the live Mac (a test's ESTIA_ROOT): setup's Ollama step only shows what it would do."""
+
+    @property
+    def live(self) -> bool:
+        return False
+
+
+def test_a_blind_run_never_reads_the_ollama_app_of_the_mac_it_runs_on(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the test tree's /Applications/Ollama.app counts: an app at the real path (here: a folder that exists
+    outside the tree, standing in for it) is never looked at, and so never named."""
+    app = tmp_path / "elsewhere/Ollama.app"
+    (app / "Contents/Resources").mkdir(parents=True)
+    monkeypatch.setattr(ollama_build, "APP", app)
+    tools = BlindTools(tmp_path)
+    tools.tarball = tarball(tmp_path)
+    step, said = install(tools, home)
+    seen = recorded_reads(monkeypatch)
+    step.run(32_768)
+    assert not any("Ollama app" in line for line in said)
+    assert str(app) not in seen and outside(seen, tmp_path) == []
+    (tools.root / app.relative_to("/")).mkdir(parents=True)  # the test tree's own app: named
+    step, said = install(tools, home)
+    step.run(32_768)
+    assert any(prompts.OLLAMA_APP.format(state="is installed", path=app) in line for line in said)
 
 
 @pytest.mark.parametrize("answering", [True, False], ids=["official-answers", "nothing-answers"])

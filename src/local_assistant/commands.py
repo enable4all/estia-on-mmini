@@ -18,11 +18,18 @@ from local_assistant.profile import Profile, by_category, category_of
 from local_assistant.reminders import ReminderError, Reminders, parse_when
 from local_assistant.soul import SOUL_MAX_CHARS, has_parts, soul_part
 from local_assistant.store import Fact, Message, Store
-from local_assistant.timefmt import local_date, local_datetime
+from local_assistant.timefmt import local_date, local_datetime, short_date
 
 log = logging.getLogger(__name__)
 
 _SOURCES = {"chat": "learned from chat", "remember": "you asked", "link": "from a link"}
+
+
+def _percent(used: int, limit: int) -> int:
+    """How full a part of the profile is, as /profile and /status show it (over 100 for an install from before)."""
+    return round(100 * used / limit)
+
+
 VOICE_MODE_KEY = "voice_mode"  # auto (default): a voice note gets a voice answer; on: every answer; off
 VOICE_ECHO_KEY = "voice_echo"  # on: what was heard is sent first; off (default)
 _VOICE_MODES = {
@@ -318,7 +325,7 @@ class Commands:
             case "/new":
                 return self._new()
             case "/profile":
-                return self._profile_text()
+                return self._notes_text() if args.lower() == "notes" else self._profile_text()
             case "/forget":
                 return self._forget(args, message.id)
             case "/fix":
@@ -643,31 +650,62 @@ class Commands:
         return f"New conversation started. I still have your profile ({count} facts) and can search our earlier chats."
 
     def _profile_text(self) -> str:
-        """/profile: the user's own facts (always in her prompt), then the notes from chats (the ones that may matter
-        come with a message), each with its fill level; one fact per line with its number, under its category as a
-        bold heading (the snapshot's order; without a category: Other; no category at all: no headings), a blank
-        line between groups."""
+        """/profile: the user's own facts (in every prompt), one per line with its number, where it came from and its
+        date, under its category as a bold heading (the snapshot's order; without a category: Other; no category at
+        all: no headings), a blank line between groups; then one line about her notes, which /profile notes lists
+        (owner, 18 Oct)."""
         if not self._profile.facts():
             return 'Your profile is empty so far. Tell me about yourself, or say "remember that ...".'
-
-        def line(fact: Fact, text: str) -> str:
-            return f"#{fact.id} {text} ({_SOURCES[fact.source_kind]}, {local_date(fact.created_at, self._tz)})"
-
-        def grouped(facts: list[Fact]) -> list[str]:
-            groups = by_category(facts)
-            if groups is None:
-                return ["\n".join(line(fact, fact.text) for fact in facts)]
-            return [
-                "\n".join([f"**{category}**", *(line(f, rest) for f, rest in entries)]) for category, entries in groups
-            ]
-
         yours, notes = self._profile.yours(), self._profile.notes()
-        blocks = [prompts.PROFILE_HEADER.format(used=self._profile.used_chars(), limit=self._profile.max_chars)]
-        blocks += grouped(yours) if yours else [prompts.PROFILE_NONE_YET]
+        used, limit = self._profile.used_chars(), self._profile.max_chars
+        blocks = [prompts.PROFILE_HEADER.format(used=used, limit=limit, percent=_percent(used, limit))]
+        blocks += self._grouped(yours, source=True) if yours else [prompts.PROFILE_NONE_YET]
         if notes:
             used, limit = self._profile.notes_used_chars(), self._profile.notes_max_chars
-            blocks += [prompts.PROFILE_NOTES_HEADER.format(used=used, limit=limit), *grouped(notes)]
+            blocks.append(
+                prompts.PROFILE_NOTES_LINE.format(
+                    count=len(notes),
+                    notes="note" if len(notes) == 1 else "notes",
+                    used=used,
+                    limit=limit,
+                    percent=_percent(used, limit),
+                    per_message=self._profile.notes_per_message,
+                )
+            )
         return "\n\n".join([*blocks, prompts.PROFILE_FOOTER])
+
+    def _notes_text(self) -> str:
+        """/profile notes: her notes from chats as /profile groups the user's facts, each with its date only (all of
+        them learned from chat), then the user's facts moved there to make room, with where each came from and their
+        whole text, in a last group."""
+        notes = self._profile.notes()
+        if not notes:
+            return prompts.PROFILE_NO_NOTES
+        moved = self._profile.moved()
+        hers = [note for note in notes if note not in moved]
+        used, limit = self._profile.notes_used_chars(), self._profile.notes_max_chars
+        header = prompts.PROFILE_NOTES_HEADER.format(
+            used=used, limit=limit, percent=_percent(used, limit), per_message=self._profile.notes_per_message
+        )
+        blocks = [header, *(self._grouped(hers, source=False) if hers else [])]
+        if moved:
+            blocks.append(
+                "\n".join([prompts.PROFILE_MOVED, *(self._line(fact, fact.text, source=True) for fact in moved)])
+            )
+        return "\n\n".join([*blocks, prompts.PROFILE_FOOTER])
+
+    def _line(self, fact: Fact, text: str, *, source: bool) -> str:
+        when = short_date(fact.created_at, self._tz, today=datetime.now(self._tz).date())
+        return f"#{fact.id} {text} ({_SOURCES[fact.source_kind]}, {when})" if source else f"#{fact.id} {text} ({when})"
+
+    def _grouped(self, facts: list[Fact], *, source: bool) -> list[str]:
+        groups = by_category(facts)
+        if groups is None:
+            return ["\n".join(self._line(fact, fact.text, source=source) for fact in facts)]
+        return [
+            "\n".join([f"**{category}**", *(self._line(fact, rest, source=source) for fact, rest in entries)])
+            for category, entries in groups
+        ]
 
     def _forget(self, args: str, message_id: int) -> str:
         if not args:
@@ -703,8 +741,8 @@ class Commands:
     async def _status(self) -> str:
         info = await self._status_provider()
         yours, notes = self._profile.yours(), self._profile.notes()
-        mine = round(100 * self._profile.used_chars() / self._profile.max_chars)
-        noted = round(100 * self._profile.notes_used_chars() / self._profile.notes_max_chars)
+        mine = _percent(self._profile.used_chars(), self._profile.max_chars)
+        noted = _percent(self._profile.notes_used_chars(), self._profile.notes_max_chars)
         learned = local_datetime(info.last_learning_run, self._tz) if info.last_learning_run else "not yet"
         sections = {
             prompts.STATUS_RUNNING: [

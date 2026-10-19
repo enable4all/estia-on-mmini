@@ -133,6 +133,8 @@ struct German: Pack {
         ChordWords.Style(roots: .german(lowerMinor: false), sharp: "is", flat: "es", minor: "Moll", seventh: "sieben",
                          majorSeventh: "Major sieben", joins: ["und", "oder"], words: ["Am", "Ab", "Hm"], dash: ", ",
                          music: ["akkord", "lied", "song", "gitarre", "klavier", "piano", "ukulele", "tonart",
-                                 "kapodaster", "strophe", "refrain", "melodie", "musik", "intro", "riff"])
+                                 "kapodaster", "strophe", "refrain", "melodie", "musik", "intro", "riff"],
+                         forms: ChordWords.Forms(sharp: "Kreuz", flat: "b", noThird: "ohne Terz"),
+                         marks: ChordWords.Marks(noChord: "kein Akkord", again: "wiederholen") { [self] n in cardinal(n, .plain) + "mal" })
     }
 }

@@ -202,6 +202,10 @@ class FakeHost:
 
     async def call_summary(self, aci: str, lines: list[str], minutes: int) -> None:
         self.summaries.append((lines, minutes))
+        self.notes.append("(summary)")  # in order with the notes
+
+    async def call_chords(self, aci: str) -> None:
+        self.notes.append("(chords)")
 
     async def practice_call_ended(self, aci: str) -> None:
         self.practice_ended.append(aci)
@@ -360,7 +364,6 @@ class Harness:
             "end_of_turn_s": 0.6,
             "thinking_after_s": 0.5,
             "idle_prompt_s": 3000.0,
-            "idle_hangup_s": 6000.0,
             "max_s": 1_000_000.0,
             "answer_after_s": 0.0,  # answered at once, except in the test about ringing
             "fillers": True,  # the tests about thinking lines; off in the real default
@@ -448,6 +451,33 @@ async def test_after_a_longer_call_the_user_gets_a_summary() -> None:
         lines, minutes = h.host.summaries[0]
         assert lines == ["User: first idea", "Estia: Nice.", "User: second idea", "Estia: Good one."]
         assert minutes >= 1
+
+
+async def test_after_a_call_codes_chords_message_comes_before_the_summary() -> None:
+    """[chords]: the exact chords of the call in one message from code (App.call_chords), after the dropped and
+    unfinished notes and before Gemma's summary, which can fail or be skipped (design 3.7)."""
+    async with Harness(["first idea", "second idea"], [Turn("Nice."), Turn("Good one.")]) as h:
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(1.0))
+        await h.quiet_after("Nice.")
+        h.helper.caller_says(speech(1.0))
+        await h.quiet_after("Good one.")
+        h.signal.remote_hangup()
+        await h.until(lambda: bool(h.host.summaries))
+        assert h.host.notes == ["(chords)", "(summary)"]
+
+
+async def test_a_dropped_call_gets_its_chords_message_too() -> None:
+    async with Harness() as h:
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.voice.fail_transcribe = True
+        h.helper.caller_says(speech(0.6))
+        await h.quiet_after(prompts.CALL_HEARING)
+        h.helper.caller_says(speech(0.6))
+        await h.until(lambda: "(chords)" in h.host.notes)
+        assert h.host.notes.index(prompts.CALL_DROPPED) < h.host.notes.index("(chords)")
 
 
 async def test_a_call_never_speaks_markup() -> None:
@@ -594,41 +624,101 @@ async def test_a_lone_stop_makes_him_quiet_without_gemma() -> None:
         assert h.host.turns == ["go on then"]
 
 
-async def test_silence_gets_a_gentle_prompt_then_a_goodbye() -> None:
-    async with Harness(idle_prompt_s=0.5, idle_hangup_s=1.0) as h:
+CHECK_IN = prompts.call_lines("en", name=NAME).idle  # "Take your time, I'm here. Say Estia when you need me."
+
+
+def test_the_check_in_names_her_and_the_still_here_line_is_short() -> None:
+    """Owner, 18 Oct: the check-in tells the caller her name, the word that ends standby."""
+    assert f"Take your time, I'm here. Say {NAME} when you need me." == CHECK_IN
+    assert prompts.call_lines("en", name=NAME).still_here == "I'm still here."
+
+
+async def test_after_the_check_in_only_a_turn_with_her_name_is_answered(caplog: pytest.LogCaptureFixture) -> None:
+    """Owner, 18 Oct: after the 90 s check-in "respond only if we hear the name", so the caller can do other things
+    that make noise and call her by name. A turn without it is neither answered nor kept, and the log has no word of
+    it; a turn with it ends standby."""
+    caplog.set_level(logging.INFO, logger="local_assistant.calls")
+    turns = [Turn("It's noon.")]
+    heard = ["pass me the salt please", f"{NAME}, what time is it?"]
+    async with Harness(heard, turns, idle_prompt_s=0.5) as h:
         await h.connected()
-        await h.quiet_after(prompts.CALL_IDLE)
+        await h.quiet_after(CHECK_IN)
+        h.helper.caller_says(speech(1.0))  # said to someone in the room
+        await h.until(lambda: h.voice.heard == 1)
+        h.helper.caller_says(speech(1.0))
+        await h.quiet_after("It's noon.")
+    assert h.host.turns == [f"{NAME}, what time is it?"]
+    lines = [record.getMessage() for record in caplog.records]
+    assert any("standby: a turn without her name (5 words); listening on" in line for line in lines)
+    assert any("standby over: her name" in line for line in lines)
+    assert not any("salt" in line for line in lines)
+
+
+async def test_once_her_name_ended_standby_the_next_turn_needs_no_name() -> None:
+    turns = [Turn("Hi."), Turn("Rain tomorrow.")]
+    async with Harness([f"hey {NAME}", "and the weather tomorrow?"], turns, idle_prompt_s=0.5) as h:
+        await h.connected()
+        await h.quiet_after(CHECK_IN)
+        h.helper.caller_says(speech(1.0))
+        # 0.1 s of call time after her answer, under the 0.5 s that would start standby again
+        h.helper.caller_says_after(lambda: "Hi." in h.manager.said, 10, speech(1.0))
+        await h.quiet_after("Rain tomorrow.")
+    assert h.host.turns == [f"hey {NAME}", "and the weather tomorrow?"]
+
+
+async def test_standby_says_still_here_every_ten_minutes_until_the_calls_length_cap() -> None:
+    """Owner, 18 Oct: "I'm still here" every 10 min until the hour is up: silence never ends the call before its
+    length cap (no goodbye after ten minutes of silence)."""
+    async with Harness(idle_prompt_s=0.5, idle_repeat_s=0.5, max_s=8.0) as h:
+        await h.connected()
+        await h.quiet_after(CHECK_IN)
+        await h.until(lambda: h.manager.said.count("I'm still here.") >= 2)
+        assert h.signal.hung_up == []
         await h.until(lambda: h.signal.hung_up == [(ME, CALL)])
-        assert prompts.CALL_IDLE_BYE in h.voice.spoken
+        assert prompts.CALL_MAX_BYE in h.voice.spoken and h.manager.said.count(CHECK_IN) == 1
+
+
+async def test_turns_without_her_name_never_hold_back_the_still_here_line() -> None:
+    """The still-here line counts from her last line, not from the last sound: talk in the room goes on, and every
+    ten minutes she still says it."""
+    heard = ["one", "two", "three"]
+    async with Harness(list(heard), idle_prompt_s=0.5, idle_repeat_s=1.0) as h:
+        await h.connected()
+        await h.quiet_after(CHECK_IN)
+        for _ in heard:
+            h.helper.caller_says(speech(0.6))
+            await asyncio.sleep(0.05)
+        await h.until(lambda: "I'm still here." in h.manager.said)
+    assert h.host.turns == []
 
 
 async def test_take_your_time_comes_once_then_at_most_every_ten_minutes() -> None:
     """Owner, 16 Oct: "that 90sec, im here etc. can you one time and then every 10m?" The first silence gets the
-    line; a later one within the repeat time gets none (she listens on)."""
+    line; a later one within the repeat time gets none, and standby starts without it."""
     turns = [Turn("One."), Turn("Two.")]
-    async with Harness(
-        ["first thing", "second thing"], turns, idle_prompt_s=0.5, idle_hangup_s=100.0, idle_repeat_s=1000.0
-    ) as h:
+    heard = [f"{NAME}, first thing", f"{NAME}, second thing"]
+    async with Harness(list(heard), turns, idle_prompt_s=0.5, idle_repeat_s=1000.0) as h:
         await h.connected()
-        await h.quiet_after(prompts.CALL_IDLE)  # the first silence: the line
+        await h.quiet_after(CHECK_IN)  # the first silence: the line
         h.helper.caller_says(speech(1.0))
         await h.quiet_after("One.")
         h.helper.caller_says_after(lambda: "One." in h.manager.said, 100, speech(1.0))  # 1 s of silence first
         await h.quiet_after("Two.")
         mark = len(h.helper.heard)
         await h.until(lambda: len(h.helper.heard) > mark + 200)  # 2 s more of silence
-        assert h.manager.said.count(prompts.CALL_IDLE) == 1
-    assert h.host.turns == ["first thing", "second thing"]
+        assert h.manager.said.count(CHECK_IN) == 1
+    assert h.host.turns == heard
 
 
 async def test_take_your_time_comes_again_after_the_repeat_time() -> None:
     turns = [Turn("One.")]
-    async with Harness(["first thing"], turns, idle_prompt_s=0.5, idle_hangup_s=100.0, idle_repeat_s=0.0) as h:
+    async with Harness([f"{NAME}, first thing"], turns, idle_prompt_s=0.5, idle_repeat_s=0.0) as h:
         await h.connected()
-        await h.quiet_after(prompts.CALL_IDLE)
-        h.helper.caller_says(speech(1.0))
+        # frame-exact: standby listens only 1 s of call time here (idle_repeat_s 0), which ran out now and then before
+        # a caller_says sent after quiet_after landed (the speech heard as "no speech", 2 of 8 runs, 18 Oct)
+        h.helper.caller_says_when(lambda: CHECK_IN in h.manager.said, speech(1.0))
         await h.quiet_after("One.")
-        await h.until(lambda: h.manager.said.count(prompts.CALL_IDLE) == 2)  # the next silence: again
+        await h.until(lambda: h.manager.said.count(CHECK_IN) == 2)  # the next silence: again
 
 
 def test_take_your_time_repeats_at_most_every_ten_minutes_by_default() -> None:
@@ -638,17 +728,18 @@ def test_take_your_time_repeats_at_most_every_ten_minutes_by_default() -> None:
 
     defaults = {f.name: f.default for f in dataclasses.fields(CallSettings)}
     assert defaults["idle_repeat_s"] == 600.0 and defaults["idle_prompt_s"] == 90.0
+    assert "idle_hangup_s" not in defaults  # silence never ends a call (owner, 18 Oct)
 
 
 async def test_silence_logs_the_lines_levels_to_tune_listening(caplog: pytest.LogCaptureFixture) -> None:
     # review 2026-10-11: a quiet caller who never starts an utterance left no trace to tune the start level with
     caplog.set_level(logging.INFO, logger="local_assistant.calls")
-    async with Harness(idle_prompt_s=0.5, idle_hangup_s=1.0) as h:
+    async with Harness(idle_prompt_s=0.5, idle_repeat_s=0.5) as h:
         await h.connected()
-        await h.until(lambda: h.signal.hung_up == [(ME, CALL)])
+        await h.until(lambda: "I'm still here." in h.manager.said)
     lines = [record.getMessage() for record in caplog.records]
     assert any(re.search(r"no speech .*floor \d+, peak \d+.*checking in", line) for line in lines)
-    assert any(re.search(r"no speech .*floor \d+, peak \d+.*goodbye", line) for line in lines)
+    assert any(re.search(r"no speech .*floor \d+, peak \d+.*still here", line) for line in lines)
 
 
 async def test_the_call_length_cap_says_goodbye() -> None:
@@ -1318,12 +1409,541 @@ async def test_no_thinking_lines_unless_they_are_switched_on() -> None:
     ],
 )
 def test_asking_him_to_hang_up_ends_the_call(said: str) -> None:
-    assert wants_hang_up(said)
+    assert wants_hang_up(said, name="Tiffany")
 
 
 @pytest.mark.parametrize("said", ["don't hang up yet", "how do I hang up a picture frame properly?"])
 def test_hang_up_in_other_sentences_does_not(said: str) -> None:
-    assert not wants_hang_up(said)
+    assert not wants_hang_up(said, name="Tiffany")
+
+
+@pytest.mark.parametrize(
+    ("said", "code", "ends"),
+    [
+        # owner, 18 Oct: asking her to close the call kept it open (wants_hang_up knew only "hang up"); the same rules
+        # as leave-taking (a part of its own, soft words beside it, only closing talk after it), but it may be asked
+        ("Okay, let's end the call.", "en", True),
+        ("Can we close the call now?", "en", True),
+        ("Let's call it a day.", "en", True),
+        ("We can stop here, thanks.", "en", True),
+        ("Let's wrap up, talk tomorrow.", "en", True),
+        ("Please finish the call.", "en", True),
+        ("Stop the call.", "en", True),
+        ("Shall we stop here?", "en", True),
+        ("I think we can leave it there.", "en", True),
+        ("Alright, let's end this call, I'm tired.", "en", True),
+        ("Let's stop here for now.", "en", True),
+        ("Could you hang up the call, please?", "en", True),
+        ("Let's end the call after you tell me the weather.", "en", False),  # a part that goes on
+        ("Let's stop here, but what about the heater?", "en", False),
+        ("Let's close the call. Wait, one more thing.", "en", False),
+        ("Don't end the call yet.", "en", False),
+        ("Why would you end the call?", "en", False),
+        ("How do I end a call on my phone?", "en", False),
+        ("Let's stop here and talk about chords.", "en", False),
+        ("Can you wrap it up?", "en", False),  # finish the answer, not the call: "wrap up" only with "let's"
+        ("Stop here.", "en", False),  # stop reading here: "stop here" only with "let's" or "we can"
+        ("He said: let's call it a day.", "en", False),  # quoted speech
+        ("Let's call it a day, what do you think?", "en", False),
+        ("Let's end the call.", "nl", True),  # English on any call, as the goodbyes
+        ("Vale, terminemos la llamada.", "es", True),
+        ("Bueno, lo dejamos aquí.", "es", True),
+        ("Terminemos la llamada, pero antes, ¿qué tiempo hace?", "es", False),
+        ("Ok, chiudiamo la chiamata.", "it", True),
+        ("Per oggi basta, grazie.", "it", True),
+        ("Chiudiamo la chiamata, ma prima dimmi il meteo.", "it", False),
+        ("그럼 통화 끝내자.", "ko", True),
+        ("오늘은 여기까지 해요.", "ko", True),
+        ("통화 끝내자, 하지만 내일 날씨는?", "ko", False),
+        ("Então, vamos desligar a chamada.", "pt", True),
+        ("Podemos parar por aqui.", "pt", True),
+        ("Vamos encerrar a chamada, mas antes, como está o tempo?", "pt", False),
+        ("Oké, laten we ophangen.", "nl", True),
+        ("Laten we het hierbij laten.", "nl", True),
+        ("Laten we ophangen, maar eerst het weer.", "nl", False),
+        ("Dobra, kończymy rozmowę.", "pl", True),
+        ("Skończmy na tym.", "pl", True),
+        ("Kończymy rozmowę, ale jaka jest pogoda?", "pl", False),
+        ("Okay, lass uns auflegen.", "de", True),
+        ("Machen wir Schluss für heute.", "de", True),
+        ("Lass uns auflegen, aber vorher das Wetter.", "de", False),
+        ("じゃあ、電話を切ろう。", "ja", True),
+        ("今日はここまでにしましょう。", "ja", True),
+        ("電気を切ろう。", "ja", False),  # switch off the light: only soft words before it in its sentence
+        ("切ってください。", "ja", False),  # also "switch it off": only with 電話
+        ("Desliga.", "pt", False),  # also "switch it off"
+        ("Ладно, давай закончим разговор.", "ru", True),
+        ("На сегодня хватит.", "ru", True),
+        ("Давай закончим разговор, но сначала погода?", "ru", False),
+        ("Bon, on peut raccrocher.", "fr", True),
+        ("On s'arrête là, merci.", "fr", True),
+        ("On raccroche, mais d'abord la météo.", "fr", False),
+        ("Laten we ophangen.", "en", False),  # the call's language and English only
+    ],
+)
+def test_asking_her_to_end_the_call(said: str, code: str, ends: bool) -> None:
+    assert wants_hang_up(said, name="Tiffany", language=code) is ends
+
+
+@pytest.mark.parametrize(
+    ("said", "code", "ends"),
+    [
+        # review 18 Oct: a request asked back and then turned down is no request ("Hang up? No, tell me more")
+        ("Hang up? No, tell me more about the weather.", "en", False),
+        ("End the call? No, not yet.", "en", False),
+        ("Shall we stop here? Nah, keep reading.", "en", False),
+        ("We can stop here? No, keep going.", "en", False),
+        ("Call it a day? No, I want to hear the rest.", "en", False),
+        ("Shall we hang up? Not yet.", "en", False),
+        ("Shall we hang up? Please, no.", "en", False),
+        ("On raccroche ? Non, continue.", "fr", False),
+        ("Podemos colgar? No, sigue contando.", "es", False),
+        ("Zullen we ophangen? Nee, vertel verder.", "nl", False),
+        ("電話を切ろうか？いや、まだ。", "ja", False),
+        ("Shall we stop here? Yes, I'm tired.", "en", True),  # asked, then said yes to
+        ("Shall we hang up? I think we're done for now.", "en", True),
+    ],
+)
+def test_a_request_to_end_the_call_turned_down_is_none(said: str, code: str, ends: bool) -> None:
+    assert wants_hang_up(said, name="Tiffany", language=code) is ends
+
+
+@pytest.mark.parametrize(
+    ("said", "ends"),
+    [
+        ("Hang up? No, tell me more about the weather.", False),  # "hang up" is a goodbye too (is_goodbye)
+        ("Bye? No, not yet.", False),
+        ("Talk later? No, tell me about the weather first.", False),
+        ("Hang up? Yes, I'm done.", True),
+    ],
+)
+def test_a_goodbye_asked_then_turned_down_is_none(said: str, ends: bool) -> None:
+    assert says_goodbye(said, name="Tiffany") is ends
+
+
+async def test_a_request_to_hang_up_turned_down_keeps_the_call() -> None:
+    said = "Hang up? No, tell me more about the weather."
+    async with Harness([said], [Turn("Sure! Tomorrow will be sunny and warm.")]) as h:
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(0.8))
+        await h.quiet_after("Tomorrow will be sunny and warm.")
+        await asyncio.sleep(0.3)
+        assert h.host.turns == [said] and h.signal.hung_up == []
+
+
+@pytest.mark.parametrize(
+    ("said", "code"),
+    [
+        # review 18 Oct: "wait" and "one more thing" were guarded in English only
+        ("Lass uns Schluss machen. Moment, noch was.", "de"),
+        ("Lass uns Schluss machen, noch eine Frage.", "de"),
+        ("Ich muss los. Moment mal.", "de"),
+        ("Laten we ophangen. Nog één ding.", "nl"),
+        ("Ik moet gaan, eigenlijk wil ik nog wat weten.", "nl"),
+        ("Dejémoslo aquí. Una cosa más.", "es"),
+        ("Terminons l'appel. Encore une chose.", "fr"),
+        ("Давай заканчивать. Ещё одно.", "ru"),
+        ("Skończmy na tym. Jeszcze jedno.", "pl"),
+        ("Chiudiamo qui. Ancora una cosa.", "it"),
+        ("Vamos encerrar a chamada. Mais uma coisa.", "pt"),
+        ("今日はここまで。もう一つ。", "ja"),
+        ("여기까지 하자. 하나 더.", "ko"),
+        ("여기까지 하자. 잠깐만요.", "ko"),
+    ],
+)
+def test_one_more_thing_or_wait_in_the_calls_language_keeps_the_call(said: str, code: str) -> None:
+    from local_assistant.calls import takes_leave
+
+    assert not wants_hang_up(said, name="Tiffany", language=code)
+    assert not takes_leave(said, name="Tiffany", language=code)
+
+
+@pytest.mark.parametrize(
+    ("said", "code", "ends"),
+    [
+        # review 18 Oct: "pode desligar" is also "you can switch it off", 끊어도 돼요 also "may I quit": only with the
+        # call or the phone named
+        ("Pode desligar.", "pt", False),
+        ("Pode desligar, obrigado.", "pt", False),
+        ("Vamos desligar.", "pt", False),
+        ("Podemos desligar.", "pt", False),
+        ("Pode desligar a chamada.", "pt", True),
+        ("Vamos desligar o telefone.", "pt", True),
+        ("Podemos desligar a ligação, obrigado.", "pt", True),
+        ("끊어도 돼요.", "ko", False),
+        ("끊어도 돼.", "ko", False),
+        ("전화 끊어도 돼요.", "ko", True),
+        ("이제 전화를 끊어도 돼.", "ko", True),
+    ],
+)
+def test_a_request_that_is_also_switch_it_off_names_the_call(said: str, code: str, ends: bool) -> None:
+    assert wants_hang_up(said, name="Tiffany", language=code) is ends
+
+
+@pytest.mark.parametrize(
+    ("said", "ends"),
+    [
+        # review 18 Oct: close variants of a request to end the call
+        ("Let's end the call here.", True),
+        ("Let's stop the call here.", True),
+        ("We should end the call.", True),
+        ("We should stop here.", True),
+        ("I think we should stop here.", True),
+        ("I'm going to end the call.", True),
+        ("I'll end the call now.", True),
+        ("Okay, I'll call it a day.", True),
+        ("Should we end the call there?", True),
+        ("I'll end the call when you're done.", False),  # the part goes on
+        ("How do I end the call here?", False),
+        ("We should stop the heater.", False),
+    ],
+)
+def test_close_variants_of_a_request_to_end_the_call(said: str, ends: bool) -> None:
+    assert wants_hang_up(said, name="Tiffany") is ends
+
+
+@pytest.mark.parametrize(
+    ("said", "code", "ends"),
+    [
+        # review 18 Oct: phrases that also end something else count only after a lead, or not at all
+        ("Send Alex a message: I'm on my way. End it here.", "en", False),  # end the message
+        ("Now, end it there.", "en", False),
+        ("Let's end it here.", "en", True),
+        ("We can end it there, thanks.", "en", True),
+        ("Tot zover.", "nl", False),  # also "so far"
+        ("Kommen wir zum Ende.", "de", False),  # also the story's end
+        ("Lass uns zum Ende kommen.", "de", False),
+        ("Możemy skończyć.", "pl", False),  # also "we can finish" a task
+        ("Możemy na tym skończyć.", "pl", True),
+    ],
+)
+def test_a_request_that_also_ends_something_else_needs_more(said: str, code: str, ends: bool) -> None:
+    assert wants_hang_up(said, name="Tiffany", language=code) is ends
+
+
+def test_closing_words_in_the_calls_language_still_end_the_call() -> None:
+    from local_assistant.calls import takes_leave
+
+    assert wants_hang_up("Lass uns Schluss machen, danke.", name="Tiffany", language="de")
+    assert takes_leave("Ik moet nog iets doen, tot later.", name="Tiffany", language="nl")
+
+
+@pytest.mark.parametrize(
+    ("code", "said", "reply"),
+    [
+        ("en", "Alright, let's end the call now, I'm heading out.", "Sure, enjoy! Anything else first?"),
+        ("nl", "Oké, laten we ophangen.", "Prima, tot later! Nog iets?"),
+    ],
+)
+async def test_asking_her_to_end_the_call_ends_it_once_her_reply_is_spoken(code: str, said: str, reply: str) -> None:
+    async with Harness([said], [Turn(reply)], language=code) as h:
+        await h.connected()
+        await h.quiet_after(h.greeting)
+        h.helper.caller_says(speech(0.8))
+        await h.until(lambda: h.signal.hung_up == [(ME, CALL)])
+        assert h.host.turns == [said]  # Gemma answered
+        assert reply.split("! ")[-1] in h.manager.said  # her reply whole, even when it asks something
+        assert prompts.call_lines(code, name=NAME).idle not in h.manager.said  # ended for the words, not silence
+
+
+def test_a_call_never_says_a_stage_direction() -> None:
+    # her answer of only "(laughs)" is nothing to say; a stage direction inside one is left out
+    assert calls._parts("(laughs)") == []
+    assert calls._parts("Okay (pause) the next one is G.") == ["Okay the next one is G."]
+
+
+@pytest.mark.parametrize(
+    ("hers", "code", "bye"),
+    [
+        # her answer ends with a plain goodbye and asks nothing: with a caller's turn of closing talk, the call ends
+        # once it is spoken, whether or not she called end_call (owner, 18 Oct: her "Bye!" ended nothing)
+        ("No problem! Good luck with the exam. Bye!", "en", True),
+        ("Enjoy the rain, talk soon!", "en", True),
+        ("Bye, Alex!", "en", True),  # a name after it
+        ("Take care!", "en", True),
+        ("Okay, bye for now.", "en", True),
+        ("Bye! Anything else?", "en", False),  # asks something
+        ("Is there anything else, or shall we say bye?", "en", False),
+        ("I said bye to Alex.", "en", False),
+        ("Tell Alex: bye.", "en", False),  # quoted speech
+        ("Have a great day!", "en", True),  # a closing wish (owner, 18 Oct: her own closings end calls)
+        ("Prima, tot later!", "nl", True),
+        ("Tot ziens.", "nl", True),
+        ("Dag!", "nl", False),  # also "hello"
+        ("¡Hasta luego!", "es", True),
+        ("A presto!", "it", True),
+        ("Ciao!", "it", False),  # also "hello"
+        ("안녕히 계세요.", "ko", True),
+        ("Até logo!", "pt", True),
+        ("Do zobaczenia!", "pl", True),
+        ("Alles klar, bis bald!", "de", True),
+        ("またね。", "ja", True),
+        ("До свидания!", "ru", True),
+        ("À bientôt !", "fr", True),
+        ("Salut !", "fr", False),  # also "hello"
+        ("Bye!", "nl", True),  # English on any call
+    ],
+)
+def test_her_answer_that_ends_with_a_goodbye(hers: str, code: str, bye: bool) -> None:
+    from local_assistant.calls import ends_with_goodbye
+
+    assert ends_with_goodbye(hers, name="Tiffany", language=code) is bye
+
+
+@pytest.mark.parametrize(
+    ("hers", "code", "bye"),
+    [
+        # review 18 Oct
+        ("Boa noite, Alex!", "pt", False),  # also "good evening"
+        ("Bye, though.", "en", False),  # only a name after it
+        ("Take care, okay.", "en", False),
+        ("他に何かありますか。またね。", "ja", False),  # か asks
+        ("Es bleibt bewölkt, bis morgen.", "de", False),  # "until tomorrow"
+        ("Het blijft droog, tot morgen.", "nl", False),
+        ("See you soon, Alex Example!", "en", True),  # a name of two words
+        ("Tschüss, Alex!", "de", True),
+        ("Okay, bis morgen!", "de", True),
+        ("Gut, bis morgen!", "de", True),  # an acknowledgement before it
+        ("Bis morgen!", "de", True),
+        ("До встречи, Алекс!", "ru", True),
+    ],
+)
+def test_her_goodbye_edge_cases(hers: str, code: str, bye: bool) -> None:
+    from local_assistant.calls import ends_with_goodbye
+
+    assert ends_with_goodbye(hers, name="Tiffany", language=code) is bye
+
+
+# owner, 18 Oct, after reading how her calls end ("check all logs, how she is ending the calls and pick up those
+# phrases"): of 44 calls, half ended with a closing wish or an offer to wait, not a plain goodbye
+@pytest.mark.parametrize(
+    ("hers", "code"),
+    [
+        ("Enjoy your afternoon!", "en"),
+        ("Enjoy the rest of your evening.", "en"),
+        ("Have a great rest of your day!", "en"),
+        ("Have a productive afternoon!", "en"),
+        ("Have a good one!", "en"),
+        ("Sleep well, and I'll catch you in the morning!", "en"),
+        ("Have a great match, and I'll be here whenever you're ready to talk again.", "en"),
+        ("I'll be here when you're ready to chat again.", "en"),
+        ("I'll be here!", "en"),
+        ("I'm here whenever you want to pick it up again.", "en"),
+        ("I'm here if you have more thoughts on that or want to talk about anything else later on today.", "en"),
+        ("Good luck with the exam, and just say the word whenever you're ready to go through the next chapter.", "en"),
+        ("Good luck with the exam, and just say the word when you're ready.", "en"),
+        ("Enjoy your evening, I'm here if you need anything else!", "en"),
+        ("Sounds good. Enjoy your evening!", "en"),
+        ("Fijne avond!", "nl"),
+        ("Slaap lekker!", "nl"),
+        ("Succes met je examen!", "nl"),
+        ("Geniet van je middag!", "nl"),
+        ("Ik ben er als je me nodig hebt.", "nl"),
+    ],
+)
+def test_her_closing_wish_or_offer_to_wait_is_a_goodbye(hers: str, code: str) -> None:
+    from local_assistant.calls import ends_with_goodbye
+
+    assert ends_with_goodbye(hers, name="Tiffany", language=code)
+
+
+@pytest.mark.parametrize(
+    ("hers", "code"),
+    [
+        ("Enjoy your evening! What are you cooking?", "en"),  # asks: the call goes on
+        ("Enjoy the music: the band starts at nine.", "en"),  # no closing wish, a plan
+        ("Have a look at the second chapter first.", "en"),
+        (
+            "Have a great time in Lisbon next week, the weather looks good.",
+            "en",
+        ),  # a wish inside the answer's middle part
+        ("Let me know when you want the list.", "en"),
+        ("I'm here in Utrecht today.", "en"),
+        ("Good luck with that is what I would say to him.", "en"),
+        ("Fijne avond gehad?", "nl"),
+        ("Ik ben er niet zeker van.", "nl"),
+    ],
+)
+def test_a_wish_or_offer_that_is_no_closing_is_no_goodbye(hers: str, code: str) -> None:
+    from local_assistant.calls import ends_with_goodbye
+
+    assert not ends_with_goodbye(hers, name="Tiffany", language=code)
+
+
+@pytest.mark.parametrize(
+    ("code", "said", "reply"),
+    [
+        # the caller's turn closes itself (review 18 Oct): only thanks or an okay, a wrap-up, leaving words or a goodbye
+        ("en", "Okay, thanks!", "You're welcome! Bye!"),
+        ("de", "Gut, danke.", "Gern! Bis bald!"),
+        ("de", "Tschüss!", "Tschüss, bis bald!"),
+        ("en", "Yes, I have to go.", "Okay, talk soon!"),  # leaving words after an answer: no leave-taking alone
+    ],
+)
+async def test_her_goodbye_after_closing_talk_ends_the_call_without_end_call(code: str, said: str, reply: str) -> None:
+    async with Harness([said], [Turn(reply)], language=code) as h:
+        await h.connected()
+        await h.quiet_after(h.greeting)
+        h.helper.caller_says(speech(0.8))
+        await h.until(lambda: h.signal.hung_up == [(ME, CALL)])
+        assert h.host.turns == [said]
+        assert reply.split("! ")[-1] in h.manager.said
+        assert prompts.call_lines(code, name=NAME).idle not in h.manager.said  # ended for her goodbye, not silence
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        "Will it rain tomorrow?",
+        "Okay, wait, I'll study now.",
+        # review 18 Oct: her "take care" may be sympathy, her "see you" a plan's; the owner, the same day: "if Gemma says
+        # good bye phrases, end_call should trigger ... between me and gemma, we will be more succesful"
+        "I have a bad cold today.",
+        "I'm going to the gym later.",
+        "No, I'm off.",
+    ],
+)
+async def test_her_plain_goodbye_ends_the_call_after_a_short_quiet_listen(
+    said: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Whatever the caller said, her plain goodbye (no question in her answer) ends the call once the caller has
+    been quiet for goodbye_grace_s: a wrong goodbye costs a few seconds, never the call (the next test: words in
+    that time keep it)."""
+    caplog.set_level(logging.INFO, logger="local_assistant.calls")
+    async with Harness([said], [Turn("Sure. Bye!")], goodbye_grace_s=0.5) as h:
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(0.8))
+        await h.until(lambda: h.signal.hung_up == [(ME, CALL)])
+        assert h.host.turns == [said]
+    assert any("her goodbye; listening 0.5 s before the end" in record.getMessage() for record in caplog.records)
+
+
+async def test_words_after_her_goodbye_keep_the_call_and_are_the_next_turn(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger="local_assistant.calls")
+    turns = [Turn("Have fun at the gym! See you later!"), Turn("Sure, what is it?")]
+    heard = ["I'm going to the gym later.", "no wait, one more question"]
+    async with Harness(list(heard), turns, goodbye_grace_s=2.0) as h:
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(0.8))
+        h.helper.caller_says_after(lambda: "See you later!" in h.manager.said, 20, speech(0.8))
+        await h.quiet_after("Sure, what is it?")
+        assert h.signal.hung_up == [] and h.host.turns == heard  # the words reach her as a turn, not a cut-in
+    lines = [record.getMessage() for record in caplog.records]
+    assert any("her goodbye; listening" in line for line in lines)
+    assert any("the caller went on after her goodbye (5 words)" in line for line in lines)
+
+
+async def test_a_goodbye_said_back_after_hers_ends_the_call_without_another_answer() -> None:
+    async with Harness(["I'm going to the gym later.", "bye"], [Turn("Have fun! Bye!")], goodbye_grace_s=2.0) as h:
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(0.8))
+        h.helper.caller_says_after(lambda: "Bye!" in h.manager.said, 20, speech(0.5))
+        await h.until(lambda: h.signal.hung_up == [(ME, CALL)])
+        assert h.host.turns == ["I'm going to the gym later."]
+
+
+async def test_her_goodbye_that_asks_something_keeps_the_call() -> None:
+    async with Harness(
+        ["I'm going to the gym later."], [Turn("Have fun! Anything else? Bye!")], goodbye_grace_s=0.3
+    ) as h:
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(0.8))
+        await h.quiet_after("Bye!")
+        mark = len(h.helper.heard)
+        await h.until(lambda: len(h.helper.heard) > mark + 100)  # 1 s, past the grace
+        assert h.signal.hung_up == []
+
+
+def test_the_quiet_listen_after_her_goodbye_is_three_seconds_by_default() -> None:
+    import dataclasses
+
+    from local_assistant.calls import CallSettings
+
+    assert {f.name: f.default for f in dataclasses.fields(CallSettings)}["goodbye_grace_s"] == 3.0
+
+
+async def test_her_goodbye_on_a_practice_call_keeps_it() -> None:
+    # practice may rehearse a goodbye ("Adiós, hasta mañana"): only the caller's own words end a practice call
+    async with Harness(["Gracias, adiós."], [Turn("¡Muy bien! ¡Hasta mañana!")], practice=lambda aci: "es") as h:
+        await h.connected()
+        await h.quiet_after(h.greeting)
+        h.helper.caller_says(speech(0.8))
+        await h.quiet_after("¡Hasta mañana!")
+        await asyncio.sleep(0.3)
+        assert h.host.turns == ["Gracias, adiós."] and h.signal.hung_up == []
+
+
+async def test_asking_her_to_hang_up_with_a_device_question_waiting_keeps_the_call() -> None:
+    # a yes to a device must still count (as after a goodbye with more or leave-taking)
+    said = "Turn the heater off. Then you can hang up."
+    asked = Turn("Okay.", reply_id=4, asks_yes=True, code_text="Shall I switch heater off?")
+    async with Harness([said, "yes"], [asked, Turn("", code_text="Done.")]) as h:
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(0.8))
+        await h.quiet_after("Shall I switch heater off?")
+        h.helper.caller_says(speech(0.6))
+        await h.quiet_after("Done.")
+        assert h.host.turns == [said, "yes"]
+
+
+@pytest.mark.parametrize(
+    ("said", "answer"),
+    [
+        # review 18 Oct: the request was dropped once the yes was answered, and the call stayed open
+        ("Turn the heater off. Then you can hang up.", "yes"),
+        ("Heater off please, I have to go.", "Yes please."),
+        ("Turn the heater off, then let's end the call.", "No, thanks."),
+    ],
+)
+async def test_a_request_to_hang_up_held_for_a_device_question_ends_the_call_after_its_answer(
+    said: str, answer: str
+) -> None:
+    asked = Turn("Okay.", reply_id=4, asks_yes=True, code_text="Shall I switch heater off?")
+    async with Harness([said, answer], [asked, Turn("", code_text="Done.")]) as h:
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(0.8))
+        await h.quiet_after("Shall I switch heater off?")
+        h.helper.caller_says(speech(0.6))
+        await h.until(lambda: h.signal.hung_up == [(ME, CALL)])
+        assert h.host.turns == [said, answer] and "Done." in h.manager.said
+        assert prompts.call_lines("en", name=NAME).idle not in h.manager.said  # ended for the words, not silence
+
+
+@pytest.mark.parametrize(
+    ("said", "code", "answers"),
+    [
+        ("yes", "en", True),
+        ("No, thanks.", "en", True),
+        ("Okay.", "en", True),
+        ("Ja, graag.", "nl", True),
+        ("Nee hoor.", "nl", True),
+        ("Yes, and the lamp too.", "en", False),
+        ("What's the weather tomorrow?", "en", False),
+    ],
+)
+def test_a_reply_that_only_answers_her_question(said: str, code: str, answers: bool) -> None:
+    assert calls.answers_question(said, name="Tiffany", language=code) is answers
+
+
+async def test_a_request_to_hang_up_held_for_a_device_question_ends_nothing_after_another_request() -> None:
+    said = "Turn the heater off. Then you can hang up."
+    asked = Turn("Okay.", reply_id=4, asks_yes=True, code_text="Shall I switch heater off?")
+    async with Harness([said, "what's the weather tomorrow"], [asked, Turn("Sunny.")]) as h:
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(0.8))
+        await h.quiet_after("Shall I switch heater off?")
+        h.helper.caller_says(speech(0.6))
+        await h.quiet_after("Sunny.")
+        await asyncio.sleep(0.3)
+        assert h.signal.hung_up == []
 
 
 async def test_a_request_to_hang_up_ends_the_call_even_after_a_question() -> None:
@@ -1535,12 +2155,28 @@ async def test_english_calls_say_the_code_text_as_before() -> None:
 
 async def test_a_quiet_call_in_another_language() -> None:
     german = prompts.spoken("de", name=NAME)
-    async with Harness(language="de", idle_prompt_s=0.5, idle_hangup_s=1.0) as h:
+    assert german.take_your_time == f"Lass dir Zeit, ich bin da. Sag {NAME}, wenn du mich brauchst."
+    async with Harness(language="de", idle_prompt_s=0.5, idle_repeat_s=0.5) as h:
         await h.connected()
         await h.quiet_after(german.take_your_time)
-        await h.until(lambda: h.signal.hung_up == [(ME, CALL)])
-        assert (german.take_your_time, "de") in said_in(h)
-        assert (prompts.CALL_IDLE_BYE, "en") in said_in(h)  # a rare line: English
+        await h.quiet_after(german.still_here)
+        assert (german.take_your_time, "de") in said_in(h) and (german.still_here, "de") in said_in(h)
+
+
+@pytest.mark.parametrize("language", ["ja", "ko", "ru"])
+def test_where_her_voice_reads_no_latin_letters_the_check_in_asks_for_her_name_without_it(language: str) -> None:
+    """Japanese, Korean and Russian lines never hold her name in Latin letters (the voice cannot read them): the
+    check-in asks to call her by name."""
+    lines = prompts.spoken(language, name=NAME)
+    assert NAME not in lines.take_your_time and lines.take_your_time != prompts.CALL_SPOKEN[language].take_your_time[:5]
+
+
+@pytest.mark.parametrize("language", sorted(prompts.CALL_SPOKEN))
+def test_every_language_has_its_own_still_here_line(language: str) -> None:
+    lines = prompts.spoken(language, name=NAME)
+    assert lines.still_here and (language == "en" or lines.still_here != "I'm still here.")
+    if language not in ("ja", "ko", "ru"):
+        assert NAME in lines.take_your_time
 
 
 async def test_hearing_trouble_and_a_lost_answer_in_another_language() -> None:
@@ -1943,8 +2579,8 @@ async def test_a_call_that_ends_during_an_answer_leaves_a_note_that_it_was_not_d
         await h.until(lambda: h.host.turns == ["switch the lights off"])
         h.signal.remote_hangup()
         await h.until(lambda: h.host.ended == 1)
-        await h.until(lambda: bool(h.host.notes))
-        assert h.host.notes == [prompts.CALL_UNFINISHED]
+        await h.until(lambda: len(h.host.notes) == 2)
+        assert h.host.notes == [prompts.CALL_UNFINISHED, "(chords)"]  # then code's chords message (none, here)
 
 
 def test_no_spoken_line_is_a_hum_the_voice_garbles() -> None:
@@ -2631,11 +3267,75 @@ def test_leave_taking_is_a_sentence_of_its_own(said: str, code: str, leaving: bo
 
 
 @pytest.mark.parametrize(
+    ("said", "code", "leaving"),
+    [
+        # owner, 18 Oct: leaving with a reason kept a call open; the same rules as "I have
+        # to go": a part of its own, soft words beside it, only closing talk after it
+        ("Sorry, I have something to do.", "en", True),
+        ("I've got something to do, talk later.", "en", True),
+        ("Okay, I have to run.", "en", True),
+        ("Gotta run, bye!", "en", True),
+        ("I need to do something now.", "en", True),
+        ("Oh, something came up, I have to go.", "en", True),
+        ("Something came up.", "en", True),
+        ("Alright, I have something to do right away.", "en", True),
+        ("Something has come up, sorry.", "en", True),
+        ("I have something to do for you.", "en", False),  # the part goes on
+        ("I have something to do, but what's the weather tomorrow?", "en", False),
+        ("I need to do something about the heater.", "en", False),
+        ("Something came up at work yesterday, what do you think?", "en", False),
+        ("I have to run the dishwasher.", "en", False),
+        ("I have to run, to the shop, remind me at six.", "en", False),
+        ("Gotta run. Wait, one more thing.", "en", False),
+        ("Do I have something to do today?", "en", False),
+        ("He said: something came up.", "en", False),  # quoted speech
+        ("Lo siento, tengo algo que hacer.", "es", True),
+        ("Me surgió algo.", "es", True),
+        ("Tengo algo que hacer mañana por la tarde.", "es", False),
+        ("Scusa, ho una cosa da fare.", "it", True),
+        ("Mi è venuto un imprevisto.", "it", True),
+        ("Ho una cosa da fare per te.", "it", False),
+        ("할 일이 있어요.", "ko", True),
+        ("급한 일이 생겼어요.", "ko", True),
+        ("내일 할 일이 있어요.", "ko", False),
+        ("Desculpa, tenho uma coisa para fazer.", "pt", True),
+        ("Surgiu um imprevisto.", "pt", True),
+        ("Tenho uma coisa para fazer amanhã.", "pt", False),
+        ("Sorry, ik moet nog iets doen.", "nl", True),
+        ("Er is iets tussengekomen.", "nl", True),
+        ("Ik moet nog iets doen voor mijn werk.", "nl", False),
+        ("Przepraszam, mam coś do zrobienia.", "pl", True),
+        ("Coś mi wypadło.", "pl", True),
+        ("Mam coś do zrobienia na jutro.", "pl", False),
+        ("Sorry, ich habe noch was zu tun.", "de", True),
+        ("Mir ist was dazwischengekommen.", "de", True),
+        ("Ich habe noch was zu tun im Garten.", "de", False),
+        ("ごめん、用事ができた。", "ja", True),
+        ("じゃあ、急用ができました。", "ja", True),
+        ("明日、用事がある。", "ja", False),  # only soft words before it in its sentence
+        # "I have things to do": never (and "У меня дела, хорошо." is "I'm fine")
+        ("Извини, у меня дела.", "ru", False),
+        ("Мне надо бежать.", "ru", True),
+        ("У меня дела на работе.", "ru", False),
+        ("Désolé, j'ai quelque chose à faire.", "fr", True),
+        ("Je dois filer.", "fr", True),
+        ("J'ai quelque chose à faire demain.", "fr", False),
+    ],
+)
+def test_leaving_with_a_reason_is_leave_taking(said: str, code: str, leaving: bool) -> None:
+    from local_assistant.calls import takes_leave
+
+    assert takes_leave(said, name="Tiffany", language=code) is leaving
+
+
+@pytest.mark.parametrize(
     ("code", "said", "reply"),
     [
         ("en", "Okay, I have to go.", "Sure, talk soon! Anything else before you go?"),
         ("nl", "Oké, ik moet gaan.", "Prima, tot later! Nog iets anders?"),
         ("de", "Ich muss los.", "Alles klar, bis später!"),
+        ("en", "Sorry, something came up, I have to run.", "No problem, good luck! Talk soon?"),
+        ("fr", "Désolé, j'ai quelque chose à faire.", "Pas de souci, à bientôt."),
     ],
 )
 async def test_leave_taking_ends_the_call_once_her_reply_is_spoken(code: str, said: str, reply: str) -> None:
@@ -2646,6 +3346,72 @@ async def test_leave_taking_ends_the_call_once_her_reply_is_spoken(code: str, sa
         await h.until(lambda: h.signal.hung_up == [(ME, CALL)])
         assert h.host.turns == [said]  # Gemma answered
         assert reply.split("! ")[-1] in h.manager.said  # her reply whole, even when it asks something
+        assert prompts.call_lines(code, name=NAME).idle not in h.manager.said  # ended for the words, not silence
+
+
+@pytest.mark.parametrize(
+    ("said", "code", "leaving"),
+    [
+        # review 18 Oct: "I need to do something" or "something came up" also complains or apologises ("My back hurts.
+        # I need to do something."): they count only with nothing but soft words, thanks or "sorry" before them
+        ("My back hurts. I need to do something.", "en", False),
+        ("Sorry I didn't call earlier. Something came up.", "en", False),
+        ("My plants are dying, I need to do something.", "en", False),
+        ("I'm so busy this week. I have things to do.", "en", False),
+        ("I have things to do.", "en", False),  # never leave-taking: not leaving with a reason
+        ("I have to do something.", "en", False),
+        ("Mijn rug doet pijn, ik moet iets doen.", "nl", False),
+        ("Sorry dat ik niet belde. Er kwam iets tussen.", "nl", False),
+        ("Perdón por no llamar. Me surgió algo.", "es", False),
+        ("일이 생겼어요.", "ko", False),  # also "something happened"
+        ("Okay, sorry. Something came up.", "en", True),
+        ("Thanks. Sorry, something came up.", "en", True),
+        ("Something came up, sorry.", "en", True),
+        ("My back hurts. I have to go.", "en", True),  # clear leave-taking: any statement before it
+        ("Perdón, me surgió algo.", "es", True),
+        ("Sorry, er kwam iets tussen.", "nl", True),
+        ("Danke, mir ist was dazwischengekommen.", "de", True),
+        ("Извини, у меня появились дела.", "ru", True),
+    ],
+)
+def test_an_unclear_reason_counts_only_at_the_start_of_the_turn(said: str, code: str, leaving: bool) -> None:
+    from local_assistant.calls import takes_leave
+
+    assert takes_leave(said, name="Tiffany", language=code) is leaving
+
+
+@pytest.mark.parametrize(
+    ("said", "code", "leaving"),
+    [
+        # review 18 Oct: rarer leaving phrases with a second meaning
+        ("Il y a un imprévu.", "fr", False),  # also "there is a hitch"
+        ("Coś wypadło.", "pl", False),  # also "something fell out"
+        ("У меня дела, хорошо.", "ru", False),  # "I'm fine"
+        ("J'ai un imprévu.", "fr", True),
+        ("Coś mi wypadło.", "pl", True),
+    ],
+)
+def test_a_leaving_phrase_with_a_second_meaning_is_none(said: str, code: str, leaving: bool) -> None:
+    from local_assistant.calls import takes_leave
+
+    assert takes_leave(said, name="Tiffany", language=code) is leaving
+
+
+@pytest.mark.parametrize(
+    ("said", "reply"),
+    [
+        ("My back hurts. I need to do something.", "Oh no! Have you tried a warm compress?"),
+        ("Sorry I didn't call earlier. Something came up.", "No worries at all! What's on your mind?"),
+    ],
+)
+async def test_a_complaint_or_an_apology_keeps_the_call(said: str, reply: str) -> None:
+    async with Harness([said], [Turn(reply)]) as h:
+        await h.connected()
+        await h.quiet_after(GREETING)
+        h.helper.caller_says(speech(0.8))
+        await h.quiet_after(reply.split("! ")[-1])
+        await asyncio.sleep(0.3)
+        assert h.host.turns == [said] and h.signal.hung_up == []
 
 
 async def test_leave_taking_with_a_device_question_waiting_keeps_the_call() -> None:

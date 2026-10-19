@@ -410,6 +410,19 @@ def test_tailscale_operator_and_funnel(tmp_path: Path) -> None:
     assert none.status == "ok" and "not installed" in none.text
 
 
+def test_tailscale_is_looked_for_in_the_hosts_own_tree(tmp_path: Path) -> None:
+    """Under a test's root only its tree counts: the Tailscale of the Mac the tests run on is never found."""
+    tool = "/opt/homebrew/bin/tailscale"
+    answers = {f"{tool} debug prefs": (0, json.dumps({"OperatorUser": "alex"}))}
+    host = FakeHost(tmp_path, answers)
+    none = hostsec.tailscale(host, tools=(tool,))
+    assert none.status == "ok" and "not installed" in none.text and host.asked == []
+    (tmp_path / "opt/homebrew/bin").mkdir(parents=True)
+    (tmp_path / "opt/homebrew/bin/tailscale").write_text("")
+    assert hostsec.tailscale(host, tools=(tool,)).status == "warn"
+    assert host.asked[0] == (tool, "debug", "prefs")  # run by its fixed path: refused off the live Mac
+
+
 def test_the_keychain_locks_itself_after_15_minutes(tmp_path: Path) -> None:
     keychain = tmp_path / "Library" / "Keychains" / "login.keychain-db"
     keychain.parent.mkdir(parents=True)

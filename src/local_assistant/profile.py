@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from local_assistant import prompts
+from local_assistant.language import ENGLISH, function_words
 from local_assistant.store import Fact, SourceKind, Store, fold
 
 log = logging.getLogger(__name__)
@@ -151,6 +152,9 @@ def by_category(facts: Sequence[Fact]) -> list[tuple[str, list[tuple[Fact, str]]
     return [(category, entries) for category, entries in groups.items() if entries]
 
 
+# English's function words, as `fold` writes them: never a word to match a note on. Only English's: the notes are written
+# as "The user ..." sentences, and the other languages' lists hold English words that matter ("son", "ten", "die")
+_SMALL_WORDS = frozenset(fold(word) for word in function_words(ENGLISH))
 COMMON_FROM_NOTES = 4  # from this many notes on, a word in more than half of them is too common to match on
 _MARKS = re.compile(
     r"^(?:\s*\[[a-z][a-z ]*\])+\s*"
@@ -193,6 +197,11 @@ class Profile:
     def notes_max_chars(self) -> int:
         return self._notes_max
 
+    @property
+    def notes_per_message(self) -> int:
+        """At most this many characters of her notes come with a message (`notes_for`)."""
+        return self._notes_per_message
+
     def facts(self) -> list[Fact]:
         """Both parts, by number."""
         return self._store.facts()
@@ -203,6 +212,10 @@ class Profile:
     def notes(self) -> list[Fact]:
         """Her notes: what she learned from chats, and the user's facts moved here to make room (origin kept)."""
         return [fact for fact in self.facts() if not _is_yours(fact)]
+
+    def moved(self) -> list[Fact]:
+        """The user's own facts among her notes: moved there to make room, still theirs by origin."""
+        return [fact for fact in self.notes() if fact.source_kind in _USERS_OWN]
 
     def used_chars(self) -> int:
         """The user's part, as its limit counts it."""
@@ -473,8 +486,10 @@ class Profile:
         for found in words.values():
             for word in found:
                 holding[word] = holding.get(word, 0) + 1
-        # code's marks before the words ("[call]", "[photo]", "[audio file]") are not the user's words
-        asked = {word for word in re.findall(r"[^\W_]+", fold(_MARKS.sub("", text))) if len(word) > 1}
+        # code's marks before the words ("[call]", "[photo]", "[audio file]") are not the user's words, and English's
+        # small words ("is", "to", "on") say nothing of what a note is about (her notes are "The user ..." sentences)
+        typed = re.findall(r"[^\W_]+", fold(_MARKS.sub("", text)))
+        asked = {word for word in typed if len(word) > 1 and word not in _SMALL_WORDS}
         common = len(notes) >= COMMON_FROM_NOTES
         rare = {word for word in asked if word in holding and not (common and holding[word] * 2 > len(notes))}
         if searched and not rare:  # a search for a word most notes share: those notes

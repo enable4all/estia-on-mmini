@@ -76,6 +76,39 @@ enum LanguageTable {
         ("chords", "Toca F#m7 y luego Am.", "Toca fa sostenido menor séptima y luego la menor."),
         ("chords", "Hoy hace sol y la casa es bonita.", "Hoy hace sol y la casa es bonita."),
         ("cardinals", "1 mañana de sol", "una mañana de sol"),  // review 2 (M6): "la mañana" is feminine
+        // the chord speech audit (18 Oct): chords with only spaces between them get commas, as in English, and a
+        // semicolon, a slash with spaces, "…", "‖" and "⏸" between chords are a pause too
+        ("chords", "Acordes: Do Lam Rem7 Sol7 Domaj7.", "Acordes: do, la menor, re menor séptima, sol séptima, do séptima mayor."),
+        ("chords", "Do; Sol; Lam; Fa.", "do, sol, la menor, fa."),
+        // a chart's marks (the chord speech audit, 18 Oct): "N.C.", "%" and a repeat in the language's words
+        ("chords", "Intro: N.C., luego Sol, Re y Mim.", "Intro: sin acorde, luego sol, re y mi menor."),
+        ("chords", "Do; %; Sol; %.", "do, repetir, sol, repetir."),
+        ("chords", "Estrofa: Am F C G (x2)", "Estrofa: la menor, fa, do, sol, dos veces"),
+        ("chords", "Am F C G x3", "la menor, fa, do, sol, tres veces"),
+        ("chords", "Zoom x2 y 20 % menos.", "Zoom x dos y veinte por ciento menos."),
+        ("chords", "Vivo en N.C. desde 2020.", "Vivo en N.C. desde dos mil veinte."),
+        // the missing forms (the chord speech audit, 18 Oct): "-" before a number minor, a minor chord with a
+        // major seventh, and alterations or "no3" in brackets; the signs by their names ("bemol nueve")
+        ("chords", "El acorde es C-7.", "El acorde es do menor séptima."),
+        ("chords", "El acorde es CmMaj7.", "El acorde es do menor séptima mayor."),
+        ("chords", "El acorde es Cm(maj7).", "El acorde es do menor séptima mayor."),
+        ("chords", "El acorde es C7(b9).", "El acorde es do séptima bemol nueve."),
+        ("chords", "El acorde es Cm7(b5).", "El acorde es do menor séptima bemol cinco."),
+        ("chords", "El acorde es C(no3).", "El acorde es do sin tercera."),
+        ("chords", "Toma la A-7 hasta Málaga.", "Toma la A-siete hasta Málaga."),  // no music: a road
+        // with a sharp or flat it is a chord anywhere (the review, 18 Oct: "Fa#-7" was "Fa sharpm siete")
+        ("chords", "Toca Fa#-7.", "Toca fa sostenido menor séptima."),
+        ("chords", "Toca F#-7.", "Toca fa sostenido menor séptima."),
+        ("chords", "Acordes: Gm7b5 y Cmaj7#11.", "Acordes: sol menor séptima bemol cinco y do séptima mayor sostenido once."),
+        ("chords", "Estrofa: Do / / /; Sol / / /; Lam / / /.", "Estrofa: do, sol, la menor / / /."),
+        ("chords", "¿Qué % de la canción es el estribillo?", "¿Qué % de la canción es el estribillo?"),  // "%" needs chords
+        ("chords", "Una tienda de guitarras en Raleigh, N.C.", "Una tienda de guitarras en Raleigh, N.C."),  // a place
+        // "N.C." alone in a sentence about music only after a colon or a section's name (the review, 18 Oct)
+        ("chords", "Mi guitarra viene de N.C.", "Mi guitarra viene de N.C."),
+        ("chords", "Estribillo: N.C.", "Estribillo: sin acorde."),
+        ("chords", "Toco la guitarra en NC.", "Toco la guitarra en NC."),
+        ("chords", "Estribillo x2", "Estribillo dos veces"),  // after a section's name
+        ("chords", "Compra cuerdas (x2) para la guitarra.", "Compra cuerdas (x dos) para la guitarra."),  // a quantity
     ]
 
     static let fr: [Row] = [
@@ -113,6 +146,23 @@ enum LanguageTable {
         // review 2, 17 Oct (I8): phone numbers written with dots
         ("phones", "06.12.34.56.78", "zéro six, douze, trente quatre, cinquante six, soixante dix huit"),
         ("phones", "Appelle le 01.23.45.67.89.", "Appelle le zéro un, vingt trois, quarante cinq, soixante sept, quatre vingt neuf."),
+        // the chord speech audit (18 Oct): "ré" was lost in "la mineur ré mineur"; commas between chords, as in English
+        ("chords", "Accords: Do Lam Rém7 Sol7 Domaj7.", "Accords: do, la mineur, ré mineur sept, sol sept, do majeur sept."),
+        ("chords", "Do… Sol… Lam…", "do, sol, la mineur…"),
+        // a chart's marks (the chord speech audit, 18 Oct)
+        ("chords", "Intro: N.C., Do, Sol et Lam.", "Intro: sans accord, do, sol et la mineur."),
+        ("chords", "Ma guitare vient de N.C.", "Ma guitare vient de N.C."),  // a place (the review, 18 Oct)
+        ("chords", "Couplet: Am F C G (x2)", "Couplet: la mineur, fa, do, sol, deux fois"),
+        ("chords", "Do | % | Sol | %", "do, répéter, sol, répéter"),
+        ("chords", "Un 20 % de plus.", "Un vingt pour cent de plus."),
+        // the missing forms (the chord speech audit, 18 Oct)
+        ("chords", "Les accords: C-7.", "Les accords: do mineur sept."),
+        ("chords", "Joue Sib-7.", "Joue si bémol mineur sept."),  // anywhere with a flat (the review, 18 Oct)
+        ("chords", "Les accords: CmMaj7.", "Les accords: do mineur majeur sept."),
+        ("chords", "Les accords: Cm(maj7).", "Les accords: do mineur majeur sept."),
+        ("chords", "Les accords: C7(b9).", "Les accords: do sept bémol neuf."),
+        ("chords", "Les accords: Cm7(b5).", "Les accords: do mineur sept bémol cinq."),
+        ("chords", "Les accords: C(no3).", "Les accords: do sans tierce."),
     ]
 
     static let it: [Row] = [
@@ -150,6 +200,20 @@ enum LanguageTable {
         ("chords", "La Sim del telefono", "La Sim del telefono"),
         ("chords", "Gli accordi: La, Mi e Sim.", "Gli accordi: la, mi e si minore."),
         ("chords", "Do una mano a Re Artù.", "Do una mano a Re Artù."),
+        // the chord speech audit (18 Oct): commas between chords, as in English
+        ("chords", "Am F C G", "la minore, fa, do, sol"),
+        ("chords", "Lam / / / Fa / / / Do", "la minore, fa, do"),
+        // a chart's marks (the chord speech audit, 18 Oct)
+        ("chords", "N.C., Do, Sol e Lam", "senza accordo, do, sol e la minore"),
+        ("chords", "Am F C G x3", "la minore, fa, do, sol, tre volte"),
+        ("chords", "Do | % | Sol | %", "do, ripetere, sol, ripetere"),
+        // the missing forms (the chord speech audit, 18 Oct)
+        ("chords", "Gli accordi: C-7.", "Gli accordi: do minore settima."),
+        ("chords", "Gli accordi: CmMaj7.", "Gli accordi: do minore settima maggiore."),
+        ("chords", "Gli accordi: Cm(maj7).", "Gli accordi: do minore settima maggiore."),
+        ("chords", "Gli accordi: C7(b9).", "Gli accordi: do settima bemolle nove."),
+        ("chords", "Gli accordi: Cm7(b5).", "Gli accordi: do minore settima bemolle cinque."),
+        ("chords", "Gli accordi: C(no3).", "Gli accordi: do senza terza."),
     ]
 
     static let pt: [Row] = [
@@ -182,6 +246,20 @@ enum LanguageTable {
         ("ordinals", "No 1° de maio ficou 3°.", "No primeiro de maio ficou terceiro."),
         ("temperatures", "Hoje 25°.", "Hoje vinte e cinco graus."),
         ("big numbers", "10 000 pessoas", "dez mil pessoas"),  // review 2 (I4)
+        // the chord speech audit (18 Oct): commas between chords, as in English
+        ("chords", "Am F C G", "lá menor, fá, dó, sol"),
+        ("chords", "Am ‖ F ‖ C ‖ G", "lá menor, fá, dó, sol"),
+        // a chart's marks (the chord speech audit, 18 Oct)
+        ("chords", "N.C., C, G e Am", "sem acorde, dó, sol e lá menor"),
+        ("chords", "Am F C G (x2)", "lá menor, fá, dó, sol, duas vezes"),
+        ("chords", "C | % | G | %", "dó, repetir, sol, repetir"),
+        // the missing forms (the chord speech audit, 18 Oct)
+        ("chords", "O acorde é C-7.", "O acorde é dó menor sétima."),
+        ("chords", "O acorde é CmMaj7.", "O acorde é dó menor sétima maior."),
+        ("chords", "O acorde é Cm(maj7).", "O acorde é dó menor sétima maior."),
+        ("chords", "O acorde é C7(b9).", "O acorde é dó sétima bemol nove."),
+        ("chords", "O acorde é Cm7(b5).", "O acorde é dó menor sétima bemol cinco."),
+        ("chords", "O acorde é C(no3).", "O acorde é dó sem terça."),
     ]
 
     static let nl: [Row] = [
@@ -217,6 +295,20 @@ enum LanguageTable {
         ("chords", "Bes en Fis", "Bes en Fis"),  // review 2 (I5): names without a suffix stay
         ("chords", "Ik programmeer in C#.", "Ik programmeer in C sharp."),
         ("times", "tussen 14:00-15:00", "tussen veertien en vijftien uur"),  // review 2 (M2): tussen ... en
+        // the chord speech audit (18 Oct): commas between chords, as in English
+        ("chords", "Am F C G", "A mineur, F, C, G"),
+        ("chords", "Am; F; C; G", "A mineur, F, C, G"),
+        // a chart's marks (the chord speech audit, 18 Oct)
+        ("chords", "N.C., C, G en Am", "geen akkoord, C, G en A mineur"),
+        ("chords", "Am F C G (x2)", "A mineur, F, C, G, twee keer"),
+        ("chords", "C | % | G | %", "C, herhalen, G, herhalen"),
+        // the missing forms (the chord speech audit, 18 Oct)
+        ("chords", "De akkoorden: C-7.", "De akkoorden: C mineur zeven."),
+        ("chords", "De akkoorden: CmMaj7.", "De akkoorden: C mineur majeur zeven."),
+        ("chords", "De akkoorden: Cm(maj7).", "De akkoorden: C mineur majeur zeven."),
+        ("chords", "De akkoorden: C7(b9).", "De akkoorden: C zeven mol negen."),
+        ("chords", "De akkoorden: Cm7(b5).", "De akkoorden: C mineur zeven mol vijf."),
+        ("chords", "De akkoorden: C(no3).", "De akkoorden: C zonder terts."),
     ]
 
     static let de: [Row] = [
@@ -275,6 +367,29 @@ enum LanguageTable {
         ("ordinals", "der 1. oder 2. Platz", "der erste oder zweite Platz"),
         // review 2 (M7): a decade keeps its ending glued
         ("cardinals", "die 20er Jahre, die 80er-Jahre und die 1920er", "die zwanziger Jahre, die achtziger-Jahre und die neunzehnhundertzwanziger"),
+        // the chord speech audit (18 Oct): commas between chords, as in English
+        ("chords", "Am F C G", "A-Moll, F, C, G"),
+        ("chords", "Hm ⏸ G ⏸ D ⏸ A", "H-Moll, G, D, A"),
+        // a chart's marks (the chord speech audit, 18 Oct)
+        ("chords", "N.C., C, G und Am", "kein Akkord, C, G und A-Moll"),
+        ("chords", "Am F C G x3", "A-Moll, F, C, G, dreimal"),
+        ("chords", "C | % | G | %", "C, wiederholen, G, wiederholen"),
+        ("chords", "Er wohnt in N.C. und arbeitet.", "Er wohnt in N.C. und arbeitet."),
+        ("chords", "Die Gitarre aus N.C. ist gut.", "Die Gitarre aus N.C. ist gut."),  // a place (the review, 18 Oct)
+        ("chords", "Refrain: N.C.", "Refrain: kein Akkord."),
+        ("chords", "Plan B x2", "Plan B x zwei"),
+        // the missing forms (the chord speech audit, 18 Oct)
+        ("chords", "Der Akkord ist C-7.", "Der Akkord ist C-Moll sieben."),
+        ("chords", "Spiel F#-7.", "Spiel Fis-Moll sieben."),  // anywhere with a sharp (the review, 18 Oct)
+        ("chords", "Der Akkord ist CmMaj7.", "Der Akkord ist C-Moll Major sieben."),
+        ("chords", "Der Akkord ist Cm(maj7).", "Der Akkord ist C-Moll Major sieben."),
+        ("chords", "Der Akkord ist C7(b9).", "Der Akkord ist C sieben b neun."),
+        ("chords", "Der Akkord ist Cm7(b5).", "Der Akkord ist C-Moll sieben b fünf."),
+        ("chords", "Der Akkord ist C(no3).", "Der Akkord ist C ohne Terz."),
+        ("chords", "Der Akkord Hm7b fehlt.", "Der Akkord Hm sieben b fehlt."),  // unread: as before
+        ("chords", "Akkorde: Cm7(b5)/E und C7sus4(b9).", "Akkorde: C-Moll sieben(b fünf)/E und C sieben sus vier(b neun)."),  // with a bass or sus: as before
+        ("chords", "Am 𝄐 F 𝄐 C", "A-Moll, F, C"),
+        ("chords", "Refrain x2, dann die Strophe.", "Refrain zweimal, dann die Strophe."),
     ]
 
     static let pl: [Row] = [
@@ -324,6 +439,20 @@ enum LanguageTable {
         ("units", "do 21 km, około 3 km i do 1 km", "do dwudziestu jeden kilometrów, około trzech kilometrów i do jednego kilometra"),
         ("cardinals", "od 5 lat", "od pięciu lat"),
         ("times", "między 13:00 a 14:00", "między trzynastą a czternastą"),  // review 2 (M3)
+        // the chord speech audit (18 Oct): commas between chords, as in English
+        ("chords", "Am F C G", "a-moll, F, C, G"),
+        ("chords", "Am; F; C; G", "a-moll, F, C, G"),
+        // a chart's marks (the chord speech audit, 18 Oct)
+        ("chords", "N.C., C, G i Am", "bez akordu, C, G i a-moll"),
+        ("chords", "Am F C G (x2)", "a-moll, F, C, G, dwa razy"),
+        ("chords", "C | % | G | %", "C, powtórzyć, G, powtórzyć"),
+        // the missing forms (the chord speech audit, 18 Oct)
+        ("chords", "Akord: C-7.", "Akord: c-moll siedem."),
+        ("chords", "Akord: CmMaj7.", "Akord: c-moll major siedem."),
+        ("chords", "Akord: Cm(maj7).", "Akord: c-moll major siedem."),
+        ("chords", "Akord: C7(b9).", "Akord: C siedem bemol dziewięć."),
+        ("chords", "Akord: Cm7(b5).", "Akord: c-moll siedem bemol pięć."),
+        ("chords", "Akord: C(no3).", "Akord: C bez tercji."),
     ]
 
     static let ru: [Row] = [
@@ -376,6 +505,22 @@ enum LanguageTable {
         ("dates", "на 3 ноября и к 3 ноября", "на третье ноября и к третьему ноября"),  // review 2 (M3)
         // review 2 (M8): an end of two to four before a noun keeps the nominative, which the noun's form fits
         ("ranges", "2-3 дня, 1-2 дня и 3-5 дней", "два-три дня, один-два дня и от трёх до пяти дней"),
+        // the chord speech audit (18 Oct): commas between chords, as in English
+        ("chords", "Am F C G", "ля минор, фа, до, соль"),
+        ("chords", "Am / / / F / / / C", "ля минор, фа, до"),
+        // a chart's marks (the chord speech audit, 18 Oct)
+        ("chords", "N.C., C, G и Am", "без аккорда, до, соль и ля минор"),
+        ("chords", "Am F C G x5", "ля минор, фа, до, соль, пять раз"),
+        ("chords", "Am F C G x3", "ля минор, фа, до, соль, три раза"),
+        ("chords", "C | % | G | %", "до, повторить, соль, повторить"),
+        ("chords", "Это на 20 % больше, x2.", "Это на двадцать процентов больше, x два."),
+        // the missing forms (the chord speech audit, 18 Oct)
+        ("chords", "Аккорд: C-7.", "Аккорд: до минор семь."),
+        ("chords", "Аккорд: CmMaj7.", "Аккорд: до минор мажор семь."),
+        ("chords", "Аккорд: Cm(maj7).", "Аккорд: до минор мажор семь."),
+        ("chords", "Аккорд: C7(b9).", "Аккорд: до семь бемоль девять."),
+        ("chords", "Аккорд: Cm7(b5).", "Аккорд: до минор семь бемоль пять."),
+        ("chords", "Аккорд: C(no3).", "Аккорд: до без терции."),
     ]
 
     static let ja: [Row] = [
@@ -406,6 +551,11 @@ enum LanguageTable {
         ("chords", "Aランク", "Aランク"),
         ("chords", "第1位、A案とB案", "第1位、A案とB案"),  // review 2: ordinary text stays
         ("big numbers", "注文番号12345678と10000円", "注文番号12345678と1万円"),  // review 2 (M9): an ID keeps its digits
+        // the chord speech audit (18 Oct): a pause between chords, as in English
+        ("chords", "Am F C G", "エーマイナー、エフ、シー、ジー"),
+        ("chords", "Am; F; C", "エーマイナー、エフ、シー"),
+        ("chords", "Am F C G (x2)", "エーマイナー、エフ、シー、ジー (x2)"),  // ja and ko: marks as before
+        ("chords", "コードはCm7(b5)とC-7", "コードはシーマイナーセブン(b5)とC-7"),  // ja and ko: forms as before
     ]
 
     static let ko: [Row] = [
@@ -433,6 +583,10 @@ enum LanguageTable {
         ("chords", "C, G, Am", "씨, 지, 에이 마이너"),
         ("chords", "A형", "A형"),
         ("chords", "A형, 6개월, 3원칙", "A형, 6개월, 3원칙"),  // review 2: ordinary text stays
+        // the chord speech audit (18 Oct): commas between chords, as in English
+        ("chords", "Am F C G", "에이 마이너, 에프, 씨, 지"),
+        ("chords", "N.C., C, G, Am", "N.C., 씨, 지, 에이 마이너"),  // ja and ko: marks as before
+        ("chords", "코드는 Cm7(b5), C-7", "코드는 씨 마이너 세븐(b5), C-7"),  // ja and ko: forms as before
     ]
 
     /// Every language's rows, for the checks every language shares.

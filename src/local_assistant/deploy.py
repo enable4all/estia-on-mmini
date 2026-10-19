@@ -49,7 +49,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from local_assistant import ownuser
-from local_assistant.hostsec import CHOWN, LAUNCHCTL, RM, SUDO, Host, estia_root, tail
+from local_assistant.hostsec import CHOWN, LAUNCHCTL, RM, SUDO, Host, estia_root, tail, tool_root
 from local_assistant.hostsec import clean as clean  # one rule for what root prints, kept here by its name
 
 ENV = "/usr/bin/env"
@@ -113,14 +113,17 @@ def builder() -> Builder:
 
 
 def find_uv(who: Builder) -> str:
+    """uv at its fixed paths, never PATH: Homebrew's (Apple silicon, then Intel), under `tool_root` (a test's fake tree:
+    the suite never takes the uv of the Mac it runs on), then uv's own installer's and cargo's in the builder's home."""
+    tools = Host(tool_root())
     for path in (
-        "/opt/homebrew/bin/uv",
-        "/usr/local/bin/uv",
-        str(who.home / ".local" / "bin" / "uv"),
-        str(who.home / ".cargo" / "bin" / "uv"),
+        tools.path("/opt/homebrew/bin/uv"),
+        tools.path("/usr/local/bin/uv"),
+        who.home / ".local" / "bin" / "uv",
+        who.home / ".cargo" / "bin" / "uv",
     ):
-        if Path(path).is_file():
-            return path
+        if path.is_file():
+            return str(path)
     raise DeployError("uv not found (brew install uv)")
 
 

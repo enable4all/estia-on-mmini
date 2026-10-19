@@ -148,11 +148,11 @@ async def test_profile_lists_facts_with_their_source(store: Store) -> None:
     profile.add("The user likes tea.", source_kind="remember")
     listing = await commands.handle(command(store, "/profile", T0 + 1))
     lines = listing.splitlines()
-    assert lines[0] == "**Your profile** (19 of 4,000 characters, always known)"
+    assert lines[0] == "**Your profile**: I see it with every message (19 of 4,000 characters, 0%)"
     assert lines[1] == ""
     assert lines[2].startswith("#1 The user likes tea. (you asked, ")  # no category: no headings
     assert lines[-2:] == ["", prompts.PROFILE_FOOTER]
-    assert "Notes from your chats" not in listing  # none yet: no section
+    assert "My notes from our chats" not in listing  # none yet: no line
 
 
 async def test_profile_groups_facts_under_their_category(store: Store) -> None:
@@ -165,8 +165,8 @@ async def test_profile_groups_facts_under_their_category(store: Store) -> None:
     profile.add("Work: The user cycles to work.", source_kind="chat")
     listing = await commands.handle(command(store, "/profile"))
     day = listing.split("(you asked, ")[1].split(")")[0]
-    assert listing == (  # the user's own facts, then the notes from chats, each with its fill level
-        "**Your profile** (82 of 4,000 characters, always known)\n"
+    assert listing == (  # the user's own facts, then one line about the notes from chats (/profile notes lists them)
+        "**Your profile**: I see it with every message (82 of 4,000 characters, 2%)\n"
         "\n"
         "**About**\n"
         f"#2 The user's name is Alex Example. (you asked, {day})\n"
@@ -174,13 +174,21 @@ async def test_profile_groups_facts_under_their_category(store: Store) -> None:
         "**Work**\n"
         f"#1 The user works as a product designer. (from a link, {day})\n"
         "\n"
-        "**Notes from your chats** (49 of 12,000 characters; the ones that may matter come with your message)\n"
+        "**My notes from our chats**: 2 notes (49 of 12,000 characters, 0%). I see up to 1,500 characters of them "
+        "with each message, the ones that match it first, then the newest. /profile notes lists them.\n"
+        "\n"
+        "Correct one with /fix N new text (a note you fix becomes yours), or remove it with /forget N."
+    )
+    notes = await commands.handle(command(store, "/profile notes", T0 + 1))
+    assert notes == (  # the notes grouped the same way, each with its date only
+        "**My notes from our chats** (49 of 12,000 characters, 0%): I see up to 1,500 characters of them with each "
+        "message, the ones that match it first, then the newest.\n"
         "\n"
         "**Work**\n"
-        f"#4 The user cycles to work. (learned from chat, {day})\n"
+        f"#4 The user cycles to work. ({day})\n"
         "\n"
         "**Other**\n"
-        f"#3 The user likes tea. (learned from chat, {day})\n"
+        f"#3 The user likes tea. ({day})\n"
         "\n"
         "Correct one with /fix N new text (a note you fix becomes yours), or remove it with /forget N."
     )

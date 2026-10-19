@@ -1225,6 +1225,17 @@ class Store:
         ).fetchall()
         return [_message(row) for row in rows]
 
+    def turn_before(self, conversation_id: int, before_seq: int) -> list[Message]:
+        """The turn before a message: the user's last message before it and everything that followed it (her answer
+        and code's notes), in order ([chords]: what her chords are checked against)."""
+        rows = self._conn.execute(
+            "SELECT * FROM messages WHERE conversation_id = ? AND seq IS NOT NULL AND seq < ? AND seq >= COALESCE("
+            "(SELECT MAX(seq) FROM messages WHERE conversation_id = ? AND direction = 'in' AND seq IS NOT NULL"
+            " AND seq < ?), ?) ORDER BY seq",
+            (conversation_id, before_seq, conversation_id, before_seq, before_seq),
+        ).fetchall()
+        return [_message(row) for row in rows]
+
     def unanswered_incoming(self) -> list[Message]:
         rows = self._conn.execute(
             "SELECT * FROM messages WHERE direction = 'in' AND status = 'received' ORDER BY id"

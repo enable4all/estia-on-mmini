@@ -1,6 +1,7 @@
 """Statements that several files make must say the same thing."""
 
 import importlib.util
+import itertools
 import re
 import subprocess
 import unicodedata
@@ -69,7 +70,7 @@ def test_the_notices_credit_the_fonts_and_name_no_brand_we_do_not_use() -> None:
 def test_the_tagline_is_a_thinking_partner_living_at_home() -> None:
     """The owner's tagline, the same in the README's opening line, the package and the logo's lockup."""
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "\n**An insanely secure AI thinking partner living at home, on your own Mac.** " in readme
+    assert "\n**An insanely secure & private thinking partner, living at home.** " in readme  # owner, 18 Oct: "&" here
     assert (
         "\n## Security\n\nInsanely secure, and every claim can be checked in the open-source code.\n" in readme
     )  # owner, 15 Oct
@@ -613,7 +614,7 @@ def test_the_guide_reads_the_other_ten_languages_aloud_one_line_per_family() -> 
 
 def test_the_readme_links_the_website_under_its_tagline() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    tagline = readme.index("\n**An insanely secure AI thinking partner")
+    tagline = readme.index("\n**An insanely secure & private thinking partner")
     assert readme.index("\nWebsite: [estia.fun](https://estia.fun)\n") > tagline
     assert "Estia started as Tiffany, our own thinking partner, before" in readme
     assert "our own assistant" not in readme
@@ -1155,11 +1156,25 @@ CALL_ENDS = (
     "after a cough, unless she just asked something.",
     'In English, a goodbye ("bye-bye", "good-bye", "talk to you later", "take care") ends the call once her answer is '
     'spoken, also with closing words after it ("okay, goodbye, I\'m going to check the log now") and also when her '
-    "answer asks something; only a device question waiting for a yes keeps the call open.",
+    "answer asks something; a device question waiting for a yes keeps the call open until it is answered, and after "
+    'a plain answer ("yes", "no thanks") the call ends.',
     'Leave-taking ends the call the same way, as a phrase of its own ("Okay, I have to go"), not inside a longer '
     'sentence ("I have to go to the dentist"): "I have to go" or "I\'m hanging up" in English, "ik moet gaan" in '
     'Dutch, "ich muss los" in German, and a few clear phrases in the other languages ("je dois y aller", '
     '"じゃあ、切るね"). A wrap-up ("that\'s all") ends it too, unless she asks something.',
+    # owner, 18 Oct: leaving with a reason, a request to end the call and her own goodbye end it too; "(pause)" was
+    # read aloud
+    'Leaving with a reason counts too ("I have something to do", "something came up", "I have to run"), in each of '
+    'the 11 languages; "something came up" only with nothing but "sorry" or "thanks" before it, so an apology ("Sorry '
+    "I didn't call earlier. Something came up.\") keeps the call open.",
+    'Asking her to end the call ("let\'s end the call", "we can stop here", "let\'s call it a day") ends it once her '
+    "answer is spoken, also when her answer asks something, in each of the 11 languages.",
+    'Her own goodbye ("Bye!", "Talk soon!"), closing wish ("Enjoy your evening!") or offer to wait ("I\'ll be here '
+    "when you're ready.\") ends the call too, unless her answer asks something, once the caller has been quiet for 3 "
+    "seconds: anything said in those 3 seconds keeps the call open and is answered; not on a practice call.",
+    'Stage directions in her answers ("(pause)", "(laughs)", "*smiles*") are never spoken, on a call or in a voice '
+    'note, and never sent in a text; bold words, code and a title in brackets ("(Applause) by Lady Gaga") stay, and so '
+    'does a capitalised one inside a sentence ("Also (Pause) weiter"), which is still said.',
 )
 
 
@@ -1229,7 +1244,7 @@ def test_the_guide_says_a_slash_command_is_spoken() -> None:
 # front page, or GUIDE.md, the rest, as its guide-page drift test reads them (the two files together)
 SITE_README = (
     "git clone https://github.com/enable4all/estia-on-mmini.git ~/estia && cd ~/estia",
-    "**An insanely secure AI thinking partner living at home, on your own Mac.**",
+    "**An insanely secure & private thinking partner, living at home.**",
     "Website: [estia.fun](https://estia.fun)",
     '<img src="docs/brand/estia-hero-light.png" alt="A stone garden seen from above, its gravel raked in rings around a '
     'Mac mini"',
@@ -2244,3 +2259,175 @@ def test_the_ai_guide_names_ports_as_readme_and_security_do() -> None:
     flat = site_flat(Path(__file__).resolve().parents[1] / "SETUP-WITH-YOUR-AI.md")
     assert "no open port" not in flat and "no listening ports" not in flat
     assert "no port reachable from other machines" in flat and "the bridge opens no port" in flat
+
+
+# CHANGELOG.md (Keep a Changelog): release.yml publishes a tag's section of it as the release's notes
+
+CHANGELOG = ROOT / "CHANGELOG.md"
+RELEASE = ROOT / ".github" / "workflows" / "release.yml"
+VERSION_HEADING = re.compile(r"## \[(\d+\.\d+\.\d+)\] - (\d{4}-\d{2}-\d{2})")
+
+
+def release_awk() -> str:
+    """release.yml's awk program, as the workflow runs it on CHANGELOG.md."""
+    found = re.findall(r"""awk -v version="\$version" '([^']+)' CHANGELOG\.md""", RELEASE.read_text(encoding="utf-8"))
+    assert len(found) == 1, "release.yml takes the notes with one awk program on CHANGELOG.md"
+    return str(found[0])
+
+
+RELEASE_PAGE = ROOT / ".github" / "release-page.md"
+
+
+def release_notes(version: str, changelog: Path = CHANGELOG) -> str:
+    done = subprocess.run(
+        ["/usr/bin/awk", "-v", f"version={version}", release_awk(), str(changelog)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return done.stdout
+
+
+def check_changelog(text: str) -> list[tuple[int, ...]]:
+    """Unreleased, then each version once with its date, newest first; each with its compare link from the version
+    before ([Unreleased] from the newest tag). Its versions."""
+    import datetime
+
+    headings = [line for line in text.splitlines() if line.startswith("## ")]
+    assert headings[0] == "## [Unreleased]"
+    versions = []
+    for heading in headings[1:]:
+        matched = VERSION_HEADING.fullmatch(heading)
+        assert matched, f"a version's section is '## [x.y.z] - YYYY-MM-DD': {heading}"
+        datetime.date.fromisoformat(matched[2])
+        versions.append(tuple(int(part) for part in matched[1].split(".")))
+    assert all(newer > older for newer, older in itertools.pairwise(versions)), "each version once, newest first"
+    for line in text.splitlines():
+        if line.startswith("### "):
+            assert line[4:] in {"Added", "Changed", "Fixed", "Security"}, line
+    repo = "https://github.com/enable4all/estia-on-mmini"
+    tags = [".".join(map(str, version)) for version in versions]
+    links = {"Unreleased": f"{repo}/compare/v{tags[0]}...HEAD"}  # moved to the new tag at each release
+    links.update({tag: f"{repo}/compare/v{older}...v{tag}" for tag, older in itertools.pairwise(tags)})
+    links[tags[-1]] = f"{repo}/releases/tag/v{tags[-1]}"
+    for name, link in links.items():
+        assert re.search(rf"^\[{re.escape(name)}\]: {re.escape(link)}$", text, re.M), f"[{name}]: {link}"
+    return versions
+
+
+def test_the_changelog_has_unreleased_then_each_version_with_its_date_newest_first() -> None:
+    versions = check_changelog(CHANGELOG.read_text(encoding="utf-8"))
+    assert {(0, 9, 0), (0, 9, 3)} <= set(versions)
+
+
+def with_a_repeated_section(tmp_path: Path) -> Path:
+    """This CHANGELOG.md with a next version, 9.8.0, in it twice: "- four", then a second section "- dup" (a slip when
+    tagging)."""
+    text = CHANGELOG.read_text(encoding="utf-8")
+    first = "## [9.8.0] - 2026-10-20\n\n### Fixed\n\n- four\n\n"
+    second = "## [9.8.0] - 2026-10-20\n\n### Fixed\n\n- dup\n\n"
+    copy = tmp_path / "CHANGELOG.md"
+    copy.write_text(text.replace("## [Unreleased]\n\n", "## [Unreleased]\n\n" + first + second, 1), encoding="utf-8")
+    return copy
+
+
+def released_as(version: str, *, unreleased_moved: bool) -> str:
+    """This CHANGELOG.md after AGENTS.md's release step for `version` (after the newest), the [Unreleased] link moved to
+    the new tag or (`unreleased_moved` False) left where it was."""
+    text = CHANGELOG.read_text(encoding="utf-8")
+    newest = VERSION_HEADING.search(text)
+    assert newest is not None
+    text = text.replace("## [Unreleased]", f"## [Unreleased]\n\n## [{version}] - 2026-10-20", 1)
+    repo = "https://github.com/enable4all/estia-on-mmini"
+    old_link = f"[Unreleased]: {repo}/compare/v{newest[1]}...HEAD\n"
+    assert old_link in text
+    new_tag = version if unreleased_moved else newest[1]
+    links = f"[Unreleased]: {repo}/compare/v{new_tag}...HEAD\n[{version}]: {repo}/compare/v{newest[1]}...v{version}\n"
+    return text.replace(old_link, links, 1)
+
+
+def test_the_compare_links_follow_the_versions_and_unreleased_starts_at_the_newest_tag() -> None:
+    assert check_changelog(released_as("9.8.0", unreleased_moved=True))[0] == (9, 8, 0)
+    with pytest.raises(AssertionError, match=r"\[Unreleased\]: .*/compare/v9\.8\.0\.\.\.HEAD"):
+        check_changelog(released_as("9.8.0", unreleased_moved=False))
+
+
+def test_a_version_heading_written_twice_is_refused_and_publishes_only_its_first_section(tmp_path: Path) -> None:
+    copy = with_a_repeated_section(tmp_path)
+    with pytest.raises(AssertionError, match="each version once"):
+        check_changelog(copy.read_text(encoding="utf-8"))
+    assert release_notes("9.8.0", copy).strip() == "### Fixed\n\n- four"
+
+
+def test_the_release_takes_its_notes_from_the_tags_section_of_the_changelog() -> None:
+    text = CHANGELOG.read_text(encoding="utf-8")
+    versions = [matched[1] for matched in VERSION_HEADING.finditer(text)]
+    for version in versions:
+        notes = release_notes(version)
+        assert notes.strip(), version
+        assert "## [" not in notes and "]: https://" not in notes, version  # this section only, no link lines
+        body = text.split(f"## [{version}]", 1)[1].split("\n", 1)[1]
+        assert notes.strip() == body.split("\n## [", 1)[0].split("\n[Unreleased]: ", 1)[0].strip(), version
+    assert "Unreleased" not in release_notes(versions[0])
+    assert release_notes("9.9.9") == ""  # no section: the workflow stops, nothing is published
+    workflow = RELEASE.read_text(encoding="utf-8")
+    assert "no section for" in workflow and "exit 1" in workflow
+    assert "CHANGELOG.md?ref=$TAG" in workflow  # the file as tagged, read through GitHub's API
+    assert "uses:" not in workflow and "gh release create" in workflow  # only GitHub's own gh, no other action
+
+
+def release_script() -> str:
+    """The release step's shell script, as GitHub runs it (the `run: |` block)."""
+    lines = RELEASE.read_text(encoding="utf-8").splitlines()
+    start = next(n for n, line in enumerate(lines) if line.strip() == "run: |") + 1
+    indent = len(lines[start]) - len(lines[start].lstrip())
+    script = []
+    for line in lines[start:]:
+        if line.strip() and len(line) - len(line.lstrip()) < indent:
+            break
+        script.append(line[indent:])
+    return "\n".join(script) + "\n"
+
+
+@pytest.mark.parametrize("tag", ["v0.9.3", "v0.9.0", "v9.9.9"])
+def test_the_release_step_publishes_the_tags_section_or_stops_without_one(tmp_path: Path, tag: str) -> None:
+    """The whole step, with a gh stub: GitHub's API answers with this CHANGELOG.md, `gh release create` is recorded."""
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    log = tmp_path / "gh.log"
+    gh = stubs / "gh"
+    gh.write_text(
+        "#!/bin/sh\n"
+        f'case "$*" in api*release-page.md*) cat "{RELEASE_PAGE}"; exit 0;; api*) cat "{CHANGELOG}"; exit 0;; esac\n'
+        f'echo "$*" >> "{log}"\n'
+        f'cp release.md "{tmp_path}/published.md"\n'
+    )
+    gh.chmod(0o755)
+    env = {"PATH": f"{stubs}:/usr/bin:/bin", "TAG": tag, "GITHUB_REPOSITORY": "enable4all/estia-on-mmini"}
+    work = tmp_path / "work"
+    work.mkdir()
+    done = subprocess.run(
+        ["/bin/bash", "-c", release_script()], cwd=work, env=env, capture_output=True, text=True, check=False
+    )
+    version = tag.removeprefix("v")
+    if tag == "v9.9.9":
+        assert done.returncode == 1 and f"no section for {version}" in done.stdout and not log.exists()
+        return
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert log.read_text() == (
+        f"release create {tag} --repo enable4all/estia-on-mmini --verify-tag --notes-file release.md "
+        f"--title Estia {version}\n"
+    )
+    page = RELEASE_PAGE.read_text(encoding="utf-8").replace("{{VERSION}}", version)
+    assert (tmp_path / "published.md").read_text() == page.replace("{{SECTION}}\n", release_notes(version), 1)
+
+
+def test_the_release_page_holds_the_readme_tagline_the_section_and_what_is_in_0_9() -> None:
+    """Owner, 18 Oct: "leave also the 0.9": the page around a release's section, with the README's tagline in its
+    words (the same fact, the same words)."""
+    page = RELEASE_PAGE.read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    tagline = page.split("**", 2)[1]
+    assert f"**{tagline}**" in readme and tagline.startswith("An insanely secure & private thinking partner")
+    assert page.count("{{SECTION}}") == 1 and "## What changed in {{VERSION}}" in page and "## What is in 0.9" in page
+    assert "transposing chords" in page

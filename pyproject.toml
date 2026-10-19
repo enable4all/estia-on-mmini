@@ -1,6 +1,6 @@
 [project]
 name = "local-assistant"
-version = "0.9.3"
+version = "0.9.4"
 description = "Estia: an insanely secure AI thinking partner living at home, on your own Mac, reached only through Signal (local model via Ollama)"
 readme = "README.md"
 license = "MIT"
@@ -18,6 +18,8 @@ build-backend = "uv_build"
 [tool.ruff]
 line-length = 120
 target-version = "py313"
+# design specs and plans: never tracked or published, and a pasted proposal's code is no code of ours
+extend-exclude = ["docs/superpowers"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "ASYNC"]

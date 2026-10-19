@@ -11,7 +11,11 @@ import Foundation
 /// letter or syllable only in such a run that holds a suffixed chord ("A, B y C" stays a list; La, Mi, Si, A and E
 /// are words). Elsewhere a letter with "#" is the programming language, "C sharp". ja and ko spell every suffixed
 /// chord and every run as before: their letter names are how the letters are said there anyway. sus, dim, aug, add
-/// and slash chords are deferred: they stay as written, with `#` and `b` said as words.
+/// and slash chords are deferred: they stay as written, with `#` and `b` said as words. Since the chord speech audit
+/// (18 Oct), es, it, pt, fr, nl, de, pl and ru also read "C-7" (minor seventh, in a music context; with a sharp or flat anywhere), a minor chord with
+/// a major seventh ("CmMaj7", "Cm(maj7)"), alterations ("C7(b9)", "Cm7b5": the sign by its name, then the number)
+/// and "C(no3)" (`Style.forms`), and a chart's marks among chords: "N.C.", "%" and a repeat ("x2") in their own
+/// words (`Style.marks`); ja and ko read them as before.
 enum ChordWords {
     /// How one language says chords.
     struct Style: Sendable {
@@ -38,16 +42,48 @@ enum ChordWords {
         let joins: [String]
         /// Chords that are also words, spelled only in a run (de "Am", "Ab"; pt "Sim", "Em").
         let words: Set<String>
-        /// What a dash or a bar between two chords of a run becomes (a pause).
+        /// What any gap but a comma between two chords of a run becomes (a pause): spaces, a dash, a bar, a slash.
         let dash: String
         /// Words that make a sentence about music, matched at a word's start ("acord" in "acordes"); ja and ko none.
         var music: [String] = []
+        /// The words for the forms read since the chord speech audit (18 Oct): "C-7", "CmMaj7", "Cm(maj7)",
+        /// "C7(b9)", "Cm7(b5)", "C(no3)"; ja and ko none (nil): those stay as before.
+        var forms: Forms? = nil
+        /// A chart's marks in the language's words; ja and ko read none (nil): their marks stay as written.
+        var marks: Marks? = nil
+    }
+
+    /// An alteration's signs said by their names ("b9": "bemol 9", its number read by the numbers pass) and "no3".
+    struct Forms: Sendable {
+        let sharp: String
+        let flat: String
+        let noThird: String
+    }
+
+    /// A chart's marks said among chords (the chord speech audit, 18 Oct): "N.C." (no chord), "%" (the bar again)
+    /// and a repeat ("x2", "(x3)").
+    struct Marks: Sendable {
+        let noChord: String
+        let again: String
+        /// A repeat's count, said ("dos veces", "zweimal").
+        let times: @Sendable (Int) -> String
+
+        func said(_ mark: ChordSpeller.Mark) -> String {
+            switch mark {
+            case .noChord: return noChord
+            case .again: return again
+            case .times(let count, _): return times(count)
+            }
+        }
     }
 
     /// One language's chord reader, its patterns compiled once.
     final class Speller: @unchecked Sendable {  // immutable; NSRegularExpression is safe to share
         let style: Style
         private let candidate: Pattern
+        /// Without the forms (`Style.forms`): the reading before them, for a chord whose brackets come with a bass
+        /// or a sus ("Cm7(b5)/E": "Cm7" read, the rest as written); nil when the style has no forms.
+        private let plainCandidate: Pattern?
         private let wordGap: Pattern?
         private let musicWords: Pattern?
 
@@ -61,9 +97,18 @@ enum ChordWords {
             case .russian: roots = "[A-H]"
             case .letters: roots = "[A-G]"
             }
-            candidate = Pattern(#"(?<![\p{Latin}\p{Cyrillic}\p{N}#♯♭+/°º'’])("# + roots + #")([#♯♭b]?)(maj7|m7|m|7)?"#
-                + #"((?:sus[24]?|dim7?|aug|add[0-9]{1,2}|[0-9]{1,2}|°|ø|/[A-H](?:is|es|[#♯♭b])?)*)"#
-                + #"(?![\p{Latin}\p{Cyrillic}\p{N}#♯♭+])"#)
+            // root, sign, quality, alterations ("b5"), brackets ("(maj7)", "(b9)", "(no3)"), then a deferred tail;
+            // without the forms' words (ja, ko) the quality is one of the first four and the next two groups stay empty
+            func pattern(forms: Bool) -> Pattern {
+                let quality = !forms ? "(maj7|m7|m|7)?()()"
+                    : #"(mMaj7|mmaj7|mM7|maj7|m7|-7|m|7)?((?:[#♯♭b](?:5|9|11|13)(?![0-9]))*)"#
+                    + #"(\((?:maj7|Maj7|M7|no3|[#♯♭b](?:5|9|11|13))(?:,(?:[#♯♭b](?:5|9|11|13)))*\))?"#
+                return Pattern(#"(?<![\p{Latin}\p{Cyrillic}\p{N}#♯♭+/°º'’])("# + roots + #")([#♯♭b]?)"# + quality
+                    + #"((?:sus[24]?|dim7?|aug|add[0-9]{1,2}|[0-9]{1,2}|°|ø|/[A-H](?:is|es|[#♯♭b])?)*)"#
+                    + #"(?![\p{Latin}\p{Cyrillic}\p{N}#♯♭+])"#)
+            }
+            candidate = pattern(forms: style.forms != nil)
+            plainCandidate = style.forms == nil ? nil : pattern(forms: false)
             wordGap = style.joins.isEmpty ? nil
                 : Pattern(#"^\s*,?\s+(?:"# + style.joins.joined(separator: "|") + #")\s+$"#)
             musicWords = style.music.isEmpty ? nil
@@ -95,6 +140,10 @@ enum ChordWords {
         /// tail or a bass with a sharp or flat ("Csus4", "D/F#"); never one of the pack's words ("Lab").
         private func strong(_ chord: Chord) -> Bool {
             guard !style.words.contains(chord.written) else { return false }
+            if !chord.alterations.isEmpty || chord.noThird || chord.majorSeventh && chord.quality != "maj7" { return true }
+            // "la A-7": a road, a chord only in a music context; with a sharp or flat a chord anywhere ("Fa#-7", "Sib-7",
+            // "Fis-7": no road is named so; the review, 18 Oct)
+            if chord.dashed { return chord.sharp || chord.flat }
             if chord.tail.range(of: #"sus|dim|aug|add|°|ø|/[A-H](?:[#♯♭b]|is|es)"#, options: .regularExpression) != nil {
                 return true
             }
@@ -104,11 +153,17 @@ enum ChordWords {
             return chord.root.count > 1 && (!chord.accidental.isEmpty || chord.quality == "7")
         }
 
-        private static let symbolGap = Pattern(#"^\s*(?:,|、|-|–|—|\|)?\s*$"#)
+        /// Between two chords of a run: spaces, a comma, a dash, a bar, a semicolon (a table's bar lines, as the
+        /// bridge says them), "‖", "…", "⏸", "𝄐" or slashes with a space before them (beat slashes), as in English.
+        private static let symbolGap = Pattern(#"^(?:\s*(?:,|、|;|-|–|—|\||‖|…|⏸\x{FE0F}?|𝄐)|\s+/)*\s*$"#)
+        /// A comma alone, kept as written; any other gap between two chords said is the language's pause (`dash`).
+        private static let commaGap = Pattern(#"^\s*[,、]\s*$"#)
 
         private struct Token {
             let range: NSRange
-            let chord: Chord
+            /// A chord, or else a chart's mark.
+            let chord: Chord?
+            let mark: ChordSpeller.Mark?
         }
 
         struct Chord {
@@ -119,9 +174,17 @@ enum ChordWords {
             /// A German name ("Fis", "Es"): its accidental is in the name.
             let named: Bool
             let accidental: String
+            /// "m", "7", "m7", "maj7" or "mMaj7" ("CmMaj7", "Cm(maj7)"); "" for none.
             let quality: String
             let tail: String
-            var suffixed: Bool { !accidental.isEmpty || !quality.isEmpty || !tail.isEmpty }
+            /// "C-7": minor in jazz notation.
+            var dashed = false
+            /// Alterations ("b5", "#11"), bare or in brackets: their sign and number.
+            var alterations: [(sharp: Bool, number: String)] = []
+            /// "(no3)".
+            var noThird = false
+            var majorSeventh: Bool { quality == "maj7" || quality == "mMaj7" }
+            var suffixed: Bool { !accidental.isEmpty || !quality.isEmpty || !tail.isEmpty || !alterations.isEmpty || noThird }
             var sharp: Bool { accidental == "#" || accidental == "♯" || (named && root.hasSuffix("is")) }
             var flat: Bool { accidental == "b" || accidental == "♭" || (named && !root.hasSuffix("is")) }
         }
@@ -132,7 +195,9 @@ enum ChordWords {
         private func parse(_ m: Pattern.Match) -> Chord? {
             let root = m[1]
             // a tail of digits alone is no chord ("A4", "B12"); "C9" waits for the deferred list
-            if !m[4].isEmpty, m[4].allSatisfy(\.isNumber) { return nil }
+            if !m[6].isEmpty, m[6].allSatisfy(\.isNumber) { return nil }
+            // alterations and brackets go with a plain chord only; with a deferred tail it stays as written
+            if !m[6].isEmpty, !m[4].isEmpty || !m[5].isEmpty { return nil }
             let letter: Int
             var named = false
             if let syllable = Self.syllables[root.lowercased()], root.count > 1 {
@@ -143,20 +208,45 @@ enum ChordWords {
             }
             if named, !m[2].isEmpty { return nil }  // "Fis#"
             // "16 Gb" is a size, never G flat
-            if root == "G", m[2] == "b", m[3].isEmpty, m[4].isEmpty, m.before.last?.isNumber == true
+            if root == "G", m[2] == "b", m[3].isEmpty, m[6].isEmpty, m.before.last?.isNumber == true
                 || m.before.hasSuffix(" ") && m.before.dropLast().last?.isNumber == true { return nil }
-            return Chord(written: m[0], root: root, letter: letter, named: named, accidental: m[2], quality: m[3], tail: m[4])
+            var quality = ["mmaj7": "mMaj7", "mM7": "mMaj7", "-7": "m7"][m[3]] ?? m[3]
+            var alterations: [(sharp: Bool, number: String)] = []
+            var noThird = false
+            let pieces = Self.alteration.regex.matches(in: m[4], range: NSRange(location: 0, length: (m[4] as NSString).length))
+                .map { (m[4] as NSString).substring(with: $0.range) }
+            for piece in pieces + m[5].trimmingCharacters(in: CharacterSet(charactersIn: "()")).split(separator: ",").map(String.init) {
+                switch piece {
+                case "maj7", "Maj7", "M7": quality = quality == "m" ? "mMaj7" : quality.isEmpty ? "maj7" : quality
+                case "no3": noThird = true
+                default: alterations.append((sharp: "#♯".contains(piece.first!), number: String(piece.dropFirst())))
+                }
+            }
+            return Chord(written: m[0], root: root, letter: letter, named: named, accidental: m[2], quality: quality,
+                         tail: m[6], dashed: m[3] == "-7", alterations: alterations, noThird: noThird)
         }
+
+        private static let alteration = Pattern(#"[#♯♭b](?:5|9|11|13)"#)
 
         func spell(_ text: String) -> String {
             let ns = text as NSString
-            var tokens: [Token] = []
+            // a chart's marks first, where the language has words for them: the letters of "N.C." are no chord
+            var tokens: [Token] = style.marks == nil ? [] : ChordSpeller.markPattern
+                .matches(in: text, range: NSRange(location: 0, length: ns.length))
+                .compactMap { found in ChordSpeller.Mark(found, in: ns).map { Token(range: found.range, chord: nil, mark: $0) } }
+            let marks = tokens.map(\.range)
             _ = candidate.rewrite(text) { m in
-                if let chord = self.parse(m) { tokens.append(Token(range: m.range, chord: chord)) }
+                guard !marks.contains(where: { NSIntersectionRange($0, m.range).length > 0 }) else { return nil }
+                if let chord = self.parse(m) {
+                    tokens.append(Token(range: m.range, chord: chord, mark: nil))
+                } else if let shorter = self.plainMatch(at: m.range.location, in: ns), let chord = self.parse(shorter) {
+                    tokens.append(Token(range: shorter.range, chord: chord, mark: nil))  // "Cm7(b5)/E": "Cm7", as before
+                }
                 return nil
             }
+            tokens.sort { $0.range.location < $1.range.location }
             guard !tokens.isEmpty else { return text }
-            // runs: chords joined only by a separator or and/or
+            // runs: chords and marks joined only by a separator or and/or
             var run = [Int](repeating: -1, count: tokens.count)
             var gaps = [String](repeating: "", count: tokens.count)  // the gap before token i
             for i in tokens.indices.dropFirst() {
@@ -172,44 +262,96 @@ enum ChordWords {
             var hasSymbols: Set<Int> = []
             var members: [Int: [Int]] = [:]
             for (i, token) in tokens.enumerated() where run[i] >= 0 {
-                if token.chord.suffixed { suffixedRun.insert(run[i]) }
-                if !token.chord.accidental.isEmpty { hasSymbols.insert(run[i]) }
+                // "N.C." and "%" make a chart, as a suffixed chord does
+                if token.chord?.suffixed == true || token.mark.map({ !$0.isRepeat }) == true { suffixedRun.insert(run[i]) }
+                if token.chord?.accidental.isEmpty == false { hasSymbols.insert(run[i]) }
                 members[run[i], default: []].append(i)
             }
             // German names: an H or a name such as Fis anywhere in the text (the live audit, 17 Oct: "Hm, Fis7,
             // Es-Dur, B und C#m" is two runs, and its B is B flat)
-            let german = tokens.contains { $0.chord.letter == 7 || $0.chord.named }
-            let spelled = tokens.indices.map { i in
-                spells(i, tokens, ns, members: run[i] >= 0 ? members[run[i]]! : [i],
-                       suffixedRun: run[i] >= 0 && suffixedRun.contains(run[i]))
+            let german = tokens.contains { $0.chord.map { $0.letter == 7 || $0.named } == true }
+            var spelled = tokens.indices.map { i in
+                tokens[i].chord != nil && spells(i, tokens, ns, members: run[i] >= 0 ? members[run[i]]! : [i],
+                                                 suffixedRun: run[i] >= 0 && suffixedRun.contains(run[i]))
+            }
+            if style.marks != nil {
+                for (i, token) in tokens.enumerated() {
+                    guard let mark = token.mark else { continue }
+                    let sentence = Self.sentence(ns, around: token.range.location)
+                    let aboutMusic = musicWords?.matches(ns.substring(with: sentence)) == true
+                        || tokens.contains { $0.chord.map(strong) == true && NSIntersectionRange($0.range, sentence).length > 0 }
+                    let runMates = run[i] >= 0 ? members[run[i]]! : []
+                    let chordMates = runMates.contains { tokens[$0].chord != nil && spelled[$0] }
+                    switch mark {
+                    case .noChord:
+                        // among chords; "N.C." also after a colon or a music word ("Estribillo: N.C."), never "NC"
+                        // alone or a place's "N.C." ("de N.C.", "aus N.C.": the review, 18 Oct)
+                        guard chordMates || aboutMusic && ChordSpeller.chartSpot(
+                            token.range, ns, music: { self.musicWords?.matches($0) == true }, words: []) else { continue }
+                    case .again:  // the bar again: only between chords
+                        guard chordMates else { continue }
+                    case .times(_, let bracketed):
+                        // after a chord said in its run, a section's name ("Estribillo x2") or a bracket ("(x2)",
+                        // "[Estribillo] x2") about music
+                        let afterChord = runMates.contains { $0 < i && spelled[$0] }
+                        let before = ns.substring(to: token.range.location).trimmingCharacters(in: .whitespaces)
+                        let afterBracket = bracketed || before.last.map { ")]".contains($0) } == true
+                        let word = String(before.reversed().prefix { $0.isLetter }.reversed())
+                        let saysChords = aboutMusic || tokens.indices.contains {
+                            spelled[$0] && NSIntersectionRange(tokens[$0].range, sentence).length > 0
+                        }
+                        // a bracket only at the end of a clause (the review, 18 Oct: "cuerdas (x2) para" is a quantity)
+                        guard afterChord || musicWords?.matches(word) == true
+                            || afterBracket && saysChords && ChordSpeller.endsClause(after: token.range, ns) else { continue }
+                    }
+                    spelled[i] = true
+                }
             }
             var out = ""
             var last = 0
             for (i, token) in tokens.enumerated() {
                 let start = token.range.location
-                if spelled[i], i > 0, spelled[i - 1], run[i] >= 0, run[i - 1] == run[i],
-                   gaps[i].contains(where: { "-–—|".contains($0) }) {
+                let joined = spelled[i] && i > 0 && spelled[i - 1] && run[i] >= 0 && run[i - 1] == run[i]
+                if joined, Self.symbolGap.matches(gaps[i]), !Self.commaGap.matches(gaps[i]) {
                     out += style.dash
                 } else {
                     out += ns.substring(with: NSRange(location: last, length: start - last))
                 }
-                if spelled[i] {
-                    out += say(token.chord, hasH: german, symbols: run[i] >= 0 && hasSymbols.contains(run[i]))
-                } else if !lettersStyle, token.chord.accidental == "#" || token.chord.accidental == "♯" {
-                    // "C#": the programming language, never "do sostenido"
-                    out += token.chord.root + " sharp" + token.chord.quality + token.chord.tail
+                if let mark = token.mark, spelled[i], let words = style.marks {
+                    out += words.said(mark)
+                    if mark == .noChord, ns.substring(with: token.range).hasSuffix("."),
+                       ChordSpeller.endsSentence(after: token.range, ns),
+                       !(i + 1 < tokens.count && run[i] >= 0 && run[i + 1] == run[i]) {
+                        out += "."  // its dot ended the sentence too
+                    }
+                } else if let chord = token.chord, spelled[i] {
+                    out += say(chord, hasH: german, symbols: run[i] >= 0 && hasSymbols.contains(run[i]))
+                } else if let chord = token.chord, !lettersStyle, chord.accidental == "#" || chord.accidental == "♯" {
+                    // "C#": the programming language, never "do sostenido"; the rest as written ("C#/E": "C sharp/E")
+                    out += chord.root + " sharp" + chord.written.dropFirst(chord.root.count + chord.accidental.count)
                 } else {
-                    out += token.chord.written
+                    out += ns.substring(with: token.range)
                 }
                 last = NSMaxRange(token.range)
             }
             return out + ns.substring(from: last)
         }
 
+        /// The reading without the forms at `location` ("Cm7" of "Cm7(b5)/E"), or nil.
+        private func plainMatch(at location: Int, in ns: NSString) -> Pattern.Match? {
+            guard let plain = plainCandidate, let found = plain.regex.firstMatch(
+                in: ns as String, options: [.anchored, .withTransparentBounds],
+                range: NSRange(location: location, length: ns.length - location)) else { return nil }
+            let groups = (0..<found.numberOfRanges).map { index in
+                found.range(at: index).location == NSNotFound ? "" : ns.substring(with: found.range(at: index))
+            }
+            return Pattern.Match(groups: groups, range: found.range, text: ns)
+        }
+
         /// Whether token `i` is said as a chord: in its run's `members` (itself alone outside a run), see the type's
         /// note for the context each kind needs.
         private func spells(_ i: Int, _ tokens: [Token], _ ns: NSString, members: [Int], suffixedRun: Bool) -> Bool {
-            let chord = tokens[i].chord
+            guard let chord = tokens[i].chord else { return false }
             if lettersStyle { return suffixedRun || chord.suffixed && !style.words.contains(chord.written) }
             if strong(chord) { return true }
             guard chord.suffixed || suffixedRun else { return false }
@@ -224,14 +366,23 @@ enum ChordWords {
                 || Self.onlyPunctuation.matches(before) && Self.onlyPunctuation.matches(after)
                 || musicWords?.matches(ns.substring(with: sentence)) == true
             if !chord.suffixed { return suffixedRun && musical }  // a bare letter or syllable in a run
-            return musical || tokens.contains { strong($0.chord) && NSIntersectionRange($0.range, sentence).length > 0 }
+            return musical || tokens.contains { $0.chord.map(strong) == true && NSIntersectionRange($0.range, sentence).length > 0 }
         }
 
         // MARK: Saying one chord
 
         private func say(_ chord: Chord, hasH: Bool, symbols: Bool) -> String {
             if !chord.tail.isEmpty { return deferred(chord) }
-            let minor = chord.quality == "m" || chord.quality == "m7"
+            var extras = ""  // alterations and "no3", after the chord's own words
+            if let forms = style.forms {
+                extras = (chord.alterations.map { ($0.sharp ? forms.sharp : forms.flat) + " " + $0.number }
+                    + (chord.noThird ? [forms.noThird] : [])).map { " " + $0 }.joined()
+            }
+            return name(chord, hasH: hasH, symbols: symbols) + extras
+        }
+
+        private func name(_ chord: Chord, hasH: Bool, symbols: Bool) -> String {
+            let minor = chord.quality == "m" || chord.quality == "m7" || chord.quality == "mMaj7"
             let seventh = chord.quality == "7" || chord.quality == "m7"
             switch style.roots {
             case .solfege(let names):
@@ -239,28 +390,28 @@ enum ChordWords {
                     ? chord.root.lowercased() : names[chord.letter]]
                 if chord.sharp { words.append(style.sharp) } else if chord.flat { words.append(style.flat) }
                 if minor { words.append(style.minor) }
-                if seventh { words.append(style.seventh) } else if chord.quality == "maj7" { words.append(style.majorSeventh) }
+                if seventh { words.append(style.seventh) } else if chord.majorSeventh { words.append(style.majorSeventh) }
                 return words.joined(separator: " ")
             case .russian(let names):
                 var root = chord.letter == 7 ? "си" : names[chord.letter]
                 if chord.letter == 6, hasH || chord.flat { root = "си-бемоль" }
                 else if chord.sharp { root += "-" + style.sharp } else if chord.flat { root += "-" + style.flat }
                 return root + (minor ? " " + style.minor : "") + (seventh ? " " + style.seventh : "")
-                    + (chord.quality == "maj7" ? " " + style.majorSeventh : "")
+                    + (chord.majorSeventh ? " " + style.majorSeventh : "")
             case .german(let lowerMinor):
                 var name = germanName(chord, h: true)
                 if chord.letter == 6, !chord.named, chord.accidental.isEmpty, symbols, !hasH { name = "H" }  // English B
                 let root = minor ? (lowerMinor ? name.lowercased() : name) + "-" + style.minor : name
-                return root + (seventh ? " " + style.seventh : "") + (chord.quality == "maj7" ? " " + style.majorSeventh : "")
+                return root + (seventh ? " " + style.seventh : "") + (chord.majorSeventh ? " " + style.majorSeventh : "")
             case .dutch:
                 let name = germanName(chord, h: false)
                 return name + (minor ? " " + style.minor : "") + (seventh ? " " + style.seventh : "")
-                    + (chord.quality == "maj7" ? " " + style.majorSeventh : "")
+                    + (chord.majorSeventh ? " " + style.majorSeventh : "")
             case .letters(let names, let joiner):
                 var words = [names[chord.letter]]
                 if chord.sharp { words.append(style.sharp) } else if chord.flat { words.append(style.flat) }
                 if minor { words.append(style.minor) }
-                if seventh { words.append(style.seventh) } else if chord.quality == "maj7" { words.append(style.majorSeventh) }
+                if seventh { words.append(style.seventh) } else if chord.majorSeventh { words.append(style.majorSeventh) }
                 return words.joined(separator: joiner)
             }
         }
