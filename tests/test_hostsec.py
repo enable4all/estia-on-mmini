@@ -1109,4 +1109,6 @@ def test_doctor_names_the_security_level_last(
 
 def test_the_neutral_line_names_the_nuclear_level() -> None:
     assert hostsec.NUCLEAR_LINE.startswith("the nuclear level: the firewall,")
+    # the same words as setup's line about it, on the same screen (owner, 19 Oct; review, 19 Oct)
+    assert "only for deeply technical users" in hostsec.NUCLEAR_LINE
     assert "default" not in hostsec.NUCLEAR_LINE

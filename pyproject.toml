@@ -1,6 +1,6 @@
 [project]
 name = "local-assistant"
-version = "0.9.4"
+version = "0.9.5"
 description = "Estia: an insanely secure AI thinking partner living at home, on your own Mac, reached only through Signal (local model via Ollama)"
 readme = "README.md"
 license = "MIT"
@@ -31,6 +31,9 @@ ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 "tests/**" = ["ASYNC110", "ASYNC240"]
 # the Gemma test set reads its sample photo directly
 "evals/**" = ["ASYNC240"]
+# the star imports of the submodules sit at the end of the file (E402), and bring in names the file may use (F403, F405)
+# or not (F401): prompts/__init__.py re-exports every submodule's public names
+"src/local_assistant/prompts/__init__.py" = ["E402", "F401", "F403", "F405"]
 
 [tool.mypy]
 python_version = "3.13"

@@ -1,9 +1,10 @@
 """scripts/harden.sh: the Mac's security around her, one setting at a time.
 
 Each setting is shown with its state and one line on why it matters. What can be applied is applied only on a yes, and
-sudo is asked once, before the first change (sudo's own cached sign-in; fixed argv, never a shell). The hardened level:
-SSH goes to keys only only when Remote Login is on and your authorized_keys holds a key: a drop-in file, checked with
-`sshd -t` and taken back if sshd refuses it; this session stays open. Passwordless sudo is read from what sudo lists
+sudo is asked when first needed (sudo's own cached sign-in; fixed argv, never a shell), and once more after a rule
+that skips the password is removed. The hardened level: SSH goes to keys only only when Remote Login is on and a key in
+your authorized_keys would log in (hostsec.key_login_problem): a drop-in file, checked with `sshd -t` and taken back if
+sshd refuses it; this session stays open, and the line after says how to take it back from it. Passwordless sudo is read from what sudo lists
 for you (/etc/sudoers and /etc/sudoers.d alike; with your password also the Defaults that share one sign-in with every
 program of yours); a file in /etc/sudoers.d holding only such rules is offered for removal only while sudo also works
 with your password, anything else is shown with its visudo fix. Her files are made private. What only you can change (FileVault,
@@ -52,12 +53,38 @@ QUESTIONS = {
         "Take python3 and ruby (programs that run scripts) off the firewall's list? With the firewall on, a script "
         "run with them then no longer takes connections from other machines."
     ),
-    "ssh_password": "Allow SSH with keys only? This session stays open: test a new login before you close it.",
-    "data_modes": "Make her files private (folders 0700, files 0600)?",
+    "ssh_password": (
+        "Keys only: only a device whose key is in ~/.ssh/authorized_keys logs in over SSH, never with a password. This\n"
+        "  session stays open, and the step prints how to take it back from here. No: passwords keep working.\n"
+        "Allow SSH with keys only? Recommendation: yes, then test a new login before you close this one."
+    ),
+    # Enter takes yes only for rule files that give you (or the admins) every program and nothing else
+    # (hostsec.rule_for_you_alone): removing those stops nothing another account or a tool of yours set up
+    "sudoers": (
+        "Remove {files}, the rule file(s) that give you admin rights without your password? No keeps them. "
+        "Recommendation: yes."
+    ),
+    "sudoers_others": (
+        "Remove {files}, the rule file(s) that give admin rights without a password, to another account too or for\n"
+        "  some programs only? A script or scheduled job that uses them then stops at the password.\n"
+        "  Recommendation: yes, unless something here needs them."
+    ),
+    "data_modes": (
+        "Make her files private, so no other account on this Mac can read them? No leaves them as they are. "
+        "Recommendation: yes."
+    ),
     "keychain": "Lock your login keychain after 15 minutes and at sleep? macOS then asks for your password more often.",
-    "registration_lock": "Set a Registration Lock PIN for her number now? She is stopped for about a minute.",
+    "registration_lock": (
+        "Set a Registration Lock PIN for her number now? She is stopped for about a minute. No leaves it off. "
+        "Recommendation: yes."
+    ),
 }
 NUCLEAR_KEYS = ("firewall", "stealth", "firewall_apps", "keychain")  # only with --nuclear
+# Enter takes the safe answer, yes, for the hardened level's changes (owner, 19 Oct), none of which can lock anyone
+# out: keys only is offered only once a key login is set up (hostsec.key_login_problem), a passwordless sudo rule is
+# removed only while sudo works with your password, and Enter removes only yours for every program ("sudoers"; another
+# account's or one for some programs is "sudoers_others", Enter a no); never for the nuclear level's
+ENTER_YES = frozenset({"ssh_password", "sudoers", "data_modes", "registration_lock"})
 NUCLEAR_WARNING = (
     "--nuclear, the nuclear option: the strictest settings, the nuclear level. They may stop other services on this "
     "Mac:",
@@ -72,8 +99,29 @@ LEVEL_HARDENED = f"Security level: {hostsec.HARDENED} (the security step; {hosts
 LEVEL_NUCLEAR = f"Security level: {hostsec.NUCLEAR_LEVEL} ({hostsec.HARDENED}, plus the settings above)."
 LEVEL_REACHED = "Doctor names the level reached: {doctor}"
 LOCK_NOTE = (
-    "Registration Lock: a PIN Signal asks for before her number can be registered on another device. Store it in your "
-    "password manager: without it and her data, the number is locked for 7 days."
+    "Registration Lock: a PIN Signal asks for before her number can be registered on another device, so her SMS code\n"
+    "  alone (a SIM swap, a lapsed prepaid number) is not enough. Keep it in your password manager: without it and her\n"
+    "  data, the number is locked for 7 days."
+)
+PIN_ASK = "Registration Lock PIN, a new one (hidden: nothing shows while you type; q skips): "
+PIN_AGAIN = "The same PIN again (hidden: nothing shows while you type): "
+# the Mac password: when first needed (sudo asks again only once 5 minutes have passed since admin rights were last
+# used: each use starts its 5 minutes again), and once more after a rule that skips it is removed (sudo -k, sudo -v)
+PASSWORD_WHEN = "Your Mac password is asked when first needed, and once more after a rule that skips it is removed."
+PASSWORD_YOURS = (
+    "Your Mac password now, if asked (once 5 minutes have passed since admin rights were last used; nothing shows\n"
+    "  while you type): for the changes you said yes to."
+)
+PASSWORD_HERS = (
+    "Your Mac password now, if asked (once 5 minutes have passed since admin rights were last used; nothing shows\n"
+    "  while you type): to read her files as her, and for the changes you said yes to."
+)
+PASSWORD_ONCE_MORE = (
+    "Your Mac password once more (nothing shows while you type): to check that admin rights now ask for it."
+)
+SSH_DONE = (
+    "✓ SSH: keys only from the next login on. Test a new login from your laptop before you close this one; if it\n"
+    "  fails, type this here to take it back: {undo}"
 )
 PHONE_CHECKLIST = (
     "On your phone and the device with her SIM (no Mac needed):",
@@ -268,7 +316,7 @@ class Harden:
         owner: str,
         owner_home: Path,
         own_user: bool,
-        ask: Callable[[str], bool],
+        ask: Callable[[str, bool], bool],
         hidden: Callable[[str], str],
         say: Callable[[str], None],
         dry_run: bool | None = None,
@@ -302,19 +350,20 @@ class Harden:
         if check.status != "ok" and check.fix:
             self.say(f"    → {check.fix}")
 
-    def offer(self, question: str, commands: Sequence[Sequence[str]] = ()) -> bool:
+    def offer(self, question: str, commands: Sequence[Sequence[str]] = (), *, key: str = "") -> bool:
+        """The question (a dry run only shows it and its commands); Enter takes yes only for a key in ENTER_YES."""
         if self.dry_run:
             self.say(f"  would ask: {question}")
             for argv in commands:
                 self.say("  would run: " + " ".join(argv))
             return False
-        return self.ask(question)
+        return self.ask(question, key in ENTER_YES)
 
     def sudo(self) -> bool:
         """sudo's password once (its own cached sign-in covers the rest)."""
         if self.sudo_ready:
             return True
-        self.say("sudo asks for your Mac password once now, for the changes you said yes to.")
+        self.say(PASSWORD_HERS if self.own_user else PASSWORD_YOURS)
         code, _ = self.host.run([SUDO, "-v"])
         self.sudo_ready = code == 0
         if not self.sudo_ready:
@@ -367,7 +416,9 @@ class Harden:
                 (SUDO, "-n", SOCKETFILTERFW, "--add", program),
                 (SUDO, "-n", SOCKETFILTERFW, "--unblockapp", program),
             )
-            if self.offer(f"Let {name} keep answering other machines on port {port} ({program})?", argv):
+            if self.offer(
+                f"Let {name} keep answering other machines on port {port} ({program})?", argv, key="firewall"
+            ):
                 failed = [cmd for cmd in argv if self.host.run(list(cmd))[0] != 0]
                 self.say(f"{'✗' if failed else '✓'} Firewall: {name} {'not changed' if failed else 'allowed'}")
 
@@ -401,9 +452,7 @@ class Harden:
                 self.host.run([SUDO, "-n", hostsec.RM, "-f", str(hostsec.SSH_DROP_IN_PATH)])
                 self.say("✗ SSH: sshd refused the new setting, so it was taken back; passwords still work")
                 return
-        self.say(
-            "✓ SSH: keys only from the next login on. Test a new login from your laptop before you close this one."
-        )
+        self.say(SSH_DONE.format(undo=f"{SUDO} {hostsec.RM} {hostsec.SSH_DROP_IN_PATH}"))
 
     # ---------------------------------------------------------------- sudoers
 
@@ -447,12 +496,18 @@ class Harden:
                 "Add your account to the admins first (System Settings → Users & Groups)."
             )
             return
-        rule_files = ", ".join(Path(argv[-1]).name for argv in check.apply)
-        question = f"Remove the passwordless sudo rule(s) {rule_files}? sudo then asks for your password, as it should."
-        if not self.offer(question, check.apply) or not self.sudo():
+        removed = [Path(argv[-1]).name for argv in check.apply]
+        yours = all(
+            hostsec.rule_for_you_alone(line, self.owner)
+            for name in removed
+            for line in hostsec.sudoers_lines(contents.get(name))
+        )
+        key = "sudoers" if yours else "sudoers_others"  # Enter: yes only for yours (ENTER_YES)
+        if not self.offer(QUESTIONS[key].format(files=", ".join(removed)), check.apply, key=key) or not self.sudo():
             return
         self.apply(check)
         self.host.run([SUDO, "-k"])
+        self.say(PASSWORD_ONCE_MORE)
         code, _ = self.host.run([SUDO, "-v"])
         self.say(
             "✓ sudo asks for your password now." if code == 0 else "! sudo -v failed: check sudo in a new terminal."
@@ -463,14 +518,14 @@ class Harden:
     def read_pin(self) -> str | None:
         """A PIN typed twice, hidden; q (or no terminal) stops."""
         while True:
-            pin = self.hidden("Registration Lock PIN (hidden; q to skip): ").strip()
+            pin = self.hidden(PIN_ASK).strip()
             if pin.lower() == "q":
                 return None
             problem = pin_problem(pin)
             if problem:
                 self.say(f"  The PIN needs {problem}.")
                 continue
-            if self.hidden("The same PIN again (hidden): ").strip() != pin:
+            if self.hidden(PIN_AGAIN).strip() != pin:
                 self.say("  The two did not match; type it again.")
                 continue
             return pin
@@ -482,7 +537,7 @@ class Harden:
             [*self.pin_helper(), "(the PIN on stdin)"],
             [SUDO, "-n", LAUNCHCTL, "bootstrap", "system", str(PLIST)],
         )
-        if not self.offer(QUESTIONS["registration_lock"], steps):
+        if not self.offer(QUESTIONS["registration_lock"], steps, key="registration_lock"):
             return
         pin = self.read_pin()
         if pin is None:
@@ -552,8 +607,7 @@ class Harden:
             self.say("")
         self.say(LEVEL_NUCLEAR if self.nuclear else LEVEL_HARDENED)
         self.say(
-            "The Mac's security around her: each setting, why it matters, and on your yes the fix. "
-            "sudo is asked once, before the first change."
+            f"The Mac's security around her: each setting, why it matters, and on your yes the fix. {PASSWORD_WHEN}"
         )
         strict = (
             [
@@ -593,7 +647,7 @@ class Harden:
             if check.status != "ok"
             and check.apply
             and check.key not in ("sudoers", "data_modes", "registration_lock")  # her two: below, asked once
-            and self.offer(self.question(check, listening), check.apply)
+            and self.offer(self.question(check, listening), check.apply, key=check.key)
         ]
         wants_lock = False
         needs_root = any(argv[0] == SUDO for check in accepted for argv in check.apply)
@@ -616,7 +670,8 @@ class Harden:
             if self.own_user:
                 self.show(check)
             private = check.key == "data_modes" and check.status != "ok" and bool(check.apply)  # a link: no chmod
-            if private and self.offer(QUESTIONS["data_modes"], check.apply) and (self.root_free(check) or self.sudo()):
+            asked = private and self.offer(QUESTIONS["data_modes"], check.apply, key="data_modes")
+            if asked and (self.root_free(check) or self.sudo()):
                 self.apply(check)
             no_account = check.text.startswith(hostsec.NO_ACCOUNT)
             if check.key == "registration_lock" and (check.status != "ok" or self.new_pin) and not no_account:
@@ -639,6 +694,24 @@ class Harden:
             self.say(f"! Her files and Registration Lock: could not be read as {ownuser.ROLE_USER}")
             return []
         return [her_check(key, value) for key, value in data.items() if key in HER_PARTS and isinstance(value, dict)]
+
+
+def in_terminal() -> bool:
+    """The person's own terminal both shows the question and types the answer: only then may Enter mean yes (output
+    sent to a file, `scripts/setup.sh > setup.log`, would hide the question; a pipe types no one's answer)."""
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def terminal_ask(question: str, default: bool = False) -> bool:
+    """y or n from the terminal; Enter takes `default` ([Y/n] or [y/N] says which) only in a terminal (`in_terminal`):
+    a pipe, output sent to a file and the end of input (Ctrl-D) are always a no."""
+    enter = default and in_terminal()
+    try:
+        answer = input(f"{question} {'[Y/n]' if enter else '[y/N]'} ").strip().lower()
+    except EOFError:
+        print()
+        return False
+    return answer.startswith("y") if answer else enter
 
 
 def own_user_installed(host: Host) -> bool:
@@ -670,13 +743,6 @@ def main(argv: list[str] | None = None) -> int:
     host = Host(estia_root(), dry_run=args.dry_run)
     me = pwd.getpwuid(os.getuid())
 
-    def ask(question: str) -> bool:
-        try:
-            return input(f"{question} [y/N] ").strip().lower().startswith("y")
-        except EOFError:
-            print()
-            return False
-
     def hidden(prompt: str) -> str:
         try:
             return getpass.getpass(prompt)
@@ -688,7 +754,7 @@ def main(argv: list[str] | None = None) -> int:
         owner=me.pw_name,
         owner_home=Path(os.environ.get("HOME") or me.pw_dir),
         own_user=own_user_installed(host),
-        ask=ask,
+        ask=terminal_ask,
         hidden=hidden,
         say=lambda text: print(text, flush=True),
         nuclear=args.nuclear,

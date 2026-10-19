@@ -25,6 +25,7 @@ from local_assistant.signal_io import SignalClient
 from local_assistant.store import Store
 from local_assistant.tools import Tools, Turn
 from local_assistant.web_search import WebResult, WebResults
+from tests.agent_docs import agent_docs
 from tests.conftest import ME, T0, TZ
 from tests.fakes.fake_gemma import FakeGemma, text, tool
 from tests.fakes.fake_web import FakeWeb
@@ -42,7 +43,8 @@ def test_chords_is_an_extra_off_without_its_section() -> None:
 
 
 # The request's parts with [chords] off, at 2acb640 (before the extra): its rules, a call's rules, the tools, /help.
-# A text in every request once cost call_goodbye 30 points (AGENTS.md, Gotchas), so without the extra nothing changes.
+# A text in every request once cost call_goodbye 30 points (docs/agents/prompts-evals.md, Gotchas), so without the
+# extra nothing changes.
 BEFORE_CHORDS = {
     "plain": {
         "rules": "882740a167731b5133cb87dc24866a5e6151254b8092938e3eae0b762e7f8824",
@@ -159,7 +161,7 @@ def test_the_tool_is_offered_only_with_chords_and_its_description_is_short(store
     # call got chords "G" with shapes "G"; it is a capo's target, as to_key is a move's
     assert "capo" not in properties["chords"]["description"] + properties["from_key"]["description"]
     assert "capo: the key to sound in" in properties["to_key"]["description"]
-    for words in ("YouTube", "Spotify", "guitartuna", "Ultimate"):  # no site or brand name (AGENTS.md, Gotchas)
+    for words in ("YouTube", "Spotify", "guitartuna", "Ultimate"):  # no site or brand name (prompts-evals.md, Gotchas)
         assert words not in json.dumps(CHORDS_SCHEMA)
     assert "chords" in INSTANT_TOOLS  # no "let me check" on a call
 
@@ -1254,7 +1256,7 @@ async def chord_call(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gemma: Fak
         **settings,
     )
     harness.app.tools._web = FakeWeb({"spooky": [SPOOKY], "news": [NOS]})
-    # the start done (recovery ran): a note stored before recovery is sent twice, once by it (AGENTS.md, Gotchas)
+    # the start done (recovery ran): a note stored before recovery is sent twice, once by it (core.md, Gotchas)
     await until(lambda: harness.app.store.get_state(ALIVE_KEY) is not None)
     return harness
 
@@ -1380,7 +1382,7 @@ async def test_a_summary_line_with_another_chord_is_left_out(tmp_path: Path, mon
         await stop(harness)
 
 
-# ---- the docs (design 5): GUIDE.md's part and rows, README.md's bullet, AGENTS.md ----
+# ---- the docs (design 5): GUIDE.md's part and rows, README.md's bullet, AGENTS.md and its rule files ----
 
 ROOT = Path(__file__).resolve().parents[1]
 SAME = (  # the same fact in the same words everywhere
@@ -1404,7 +1406,9 @@ def test_the_guide_has_the_chords_part_and_its_rows() -> None:
         "At most 64 chords and 1,000 characters a request.",
         "A web search keeps at most 1,200 characters of each page",
         "Nothing to install.",
-        "`scripts/setup.sh --extras` lists it, and a yes adds `[chords]` to her config.",
+        # GUIDE, 19 Oct (206d3d6): in her own user setup prints the line, before it setup adds it (setup.chords_extra)
+        "`scripts/setup.sh --extras` lists it. In her own user her config is hers alone, so a yes prints the one line "
+        "to add to it, `[chords]`, and the restart; before her own user, a yes adds the line itself.",
         # review, minor: the check's known gaps (design 3.7), in the part's own limits
         "after the code's work, its chords said again, in another order or with one left out, pass",
         "without it, her chords count by their root alone",
@@ -1418,7 +1422,8 @@ def test_the_guide_has_the_chords_part_and_its_rows() -> None:
     ):
         assert words in part, words
     assert (
-        "| Transposing chords | `[chords]` | Nothing to install: setup adds it (`scripts/setup.sh --extras`) |" in guide
+        "| Transposing chords | `[chords]` | Nothing to install: `scripts/setup.sh --extras`, then add the line it prints, "
+        "`[chords]`, to her config |" in guide
     )
     assert f'| Transposing chords | "Transpose Am F C G up 2" | {SAME} An extra, off by default. |' in guide
     for banned in ("exactly", "never in the model's head", "http://", "<"):  # the site's rules, and plain copy
@@ -1456,15 +1461,16 @@ def test_the_readme_has_the_chords_bullet() -> None:
 
 
 def test_agents_names_the_modules_and_the_rule() -> None:
-    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    agents = agent_docs()  # the chords' modules and rule are in docs/agents/web-maps-music-video.md (AGENTS.md diet)
     for words in ("`theory` ([chords]", "`chords` ([chords]", "Chords ([chords]", "tests/test_theory.py"):
         assert words in agents, words
 
 
 def test_the_cost_in_every_request_is_measured_and_stated(tmp_path: Path) -> None:
     """Review I6: the design's estimate (265 tokens on texts, 225 on calls) was never measured. Measured here with web
-    search and calls on (the owner's install), and stated in AGENTS.md: a change to the tool or its rules shows here,
-    and the call_goodbye gate (evals.gemma_suite --ab) decides whether the tool stays on calls."""
+    search and calls on (the owner's install), and stated in the agents' docs (the chords rule in
+    docs/agents/web-maps-music-video.md, the A/B command in prompts-evals.md): a change to the tool or its rules
+    shows here, and the call_goodbye gate (evals.gemma_suite --ab) decides whether the tool stays on calls."""
     setup = SETUPS["web_calls"]
     off, on = bridge(tmp_path / "off", **setup), bridge(tmp_path / "on", chords_enabled=True, **setup)
     try:
@@ -1477,7 +1483,7 @@ def test_the_cost_in_every_request_is_measured_and_stated(tmp_path: Path) -> Non
         off.store.close()
         on.store.close()
     assert (rules, call_rules, tool) == (616, 439, 1_127)
-    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    agents = agent_docs()  # AGENTS.md and its rule files (the AGENTS.md diet)
     texts, calls = rules + tool, call_rules + tool
     assert f"{texts:,} characters on texts (about {round(texts / 4, -1):.0f} tokens)" in agents
     assert f"{calls:,} on calls (about {round(calls / 4, -1):.0f})" in agents

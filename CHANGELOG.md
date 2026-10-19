@@ -7,6 +7,69 @@ to 0.9.3 were written on GitHub and say more (security, requirements, install, t
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-10-19
+
+### Changed
+
+- **New addresses:** the code is at github.com/enable4all/estia-one-mmini and the website at estia.one; the old
+  addresses still lead there. Her default name stays Estia.
+- **For contributors:** `app.py`'s call, documents, start-up and status sides are files of their own (`call_host.py`,
+  `documents_host.py`, `lifecycle.py`, `status_host.py`); `prompts.py` is the package `prompts/`, each area's lines in
+  a file of its own, every name still read as `prompts.<name>`; `AGENTS.md` is a short map, and each area's rules,
+  commands and known gaps are in `docs/agents/` (Claude Code loads them by the files they cover). No change in what she
+  does.
+- **Setup's questions explain themselves:** each says what it is for, what yes and no do, and "Recommendation: …"
+  before its Enter hint, in plain words, in lines that fit the terminal. Every hidden prompt (the captcha link, the SMS
+  code, the PINs) says nothing shows while you type, and the Mac password lines say it is asked again only once 5
+  minutes have passed since admin rights were last used (and once more in the security step after it removes a rule
+  that skips the password). On 16 or 24 GB the smaller model's question says to use it with caution, and what that
+  means for her answers.
+- **Enter takes the safe answer:** yes at the Registration Lock, the move into her own user (not over a remote login
+  without `screen` or `tmux`, where setup says to answer no), the security step and its offers (SSH with keys only,
+  removing your own admin rule that skips your password, her files private, her Registration Lock; another account's
+  admin rule, or one for some programs only, keeps Enter as a no) and the question that closes what every account may
+  open in your home; never at the nuclear level's settings. The end of input, a Ctrl-C, no terminal and output sent to
+  a file are never a yes; every other question keeps Enter as a no.
+- **The close question in plain words:** why closing matters (her code never opens those names, but a program that
+  took over her account could), what closing changes (her account and the Mac's own accounts that programs run as can
+  no longer open them, so a guest file share or a web page served from them stops too) and what it never breaks (you
+  keep full access, people who log in on this Mac keep what they can open today, her share and Ollama keep working),
+  with the command that runs (`chmod -h o-rwx`; for an `~/opt` that holds Ollama's build, `chmod -h o-r`).
+- **The installing AI asks first:** SETUP-WITH-YOUR-AI.md has it show the list of extras (what each does, what leaves
+  the Mac and to which service, what it needs) and ask which ones, and ask whether she should see projects and which
+  folder in your home holds them; the briefing gives each question's recommendation, and holds the list of extras as
+  setup prints it. The extras list in setup says what each needs (an account, a sign-in, a key) and names the service
+  each sends to. The security step names the nuclear level in one line, only for deeply technical users
+  (`scripts/harden.sh --nuclear`).
+
+### Fixed
+
+- **Setup's smaller frictions:** her number typed with spaces or dashes no longer stops setup; q at the SMS code no
+  longer says "Verification failed"; the move's end no longer prints "Her projects folder" with projects off;
+  "Install it now?" no longer counts two service files on a new install; the model's size is said one way everywhere
+  (7.7 GB, 18.3 GB); README.md says to run setup inside `screen` over a remote login.
+- **The security step's Mac password:** asked again right after a rule that skips it is removed, now with a line that
+  says why first.
+- **The guide on transposing chords:** in her own user, `scripts/setup.sh --extras` prints the line to add to her
+  config, `[chords]`, and the restart; it writes nothing (her config is hers alone). The guide said setup adds it.
+
+### Security
+
+- **What every account may open in your home, closed with one yes:** both share scripts (`scripts/share-projects.sh`,
+  `scripts/share-documents.sh`) name it as before, then ask once whether to close it to her account, with no admin
+  rights needed (`chmod -h o-rwx`; people who log in on this Mac keep what they can open today). Enter closes it (the
+  recommendation); a no or Ctrl-C keeps everything as it is; without a terminal and in a dry run nothing is asked. An
+  `~/opt` that holds Ollama's own build keeps only her way through it, which doctor needs to read that build as her
+  (`chmod -h o-r`). A name an access rule still opens to her is never called closed.
+- **Doctor looks up more names in your home:** the notes and settings of Claude Code, Codex and Gemini CLI
+  (`~/.claude`, `~/.claude.json`, `~/.codex`, `~/.gemini`), Ollama's models (`~/.ollama`) and the Rust, Swift and
+  matplotlib folders (`~/.cargo`, `~/.rustup`, `~/.swiftpm`, `~/.matplotlib`). Before, an open `~/.claude` went
+  unnamed.
+- **SSH with keys only is offered only once a key login is set up:** a key in `~/.ssh/authorized_keys` that SSH would
+  take (keys on, read from that file, and the file, the file a link there leads to, `~/.ssh` and your home not
+  changeable by other accounts). Before, a key SSH ignores still got the offer, and a yes locked every remote login
+  out. After the change, the step says how to take it back from the session that is still open.
+
 ## [0.9.4] - 2026-10-19
 
 ### Added
@@ -171,9 +234,10 @@ The first public release.
   code-level rules, not eliminated; signal-cli is an unofficial Signal client; on 16 or 24 GB the smaller model,
   Gemma 4 12B, failed some of her safety tests.
 
-[Unreleased]: https://github.com/enable4all/estia-on-mmini/compare/v0.9.4...HEAD
-[0.9.4]: https://github.com/enable4all/estia-on-mmini/compare/v0.9.3...v0.9.4
-[0.9.3]: https://github.com/enable4all/estia-on-mmini/compare/v0.9.2...v0.9.3
-[0.9.2]: https://github.com/enable4all/estia-on-mmini/compare/v0.9.1...v0.9.2
-[0.9.1]: https://github.com/enable4all/estia-on-mmini/compare/v0.9.0...v0.9.1
-[0.9.0]: https://github.com/enable4all/estia-on-mmini/releases/tag/v0.9.0
+[Unreleased]: https://github.com/enable4all/estia-one-mmini/compare/v0.9.5...HEAD
+[0.9.5]: https://github.com/enable4all/estia-one-mmini/compare/v0.9.4...v0.9.5
+[0.9.4]: https://github.com/enable4all/estia-one-mmini/compare/v0.9.3...v0.9.4
+[0.9.3]: https://github.com/enable4all/estia-one-mmini/compare/v0.9.2...v0.9.3
+[0.9.2]: https://github.com/enable4all/estia-one-mmini/compare/v0.9.1...v0.9.2
+[0.9.1]: https://github.com/enable4all/estia-one-mmini/compare/v0.9.0...v0.9.1
+[0.9.0]: https://github.com/enable4all/estia-one-mmini/releases/tag/v0.9.0

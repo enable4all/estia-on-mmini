@@ -878,9 +878,10 @@ async def test_macos_refusing_the_folder_is_named_apart_from_a_missing_share(
 
 
 def test_the_helper_gets_foundations_home_from_home(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Her account's record keeps /var/empty (AGENTS.md, Gotchas): a helper given HOME alone gets that as Foundation's
-    home, and Vision's text recognition fails at once (live, 15 Oct: every warm-up in under 0.3 s; text pages still
-    read). The helper gets HOME as Foundation's home too, whatever the bridge's own CFFIXED_USER_HOME says."""
+    """Her account's record keeps /var/empty (docs/agents/own-user-deploy.md, Gotchas): a helper given HOME alone
+    gets that as Foundation's home, and Vision's text recognition fails at once (live, 15 Oct: every warm-up in under
+    0.3 s; text pages still read). The helper gets HOME as Foundation's home too, whatever the bridge's own
+    CFFIXED_USER_HOME says."""
     monkeypatch.setenv("HOME", "/var/estia")
     monkeypatch.setenv("CFFIXED_USER_HOME", "/var/empty")
     env = helper_env()

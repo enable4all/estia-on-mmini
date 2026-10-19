@@ -4,6 +4,9 @@ Messages are handled one at a time (one Gemma slot). Logs carry metadata only, n
 image data. Step 3 adds photos (fetched, converted, shown to Gemma once, then deleted), the Mac
 health watcher (alerts as notes) and the project tools; voice notes are heard and answered through the
 local voice service (transcript in, spoken answer out, audio deleted).
+
+The call, document, start-up and status methods live in four hosts that hold this app as `self.app`: call_host.py,
+documents_host.py, lifecycle.py and status_host.py. App keeps one-line delegates for the names the tests call.
 """
 
 from __future__ import annotations
@@ -11,7 +14,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import hashlib
 import logging
 import logging.handlers
 import os
@@ -20,18 +22,18 @@ import stat
 import sys
 import time
 from collections.abc import Callable
-from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO
 
-from local_assistant import chords, hostsec, prompts
+from local_assistant import hostsec, prompts
 from local_assistant.babble import Babble, Session, tidy
 from local_assistant.brain import Brain
 from local_assistant.calendar_feed import CalendarFeed
 from local_assistant.calendar_graph import OutlookCalendars
-from local_assistant.calendar_tools import GLANCE_NOT_READ, CalendarTools
+from local_assistant.calendar_tools import CalendarTools
 from local_assistant.calendar_watch import CalendarWatch
-from local_assistant.calls import CallManager, CallSettings, Turn, speakable, voice_ready, whole_sentences
+from local_assistant.call_host import CALL_MAX_TOKENS, CallGlance, CallHost, rundown_reads
+from local_assistant.calls import CallManager, CallSettings, Turn
 from local_assistant.chords import ChordTool
 from local_assistant.commands import (
     VOICE_ECHO_KEY,
@@ -44,29 +46,19 @@ from local_assistant.commands import (
 )
 from local_assistant.config import (
     DEFAULT_CONFIG_PATH,
-    INTERRUPT_NEW,
-    AvatarError,
     Config,
     ConfigError,
     find_java_home,
     load_config,
     quiet_hours_of,
-    read_avatar,
 )
 from local_assistant.context import ContextBuilder
 from local_assistant.devices import Devices
 from local_assistant.documents import (
-    LOOK_ON_REQUEST_SECONDS,
-    LOOK_SECONDS,
-    LOOKED_KEY,
-    MAX_BYTES,
-    DocumentError,
     Documents,
     Helper,
-    not_estia_kb,
-    saved_note,
-    shown_folder,
 )
+from local_assistant.documents_host import DocumentsHost
 from local_assistant.fetcher import Fetcher, FetchError, Page
 from local_assistant.followups import FollowUps
 from local_assistant.gate import LONG_TEXT, AttachmentRef, Decision, Kind, classify, sender_aci
@@ -74,15 +66,12 @@ from local_assistant.gemma import GemmaClient, GemmaError, ModelPausedError, Mod
 from local_assistant.graph import Graph
 from local_assistant.health import Health, HealthCheck
 from local_assistant.initiative import (
-    ANNOUNCED_KEY,
     Initiative,
     Settings,
     Writer,
-    evening_of,
-    in_quiet_hours,
-    is_enabled,
 )
-from local_assistant.language import CODES, ENGLISH, LANGUAGE_KEY, is_yes
+from local_assistant.language import CODES, ENGLISH, LANGUAGE_KEY
+from local_assistant.lifecycle import ALIVE_KEY, ALIVE_SECONDS, WELCOME_KEY, Lifecycle
 from local_assistant.mail_auth import AccessTokens, MailAuthError, TokenStore, device_login
 from local_assistant.mail_digest import MailDigest, MailNumbers
 from local_assistant.mail_http import http
@@ -93,11 +82,10 @@ from local_assistant.mail_tools import MailTools
 from local_assistant.maps import Maps, find_pin, forget_home_address
 from local_assistant.morning_digest import MorningDigest
 from local_assistant.music_tools import MusicTools
-from local_assistant.part_status import PartStatus, security_lines
-from local_assistant.part_status import lines as part_lines
+from local_assistant.part_status import PartStatus
 from local_assistant.photos import PhotoError, data_uri, prepare
 from local_assistant.profile import Profile
-from local_assistant.profiler import LAST_RUN_KEY, UNANNOUNCED_KEY, LearnError, Profiler
+from local_assistant.profiler import UNANNOUNCED_KEY, LearnError, Profiler
 from local_assistant.projects import Projects
 from local_assistant.reminders import Reminders, ReminderScheduler
 from local_assistant.signal_io import (
@@ -112,8 +100,8 @@ from local_assistant.signal_io import (
 from local_assistant.signal_text import Styled, styled
 from local_assistant.spotify import Spotify
 from local_assistant.spotify_auth import SpotifyAuthError, SpotifyTokens, login
+from local_assistant.status_host import StatusHost
 from local_assistant.store import Attachment, Message, MessageKind, MessageStatus, Store
-from local_assistant.timefmt import iso_to_epoch, local_hhmm
 from local_assistant.tools import Tools, project_schemas, tool_schemas
 from local_assistant.video import CaptionHelper, VideoReader, video_id
 from local_assistant.voice import (
@@ -131,25 +119,27 @@ from local_assistant.web_search import WebSearch
 
 log = logging.getLogger("local_assistant")
 
-# after signal-cli subscribed (and recovery), then every minute: the next start's offline note, and estia-deploy's health
-# check (read-only, as _estia) both read it; its name and timing stay
-ALIVE_KEY = "last_alive"
-ALIVE_SECONDS = 60
-LINKED_DEVICES_SECONDS = 4 * 3600.0  # her own Signal account's devices are counted at the start and this often
-SECURITY_LEVEL_SECONDS = 4 * 3600.0  # the Mac's security level (her list of what she can do) is read as often
+# what the tests, the evals and `python -m local_assistant` import from this module (some of it lives in the hosts now)
+__all__ = [
+    "ALIVE_KEY",
+    "ALIVE_SECONDS",
+    "CALL_MAX_TOKENS",
+    "WAITING_COMMANDS",
+    "WELCOME_KEY",
+    "App",
+    "main",
+    "model_pin",
+    "rundown_reads",
+    "setup_logging",
+    "signal_client",
+]
+
 MODEL_CHECK_SECONDS = 300.0  # the model's pin is read this often (and before every chat)
-PRUNED_KEY = "privacy:pruned_at"  # when the history was last pruned ([privacy] keep_days)
-PRUNE_HOURS = (3, 5)  # pruned once a night, in this local window, when nothing else runs
-PRUNE_CHECK_SECONDS = 900.0
-MUSIC_REMINDED_KEY = "music:reminded_week"
-PROFILE_NAME_KEY = "signal_profile_name"
-PROFILE_AVATAR_KEY = "signal_profile_avatar"  # the sha256 of the picture last set
-WELCOME_KEY = "welcome_sent"  # set once a fresh install's welcome reached everyone it was owed to
-WELCOME_OWED_KEY = "welcome_owed"  # the accounts it has not reached yet (comma-separated ACIs)
 # during a call these wait: they change the conversation or the language, or use Gemma
 WAITING_COMMANDS = frozenset({"/new", "/learn", "/language", "/babble", "/docs"})  # /docs: she sends nothing on a call
-PRACTICE_DRAIN_S = 120.0  # after a practice call, texts typed during it are answered as practice for at most this
-CALL_MAX_TOKENS = 300  # spoken answers stay short (a few sentences); a cut-off one ends at its last whole sentence
+# The three waits below and DOCUMENTS_FIRST_SECONDS are given to the host that uses them when it is built (CallHost,
+# DocumentsHost): a test shortens one by patching its name on this module.
+
 # a call's first answer waits at most this long for the glance of the day (counted from the turn; the calendar is read
 # from the moment the call starts); not ready by then, it joins from the first turn after it is
 GLANCE_WAIT_SECONDS = 3.0
@@ -160,12 +150,8 @@ WARM_UP_SECONDS = 60.0
 # some 20 s into the call and finds a slow calendar read, and a glance that differs from the warm-up's makes Ollama read
 # the tools and the whole history again (6-8 s); the wait delays the warm-up by at most 5 s more
 WARM_UP_GLANCE_SECONDS = 8.0
-# signal-cli also downloads files no photo message refers to (link previews, quote thumbnails, avatars,
-# edited messages): every 10 minutes, files older than that which no waiting photo needs are deleted.
-SWEEP_SECONDS = 600.0
-# the documents folder ([documents]): she checks every minute whether a look is due (every look_minutes) and whether a
-# held note may go; the first check comes this long after the start
-DOCUMENTS_TICK_SECONDS = 60.0
+# the documents folder ([documents]): the first check comes this long after the start (given to the host, like the
+# waits above)
 DOCUMENTS_FIRST_SECONDS = 30.0
 # shorter than this is a slip of the thumb, not speech (OpenClaw's minimum)
 MIN_AUDIO_BYTES = 1024
@@ -179,61 +165,6 @@ _KINDS: dict[Kind, MessageKind] = {
     Kind.COMMAND: "command",
     Kind.UNSUPPORTED: "unsupported",
 }
-
-
-# a yes to her offer of the day's rundown on a call: code reads today's calendar and the mail digest itself (live
-# evals, 13 Oct: after "yes please" she called no tool, 7 of 7), as her own tool calls would
-RUNDOWN_READS = (("calendar_agenda", '{"start": "today", "days": 1}'), ("mail_digest", "{}"))
-
-
-def asks(answer: str) -> bool:
-    """Whether her answer asks something (a question mark, also the full-width one)."""
-    return "?" in answer or "？" in answer
-
-
-def rundown_reads(offer: str, said: str, language: str, *, calendar: bool, mail: bool) -> tuple[tuple[str, str], ...]:
-    """What code reads for her when the user says yes to her offer of the day's rundown on a call: `offer` is her
-    offer, the call's previous answer ("" when that answer was none: `CallGlance.offer`); it asks something ("Want the
-    rundown?") and the user's reply is a whole yes (`is_yes`, in the call's language or English). Then today's
-    calendar and the mail digest, each when it is set up; anything else reads nothing (she reads with her tools as
-    ever)."""
-    if not asks(offer) or not is_yes(said, language):
-        return ()
-    return tuple(read for read, on in zip(RUNDOWN_READS, (calendar, mail), strict=True) if on)
-
-
-class CallGlance:
-    """A call's glance: the mail digest's counts, read when the call starts (a quick local read), and the calendar's,
-    read meanwhile; each line on its own, so a slow or failing calendar never holds back the mail counts. Her offer of
-    the rundown: the first of her answers given with the glance that asks something (the glance's rule: offer it
-    once); a yes right after it reads the day (`rundown_reads`), so once a call at most."""
-
-    def __init__(self, at: str, mail: str, calendar: asyncio.Task[str] | None) -> None:
-        self.at = at
-        self.mail = mail
-        self.calendar = calendar
-        self.waited = False  # the first turn waited for the calendar once; later turns take it when it is ready
-        self.offered = False  # she asked something with the glance: her offer, made once a call
-        self.offer = ""  # that answer, until the next turn takes it
-
-    def note(self, answer: str) -> None:
-        """Her answer given with the glance: the first that asks something is her offer."""
-        if not self.offered and asks(answer):
-            self.offered, self.offer = True, answer
-
-    def take_offer(self) -> str:
-        """Her offer, for the turn right after it only ("" for any other turn)."""
-        offer, self.offer = self.offer, ""
-        return offer
-
-    def calendar_done(self) -> bool:
-        return self.calendar is None or self.calendar.done()
-
-    def lines(self) -> list[str]:
-        """The lines ready now: the calendar's (once read), then the mail digest's."""
-        calendar = self.calendar
-        read = calendar.result() if calendar is not None and calendar.done() and not calendar.cancelled() else ""
-        return [line for line in (read, self.mail) if line]
 
 
 class App:
@@ -257,6 +188,44 @@ class App:
         reads it, on the live Mac only: hostsec.mac_security_level). `warm_up`: a call's model warm-up
         (`call_warm_up`); None: only with Ollama itself (an OllamaGemma with a model named, also behind the model
         pin), so a scripted Gemma in the tests gets none and its script keeps its order."""
+        self._wire_core(
+            cfg,
+            store,
+            signal,
+            gemma,
+            fetcher,
+            clock=clock,
+            retry_delay=retry_delay,
+            fetch_timeout=fetch_timeout,
+            model_pin=model_pin,
+            security_level=security_level,
+            warm_up=warm_up,
+        )
+        self._wire_mail()
+        self._wire_calendar_and_digest()
+        self._wire_extras()
+        self._wire_voice_and_calls()
+        self._wire_reminders_and_initiative()
+        self._given_health = health  # read by _wire_tools_and_brain
+        self._wire_tools_and_brain()
+        self._wire_commands()
+
+    def _wire_core(
+        self,
+        cfg: Config,
+        store: Store,
+        signal: SignalClient,
+        gemma: GemmaClient,
+        fetcher: Fetcher,
+        *,
+        clock: Callable[[], float],
+        retry_delay: float,
+        fetch_timeout: float,
+        model_pin: ModelPin | None,
+        security_level: Callable[[], str | None] | None,
+        warm_up: bool | None,
+    ) -> None:
+        """The parts every other part reads: config, store, Signal, the model, the guard, the language, the rules."""
         self.cfg = cfg
         self.store = store
         self.signal = signal
@@ -272,9 +241,7 @@ class App:
         self._retry_delay = retry_delay
         self._fetch_timeout = fetch_timeout
         self._processing = False
-        self._started_at = 0.0
-        self._offline_since: str | None = None  # last heartbeat of the previous run
-        self._offline_noted = False
+        self.lifecycle = Lifecycle(self)
         # the last photo, in memory only (its files are deleted), for follow-up questions: (conversation, message, images, at)
         self._recent_photo: tuple[int, int, list[str], float] | None = None
         # the user's devices and the lock: a new linked device is held, /lock stops everything until /unlock
@@ -291,17 +258,15 @@ class App:
         )
         # her list of what she can do names the Mac's security level: read at the start and every 4 hours (None: not
         # read yet, or off the live Mac)
-        self._read_security_level = security_level or (lambda: hostsec.mac_security_level(Path.home(), cfg.bot_number))
-        self._security_level: str | None = None
+        self.status_host = StatusHost(
+            self, security_level or (lambda: hostsec.mac_security_level(Path.home(), cfg.bot_number))
+        )
         # one language at a time: the config's is the starting value, a typed /language (kept in the database) wins
         chosen_language = store.get_state(LANGUAGE_KEY)
         self.language = chosen_language if chosen_language in CODES else cfg.language
         self.queue: asyncio.Queue[int] = asyncio.Queue()
         self._no_call = asyncio.Event()
         self._no_call.set()
-        self._calls = 0  # calls started: a call's warm-up reads only while its own call is on
-        # a call's glance: today's calendar and mail digest as numbers and times, read when an ordinary call starts
-        self._glance: CallGlance | None = None
         # language practice (/babble): its own conversation, no tools, the recap at the end; typed only
         self.babble = Babble(
             store,
@@ -331,11 +296,15 @@ class App:
         )
         # what each part's last real read or call did, for /status and doctor (<data_dir>/status.json)
         self.part_status = PartStatus(cfg.data_dir / "status.json", clock=clock)
+
+    def _wire_mail(self) -> None:
+        """Mail (read-only Graph): sync, sorting, the digest's mail part and Gemma's mail tools."""
+        cfg, store, clock, gemma = self.cfg, self.store, self._clock, self.gemma
         # mail (read-only Graph): sync, sorting at idle time, the digest's mail part, Gemma's mail tools
         self.mail_sync: MailSync | None = None
         self.mail_sorter: MailSorter | None = None
         self.mail_digest: MailDigest | None = None
-        mail_tools: MailTools | None = None
+        self._mail_tools: MailTools | None = None
         if cfg.mail_enabled:
             tokens = TokenStore(cfg.mail_token_path)
             graph = Graph(AccessTokens(cfg, tokens))
@@ -346,7 +315,11 @@ class App:
             jev = Jev(cfg.mail_jev_url) if cfg.mail_jev_url else None  # the pre-filter's second step
             self.mail_sorter = MailSorter(store, graph, gemma, cfg, busy=self._is_busy, jev=jev)
             self.mail_digest = MailDigest(store, cfg, numbers, clock=clock, status=self.part_status)
-            mail_tools = MailTools(store, graph, cfg, numbers, self.mail_digest, clock=clock)
+            self._mail_tools = MailTools(store, graph, cfg, numbers, self.mail_digest, clock=clock)
+
+    def _wire_calendar_and_digest(self) -> None:
+        """The calendars and the morning digest."""
+        cfg, store, clock = self.cfg, self.store, self._clock
         # the calendars: Google iCal addresses (tools/ical) and Outlook calendars of the mailboxes (their own Graph,
         # Calendars.Read only); the digest's block and Gemma's calendar tools
         self.calendar: CalendarTools | None = None
@@ -374,6 +347,10 @@ class App:
                 mail_ready=self._mail_synced,
                 calendar_seconds=cfg.calendar_helper_timeout + 5,
             )
+
+    def _wire_extras(self) -> None:
+        """Music, web search, maps and the lights and plugs."""
+        cfg, store = self.cfg, self.store
         # Spotify by text message (the official Web API, the user's own app); notes and the sign-in reminder are code
         self.music: MusicTools | None = None
         if cfg.spotify_enabled:
@@ -408,6 +385,10 @@ class App:
         forget_home_address(store, cfg.maps_home if cfg.maps_enabled else "", cfg.web_keys_path)
         # lights and plugs (through the device helper); "ask first" confirmations and notes are code
         self.devices = Devices(cfg, status=self.part_status) if cfg.tapo_enabled else None
+
+    def _wire_voice_and_calls(self) -> None:
+        """The voice service and voice calls."""
+        cfg, clock, signal = self.cfg, self._clock, self.signal
         self.voice = (
             VoiceClient(
                 cfg.voice_url,
@@ -426,6 +407,13 @@ class App:
         self.calls: CallManager | None = None
         self._call_voice: VoiceClient | None = None
         self.voice_ready: ReadyNote | None = None
+        # the app's side of a call (calls.Host): what CallManager asks for each turn, the notes and the summary
+        self.call_host = CallHost(
+            self,
+            glance_wait=GLANCE_WAIT_SECONDS,
+            warm_up_seconds=WARM_UP_SECONDS,
+            warm_up_glance=WARM_UP_GLANCE_SECONDS,
+        )
         if cfg.calls_enabled:
             self._call_voice = VoiceClient(
                 cfg.voice_url,
@@ -436,8 +424,8 @@ class App:
             )
             # "My voice is ready" after a long load (a compile) or a call that rang meanwhile: code's note, once a start
             self.voice_ready = ReadyNote(
-                self._call_voice_ready,
-                self.call_note,
+                self.call_host.call_voice_ready,
+                self.call_host.call_note,
                 cfg.allowed_acis,
                 tz=cfg.timezone,
                 # never waking anyone, unless they called: the initiative's quiet hours, else 22:00-08:00
@@ -448,7 +436,7 @@ class App:
             self.calls = CallManager(
                 signal,
                 self._call_voice,
-                self,
+                self.call_host,
                 cfg.allowed_acis,
                 CallSettings(
                     socket_dir=cfg.call_socket_dir,
@@ -472,6 +460,10 @@ class App:
                 missed=self.voice_ready.missed,  # a ring while the voice loads: the caller gets the ready note
                 reached=self.voice_ready.reached,  # a call that connected: that caller needs no ready note
             )
+
+    def _wire_reminders_and_initiative(self) -> None:
+        """Reminders and wake-up calls, the messages she starts herself and the check-ins."""
+        cfg, store, clock, gemma = self.cfg, self.store, self._clock, self.gemma
         # reminders and wake-up calls the user sets (on unless [reminders] enabled = false); code fires them
         self.reminders: Reminders | None = None
         self.reminder_scheduler: ReminderScheduler | None = None
@@ -523,7 +515,11 @@ class App:
             self.followups = FollowUps(
                 store, gemma, cfg.timezone, enabled=lambda: initiative.enabled and not initiative.quiet, clock=clock
             )
-        self.health = health or Health(
+
+    def _wire_tools_and_brain(self) -> None:
+        """Host checks, videos, documents, Gemma's tools, the watchers, the brain and the profiler."""
+        cfg, store, clock, gemma = self.cfg, self.store, self._clock, self.gemma
+        self.health = self._given_health or Health(
             store,
             cfg,
             signal_restarts=lambda: self.signal.restarts,
@@ -536,10 +532,6 @@ class App:
             CaptionHelper(cfg.youtube_helper, cfg.youtube_helper_timeout, status=self.part_status), gemma
         )
         self._busy: dict[int, asyncio.Task[None]] = {}  # each answer's busy note, until it is sent or not needed
-        # [chords]: a call's chords results with each turn's Sources note, for the message after the call; then the
-        # last call's, which its summary is checked against
-        self._call_chords: list[tuple[chords.Result, str]] = []
-        self._chords_after: list[chords.Result] = []
         # documents: the PDFs in the owner's ~/Estia-KB and the ones the user sends, read by tools/documents (no AI
         # model) into her index; off without [documents]
         self.documents: Documents | None = None
@@ -548,8 +540,7 @@ class App:
             self.documents = Documents(
                 store, cfg.documents_folder, helper, status=self.part_status, tz=cfg.timezone, clock=clock
             )
-        # the documents' note and look wait like the watchers' alerts: the initiative's quiet hours, else 22:00-08:00
-        self._documents_quiet = quiet_hours_of(cfg.initiative_quiet_hours) or QUIET_HOURS
+        self.documents_host = DocumentsHost(self, first_seconds=DOCUMENTS_FIRST_SECONDS)
         self.tools = Tools(
             store,
             self.profile,
@@ -557,7 +548,7 @@ class App:
             self._fetch,
             status=self.health.report,
             projects=Projects(cfg) if cfg.projects_enabled else None,  # an extra: off without [projects]
-            mail=mail_tools,
+            mail=self._mail_tools,
             devices=self.devices,
             calendar=self.calendar,
             music=self.music,
@@ -612,6 +603,10 @@ class App:
         self.tools.set_consolidate(self.profiler.consolidate_for)
         self.tools.set_learn_page(self.profiler.learn_page)
         self.tools.set_notify(self._tool_note)
+
+    def _wire_commands(self) -> None:
+        """The slash commands and the chosen voice."""
+        cfg, store = self.cfg, self.store
         voice_client = self.voice or self._call_voice  # the same service: the one asked whether it has a language
         self.commands = Commands(
             store,
@@ -632,46 +627,47 @@ class App:
             guard=self.guard,
             capabilities=self.capability_lines,
             changed=self._settings_changed,
-            docs=self._docs_command if self.documents is not None else None,
+            docs=self.documents_host.docs_command if self.documents is not None else None,
         )
         chosen = store.get_state(VOICE_NAME_KEY)
         if chosen in VOICES:
             self._set_voice(chosen)
 
     async def run(self) -> None:
-        self._started_at = self._clock()
-        self._offline_since = self.store.get_state(ALIVE_KEY)
+        self.lifecycle.started_at = self._clock()
+        self.lifecycle.offline_since = self.store.get_state(ALIVE_KEY)
         await self.signal.start()
         await (
             self._pin_check_at_start()
         )  # before recovery: nothing recovered reaches a model that is not the pinned one
-        await self._name_profile()
-        await self._profile_picture()
+        await self.lifecycle.name_profile()
+        await self.lifecycle.profile_picture()
         self.context.refresh_snapshot()
         if self.guard.locked:  # the late note would not go out: the check waits for /unlock
             self._start_up_waits = True
             log.warning("lock: still locked from before the restart; nothing is sent until /unlock")
         else:
-            await self._reminders_start_up()  # before recovery: a note that may have gone out is never sent again
-        self._initiative_start_up()  # the same for a message she started
-        await self.recover()
-        await self._welcome()
+            # before recovery: a note that may have gone out is never sent again
+            await self.lifecycle.reminders_start_up()
+        self.lifecycle.initiative_start_up()  # the same for a message she started
+        await self.lifecycle.recover()
+        await self.lifecycle.welcome()
         if self.model_pin is not None and self.model_pin.paused:  # after recovery: it never sends this note again
             await self._alert(self._paused_note())
         if self.followups is not None:
             self.followups.start()  # plans said before the first start with follow-ups are never looked at
-        self.sweep_files()
-        self._mark_alive()
+        self.lifecycle.sweep_files()
+        self.lifecycle.mark_alive()
         async with asyncio.TaskGroup() as group:
             group.create_task(self._receive_loop(), name="receive")
-            group.create_task(self._problems_loop(), name="receive-problems")
-            group.create_task(self._linked_devices_loop(), name="linked-devices")
-            group.create_task(self._security_level_loop(), name="security-level")
+            group.create_task(self.status_host.problems_loop(), name="receive-problems")
+            group.create_task(self.status_host.linked_devices_loop(), name="linked-devices")
+            group.create_task(self.status_host.security_level_loop(), name="security-level")
             group.create_task(self._worker(), name="worker")
             group.create_task(self.profiler.run_forever(), name="profiler")
-            group.create_task(self._heartbeat(), name="heartbeat")
+            group.create_task(self.lifecycle.heartbeat(), name="heartbeat")
             group.create_task(self.scheduler.run_forever(), name="watchers")
-            group.create_task(self._sweeper(), name="sweeper")
+            group.create_task(self.lifecycle.sweeper(), name="sweeper")
             group.create_task(self._warm_up(self.language), name="voice-warm-up")
             practice = self.babble.running()
             if practice is not None and practice.code != self.language:  # a restart during practice: its voice too
@@ -683,7 +679,7 @@ class App:
             if self.morning_digest:
                 group.create_task(self.morning_digest.run_forever(), name="morning-digest")
             if self.calls:
-                group.create_task(self._calls_forever(), name="calls")
+                group.create_task(self.call_host.calls_forever(), name="calls")
             if self.voice_ready is not None:
                 group.create_task(self.voice_ready.run_forever(), name="voice-ready")
             if self.reminder_scheduler:
@@ -691,64 +687,34 @@ class App:
             if self.initiative:
                 group.create_task(self.initiative.run_forever(), name="initiative")
             if self.music:
-                group.create_task(self._music_reminder(), name="music-reminder")
+                group.create_task(self.lifecycle.music_reminder(), name="music-reminder")
             if self.model_pin is not None:
                 group.create_task(self._model_loop(), name="model-pin")
             if self.cfg.keep_days is not None:
-                group.create_task(self._retention_loop(), name="retention")
+                group.create_task(self.lifecycle.retention_loop(), name="retention")
             if self.documents is not None:
-                group.create_task(self._documents_forever(), name="documents")
+                group.create_task(self.documents_host.documents_forever(), name="documents")
 
+    # status: StatusHost (status_host.py) does the work; these names stay for the tests, the commands and her rules
     def capability_lines(self) -> list[str]:
-        """What she can do in this install (prompts.capabilities): the parts on, with each level's current value: the
-        voice answers (/voice), what interrupts her on a call, the calendars' services (Google, Outlook, iCloud, …), the
-        messages she starts (/initiative), the evening note's time while it is on (/evening), the lights' and plugs' brands (TP-Link, Philips Hue), the projects' levels,
-        the documents folder and the Mac's security level. Her rules carry these lines and /help shows them word for
-        word."""
-        cfg = self.cfg
-        others = [level for level, names in (("docs", cfg.projects_docs), ("code", cfg.projects_code)) if names]
-        acis = sorted(cfg.allowed_acis)  # the gate's order: the config's evening goes to the only one
-        return prompts.capabilities(
-            host=cfg.host_label,
-            voice=(self.store.get_state(VOICE_MODE_KEY) or "auto") if cfg.voice_enabled else "",
-            calls=INTERRUPT_NEW[cfg.calls_barge] if cfg.calls_enabled else "",
-            mail=cfg.mail_enabled,
-            calendar=[source.service for source in cfg.calendars],
-            digest=cfg.digest_time if cfg.mail_enabled or (cfg.calendar_enabled and cfg.calendar_digest) else "",
-            digest_calendar=cfg.calendar_enabled and cfg.calendar_digest,
-            reminders=cfg.reminders_enabled,
-            wake_calls=cfg.reminders_enabled and cfg.wake_calls,
-            initiative=is_enabled(self.store, cfg.initiative_enabled),
-            evening=held.time if (held := evening_of(self.store, Settings.of(cfg).evening, acis)) else "",
-            device=cfg.tapo_devices[0].name if cfg.tapo_devices else "",
-            device_brands=[spec.service for spec in cfg.tapo_devices],
-            music=cfg.spotify_enabled,
-            web=cfg.web_enabled,
-            maps=cfg.maps_enabled,
-            projects=cfg.projects_default if cfg.projects_enabled else "",
-            project_levels=[level for level in others if level != cfg.projects_default],
-            documents=shown_folder(cfg.documents_folder) if cfg.documents_enabled else "",
-            chords=cfg.chords_enabled,
-            security=self._security_level,
-        )
+        return self.status_host.capability_lines()
+
+    async def _status_lines(self) -> list[str]:
+        return await self.status_host.status_lines()
+
+    async def status(self) -> StatusInfo:
+        return await self.status_host.status()
+
+    def on_problem(self, problem: ReceiveProblem) -> None:
+        self.status_host.on_problem(problem)
+
+    async def check_linked_devices(self) -> int | None:
+        return await self.status_host.check_linked_devices()
 
     def _settings_changed(self) -> None:
         """A level her list shows changed (/voice, /initiative, /evening, the Mac's security): her rules follow from the
         next answer."""
         self.context.set_rules(self._rules(self.language))
-
-    async def _security_level_loop(self) -> None:
-        while True:
-            try:
-                level = await asyncio.to_thread(self._read_security_level)
-            except Exception:
-                log.exception("security level: not read")
-            else:
-                if level != self._security_level:
-                    log.info("security level: %s", level if level is not None else "not read")
-                    self._security_level = level
-                    self._settings_changed()
-            await asyncio.sleep(SECURITY_LEVEL_SECONDS)
 
     def _rules(self, language: str) -> str:
         cfg = self.cfg
@@ -799,29 +765,6 @@ class App:
         session = self.babble.running(message.peer_aci)
         return session if session is not None and session.conversation_id == message.conversation_id else None
 
-    async def _reminders_start_up(self) -> None:
-        """Reminders missed while the bridge was down: one late note per user; one that was being sent is marked
-        "(may be a repeat)" and its old note is kept from recovery. A failure here never stops the bridge."""
-        if self.reminder_scheduler is None:
-            return
-        since = self._offline_since
-        try:
-            await self.reminder_scheduler.start_up(
-                offline_since=float(since) if since else None, started_at=self._started_at
-            )
-        except Exception:
-            log.exception("reminders: the start-up check failed")
-
-    def _initiative_start_up(self) -> None:
-        """A message she started that was being sent at the stop is never sent again (its row: unknown). A failure
-        here never stops the bridge."""
-        if self.initiative is None:
-            return
-        try:
-            self.initiative.start_up()
-        except Exception:
-            log.exception("initiative: the start-up check failed")
-
     def _set_language(self, code: str) -> None:
         """A language chosen with /language (typed, never during a call): Gemma's rules and the voice from the next
         answer; the new language's voice is loaded in the background."""
@@ -866,180 +809,15 @@ class App:
             if client is not None:
                 client.set_voice(name)
 
-    async def _name_profile(self) -> None:
-        """The bot's Signal profile shows the assistant's name, set once per name (e.g. after a rename)."""
-        name = prompts.signal_profile_name(self.cfg.name)
-        if self.store.get_state(PROFILE_NAME_KEY) == name:
-            return
-        try:
-            await self.signal.update_profile(name)
-        except SignalError as exc:  # tried again at the next start
-            log.warning("Signal profile name not set: %s", exc)
-            return
-        self.store.set_state(PROFILE_NAME_KEY, name)
-        log.info("Signal profile name set")
-
-    async def _profile_picture(self) -> None:
-        """The bot's Signal profile picture (the config's `avatar`), sent once per picture: again only after the file
-        changes. The file is checked here, not when the config is loaded: one that is missing, unreadable, too large
-        or not a PNG or JPEG is skipped (Signal keeps the picture it has), so a picture never stops the bridge. A
-        skip or a failure is logged (never the path) and tried again at the next start."""
-        path = self.cfg.avatar
-        if path is None:
-            return
-        try:
-            data = await asyncio.to_thread(read_avatar, path)
-        except AvatarError as exc:
-            log.warning("Signal profile picture not set: %s", exc)
-            return
-        digest = hashlib.sha256(data).hexdigest()
-        if self.store.get_state(PROFILE_AVATAR_KEY) == digest:
-            return
-        try:
-            await self.signal.update_avatar(path)
-        except SignalError as exc:  # tried again at the next start; signal-cli's message may name the file
-            log.warning("Signal profile picture not set: %s (code %s)", type(exc).__name__, exc.code)
-            return
-        self.store.set_state(PROFILE_AVATAR_KEY, digest)
-        log.info("Signal profile picture set")
-
-    def _welcome_text(self) -> str:
-        cfg = self.cfg
-        return prompts.welcome(
-            name=cfg.name,
-            mail=cfg.mail_enabled,
-            calendar=cfg.calendar_enabled,
-            voice=cfg.voice_enabled,
-            calls=cfg.calls_enabled,
-            device=cfg.tapo_devices[0].name if cfg.tapo_devices else "",
-            web=cfg.web_enabled,
-            maps=cfg.maps_enabled,
-            music=cfg.spotify_enabled,
-            reminders=cfg.reminders_enabled,
-            wake_calls=cfg.reminders_enabled and cfg.wake_calls,
-            initiative=self.initiative.settings.line() if self.initiative and self.initiative.enabled else "",
-        )
-
-    async def _welcome(self) -> None:
-        """A fresh install (nothing in the store) greets each allowed user once, in code's words. It is owed to the
-        accounts allowed at that first start; one it could not reach is tried again at the next start, even when the
-        others chat by then. Only a delivered welcome is stored, as a sent note: never in Gemma's history, nothing for
-        recovery to send again. An install that already has messages never gets it. Locked: the next start."""
-        if self.store.get_state(WELCOME_KEY) or self.guard.locked:
-            return
-        owed = self.store.get_state(WELCOME_OWED_KEY)
-        if owed is None:
-            if self.store.count_messages():
-                return
-            owed = ",".join(sorted(self.cfg.allowed_acis))
-            self.store.set_state(WELCOME_OWED_KEY, owed)
-            if self.initiative is not None and self.initiative.enabled:  # the welcome tells: no announcement later
-                self.store.set_state(ANNOUNCED_KEY, f"{self._clock():.0f} welcome")
-        left = [aci for aci in owed.split(",") if aci in self.cfg.allowed_acis]  # one no longer allowed is not owed
-        text = self._welcome_text()
-        conversation = self.store.current_conversation()
-        for aci in list(left):
-            timestamp = await self._deliver(aci, text, "the welcome")
-            if timestamp is None:
-                continue
-            left.remove(aci)
-            with self.store.tx():
-                out_id = self.store.add_outgoing(conversation.id, aci, "note", text, None)
-                self.store.mark_sent(out_id, timestamp)
-                self.store.set_state(WELCOME_OWED_KEY, ",".join(left))
-            log.info("welcome sent: %d chars", len(text))
-        if not left:
-            self.store.set_state(WELCOME_KEY, f"{self._clock():.0f}")
-
-    async def recover(self) -> None:
-        """After a restart: answer recent messages, one offline note for older ones, resend recent replies."""
-        now = self._clock()
-        window = self.cfg.recover_window_seconds
-        stale: list[Message] = []
-        for message in self.store.unanswered_incoming():
-            if now - (message.signal_ts or 0) / 1000 <= window:
-                await self.queue.put(message.id)
-            else:
-                stale.append(message)
-        for out in self.store.unsent_outgoing():
-            if now - iso_to_epoch(out.created_at) <= window:
-                await self._send(out.id)
-        if not stale:
-            return
-        for message in stale:
-            self.store.set_status(message.id, "failed")
-            self._drop_attachments(message.id)
-        await self._offline_note(stale[-1])
-        log.info("recovery: %d older messages got the offline note", len(stale))
-
-    async def _offline_note(self, message: Message) -> None:
-        """One note per start: 'I was offline HH:MM–HH:MM, ask again if you still need something.'"""
-        if self._offline_noted:
-            return
-        self._offline_noted = True
-        last = self._offline_since
-        since = local_hhmm(float(last), self.cfg.timezone) if last else "?"
-        note = prompts.OFFLINE.format(since=since, until=local_hhmm(self._started_at, self.cfg.timezone))
-        await self._send(self.store.add_outgoing(message.conversation_id, message.peer_aci, "note", note, message.id))
-
     def _is_busy(self) -> bool:
         return self._processing or not self.queue.empty() or not self._no_call.is_set()
 
-    # voice calls: the Host side of calls.CallManager
-
-    async def _music_reminder(self) -> None:
-        """Spotify ends the sign-in after 6 months: a note once a week in the last 30 days (daytime only)."""
-        assert self.music is not None
-        while True:
-            try:
-                note = self.music.reminder()
-                now = datetime.fromtimestamp(self._clock(), self.cfg.timezone)
-                week = f"{now.isocalendar().year}-{now.isocalendar().week}"
-                if note and 9 <= now.hour < 21 and self.store.get_state(MUSIC_REMINDED_KEY) != week:
-                    self.store.set_state(MUSIC_REMINDED_KEY, week)
-                    await self._alert(note)
-            except Exception:  # a TaskGroup task that raises would take the bridge down
-                log.exception("music reminder failed")
-            await asyncio.sleep(3600)
-
-    async def _calls_forever(self) -> None:
-        """The call loop never takes the bridge down (a TaskGroup task that raises would)."""
-        assert self.calls is not None
-        while True:
-            try:
-                await self.calls.run_forever()
-            except Exception:
-                log.exception("calls: the call loop failed; starting it again")
-            await asyncio.sleep(5)
-
+    # voice calls: CallHost (call_host.py) does the work; these names stay for the tests and calls.Host, one release
     def call_started(self, aci: str, *, practice: bool = False) -> None:
-        """Texts wait until the call ends; idle learning, mail sorting and her own messages keep away from Gemma. An
-        ordinary call starts reading today's calendar and mail digest as numbers and times (the glance); a practice
-        call reads neither."""
-        self._no_call.clear()
-        self._calls += 1
-        self._call_chords = []  # [chords]: this call's results, for the message after it
-        self.profiler.note_activity()
-        if self.initiative is not None:
-            self.initiative.note_activity()
-        if self.devices:
-            self.devices.cancel()
-        self._drop_glance()
-        if not practice and (self.calendar is not None or self.mail_digest is not None):
-            at = local_hhmm(self._clock(), self.cfg.timezone)
-            calendar = None
-            if self.calendar is not None:
-                calendar = asyncio.create_task(self._calendar_glance(self.calendar), name="call-glance")
-            self._glance = CallGlance(at, self._mail_glance(), calendar)
+        self.call_host.call_started(aci, practice=practice)
 
     def call_ended(self) -> None:
-        self._drop_glance()  # the next call counts again
-        if self.devices:
-            self.devices.cancel()  # a question asked on the call is not answered by a later text
-        self._no_call.set()
-        self.profiler.note_activity()
-        if self.reminder_scheduler is not None:
-            self.reminder_scheduler.notify()  # reminders that waited for the call go out now
+        self.call_host.call_ended()
 
     async def call_turn(
         self,
@@ -1050,274 +828,52 @@ class App:
         practice: bool = False,
         on_retry: Callable[[], None] | None = None,
     ) -> Turn:
-        """One thing the user said on a call: stored like a message (answered at once), then a waiting device's
-        yes (code) or Gemma with the same tools as text; device notes and profile notes go out as texts. A turn of a
-        practice call (`practice`, the call's own flag: only a call the user made during practice) goes to practice;
-        a call she placed for a reminder is an ordinary call, even during practice. `on_retry`: told once when
-        Gemma's first try came back empty, before it is asked again (the call says an acknowledgement)."""
-        self.profiler.note_activity()
-        await self._worker_idle.wait()  # a text that was being answered when the call came in finishes first
-        session = self.babble.running(aci) if practice else None
-        if session is not None:  # a practice call: its own conversation, no tools, no device yes
-            return await self._practice_call_turn(aci, text, session, on_retry)
-        conversation_id = self.store.current_conversation().id
-        said = f"{prompts.CALL_MARK} {text}"
-        said_id = self.store.add_call_turn(conversation_id, aci, said)
-        state = self._glance
-        offer = state.take_offer() if state is not None else ""  # her offer counts only for the turn right after it
-        if self.devices is not None and self.devices.pending:
-            confirmed = await self.devices.confirm(said, aci)
-            if confirmed is not None:
-                await self._call_notes(aci, conversation_id, said_id, [confirmed])
-                return Turn("", code_text=speakable(confirmed))  # code's words (English)
-        message = self.store.message(said_id)
-        conversation = self.context.enforce_limit(self.store.conversation(conversation_id))
-        glance = await self._glance_now()
-        reads = self._rundown(offer, said) if glance else ()
-        try:
-            reply = await self.brain.answer(
-                conversation,
-                message,
-                max_tokens=CALL_MAX_TOKENS,
-                on_tools=on_tools,
-                glance=glance,
-                reads=reads,
-                on_retry=on_retry,
-                chords_before=[result for result, _ in self._call_chords],
-            )
-        except GemmaError as exc:
-            log.error("call turn: Gemma failed: %s", exc)
-            await self.call_drop_waiting(aci)  # the user never heard a question; a device that switched is reported
-            if isinstance(exc, ModelPausedError):
-                return Turn("", code_text=self._paused_spoken())
-            return Turn(prompts.call_lines(self.language, name=self.cfg.name).lost)
-        # cut off at the token limit: never stop mid-sentence. Code's line why no reminder was set (her words about it
-        # are left out of the reply) is said in English after hers and any question, and kept
-        said_text = whole_sentences(reply.hers)
-        code_line = speakable(reply.not_set_spoken) if reply.not_set else ""
-        asks_yes = bool(self.devices and self.devices.pending)
-        question = ""
-        if asks_yes and self.devices is not None:  # the caller hears exactly what a yes will do (the note is a text)
-            question = speakable(self.devices.question())
-            if self.language != ENGLISH:  # Gemma may claim it is done already: only code's question is said and kept
-                said_text = ""
-        kept = " ".join(part for part in (said_text, question, code_line) if part)
-        if glance and state is not None and state is self._glance:
-            state.note(said_text)  # her offer of the rundown: a yes to it next turn reads the day
-        reply_id = self.store.add_call_reply(conversation_id, aci, kept, said_id)
-        device_note = self.devices.take_note() if self.devices else ""
-        # [chords]: the chords note is not sent during the call: said now, texted in one message after it
-        self._call_chords += [(result, reply.sources) for result in reply.chords_results]
-        notes = [note for note in (reply.sources, device_note, reply.notice, reply.reminder, reply.device) if note]
-        await self._call_notes(aci, conversation_id, said_id, notes)
-        log.info("call turn %d answered: %d tool calls", said_id, reply.tool_calls)
-        spoken = (reply.chords_spoken, reply.device_spoken, question, code_line, reply.reminder_spoken)
-        code_text = " ".join(line for line in spoken if line)  # English
-        return Turn(said_text, reply_id=reply_id, asks_yes=asks_yes, end_call=reply.end_call, code_text=code_text)
+        return await self.call_host.call_turn(aci, text, on_tools, practice=practice, on_retry=on_retry)
 
     async def call_warm_up(self, aci: str, *, practice: bool = False) -> None:
-        """The model's warm-up for a call that starts (CallManager: while it rings, or once a call she placed is
-        picked up): Gemma loads and reads the first turn's request up to the caller's words (Brain.warm_up), built
-        after that turn's own waits (a text being answered finishes first; the glance's calendar at most
-        WARM_UP_GLANCE_SECONDS, leaving the turn its own wait), so the turn finds its prefix in Ollama's cache. A practice
-        call (the call's own flag, with practice still running) warms the practice request. Nothing without Ollama
-        itself (`warm_up`), and nothing once its call ended (a later call's start too) or /lock came meanwhile. The read
-        is cut off after WARM_UP_SECONDS. One log line, metadata only; it never raises."""
-        if not self._warms_up:
-            return
-        call = self._calls  # the call it is for, taken before any wait
-        try:
-            await self._worker_idle.wait()  # as call_turn: that text's reply is in the turn's history
-            session = self.babble.running(aci) if practice else None
-            glance = await self._glance_now(warm_up=True) if session is None else ""
-            if self._no_call.is_set() or self._calls != call or self.guard.locked:
-                return  # its call ended (another may have started), or /lock: Gemma is not asked
-            started = time.monotonic()
-            if session is not None:
-                conversation = self.store.conversation(session.conversation_id)
-                warming = self.brain.warm_up(conversation, practice=self.babble.turn(spoken=True))
-            else:
-                warming = self.brain.warm_up(self.store.current_conversation(), glance=glance)
-            completion = await asyncio.wait_for(warming, WARM_UP_SECONDS)
-        except TimeoutError:
-            log.warning("calls: model warm-up failed (timeout)")
-            return
-        except Exception as exc:  # the call goes on as without it: one line, the kind only
-            log.warning("calls: model warm-up failed (%s)", type(exc).__name__)
-            return
-        tokens = f" (prompt {completion.prompt_tokens:,} tokens)" if completion.prompt_tokens else ""
-        log.info("calls: model warmed up in %.1f s%s", time.monotonic() - started, tokens)
-
-    async def _calendar_glance(self, calendar: CalendarTools) -> str:
-        """Today's calendar as numbers and times only, for her input on this call (never a title, place or calendar
-        name: that text would make the whole call outside text); any failure is "not read"."""
-        try:
-            return await calendar.glance()
-        except Exception:  # a glance is a courtesy: the call goes on without it
-            log.exception("calls: the calendar's glance failed")
-            return GLANCE_NOT_READ
-
-    def _mail_glance(self) -> str:
-        """The mail digest as numbers only (never a sender or subject), a quick local read; "" when it fails."""
-        if self.mail_digest is None:
-            return ""
-        try:
-            return self.mail_digest.glance()
-        except Exception:
-            log.exception("calls: the mail digest's glance failed")
-            return ""
-
-    async def _glance_now(self, *, warm_up: bool = False) -> str:
-        """The call's glance as far as it is ready: the mail counts at once; the first turn waits for the calendar
-        at most GLANCE_WAIT_SECONDS, later turns take it once read. The call's warm-up (`warm_up`) waits for it at
-        most WARM_UP_GLANCE_SECONDS, so the first turn, some 20 s later, finds the glance the warm-up read, and leaves
-        that turn its own wait. The call's end drops it."""
-        glance = self._glance
-        if glance is None:
-            return ""
-        if glance.calendar is not None and not glance.calendar.done() and not glance.waited:
-            if not warm_up:
-                glance.waited = True
-            wait = WARM_UP_GLANCE_SECONDS if warm_up else GLANCE_WAIT_SECONDS
-            # asyncio.wait neither cancels it nor raises when the call's end cancels it meanwhile
-            await asyncio.wait({glance.calendar}, timeout=wait)
-        if self._glance is not glance:  # the call ended meanwhile
-            return ""
-        return prompts.call_glance(
-            glance.lines(), at=glance.at, calendar=self.calendar is not None, mail=self.mail_digest is not None
-        )
-
-    def _rundown(self, offer: str, said: str) -> tuple[tuple[str, str], ...]:
-        """The reads for a yes to her offer of the rundown, said right after it (`rundown_reads`)."""
-        reads = rundown_reads(
-            offer, said, self.language, calendar=self.calendar is not None, mail=self.mail_digest is not None
-        )
-        if reads:
-            log.info("call: a yes to the rundown; code reads %s", ", ".join(name for name, _ in reads))
-        return reads
-
-    def _drop_glance(self) -> None:
-        if self._glance is not None and self._glance.calendar is not None:
-            self._glance.calendar.cancel()
-        self._glance = None
-
-    async def _practice_call_turn(
-        self, aci: str, text: str, practice: Session, on_retry: Callable[[], None] | None = None
-    ) -> Turn:
-        """What the user said on a practice call: in the practice conversation, answered with the practice rules (no
-        tools, no "→" line). A claimed reminder still gets code's note and line."""
-        conversation_id = practice.conversation_id
-        said_id = self.store.add_call_turn(conversation_id, aci, f"{prompts.CALL_MARK} {text}")
-        message = self.store.message(said_id)
-        conversation = self.context.enforce_limit(self.store.conversation(conversation_id))
-        try:
-            reply = await self.brain.answer(
-                conversation,
-                message,
-                max_tokens=CALL_MAX_TOKENS,
-                practice=self.babble.turn(spoken=True),
-                on_retry=on_retry,
-            )
-        except GemmaError as exc:
-            log.error("practice call turn: Gemma failed: %s", exc)
-            if isinstance(exc, ModelPausedError):  # as on an ordinary call: code's line (English), never the model's
-                return Turn("", code_text=self._paused_spoken())
-            return Turn(prompts.call_lines(practice.code, name=self.cfg.name).lost)
-        said_text = whole_sentences(reply.text)
-        reply_id = self.store.add_call_reply(conversation_id, aci, said_text, said_id)
-        if reply.reminder:
-            await self._call_notes(aci, conversation_id, said_id, [reply.reminder])
-        log.info("practice call turn %d answered", said_id)
-        return Turn(said_text, reply_id=reply_id, end_call=reply.end_call, code_text=reply.reminder_spoken)
+        await self.call_host.call_warm_up(aci, practice=practice)
 
     async def practice_call_ended(self, aci: str) -> None:
-        """A practice call the user spoke in ended: practice ends and its recap goes out at once (no quiet-hours wait),
-        instead of the call summary. Texts typed during the call wait in the queue: they are answered first, as
-        practice turns (the recap reads them), for at most PRACTICE_DRAIN_S. A plain /babble resumes it."""
-        if self.babble.running(aci) is None:
-            return
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(self.queue.join(), PRACTICE_DRAIN_S)
-        if not self._no_call.is_set():
-            return  # the user called again meanwhile: that practice call's end ends practice
-        ended = self.babble.end("call")
-        if ended is not None:
-            await self.babble.finish(ended)
+        await self.call_host.practice_call_ended(aci)
 
     async def call_drop_waiting(self, aci: str) -> None:
-        """Drop a device action waiting for a yes; what did switch in the meantime is still a note (as in text)."""
-        if self.devices is None:
-            return
-        self.devices.cancel()
-        note = self.devices.take_note()
-        if note:
-            conversation_id = self.store.current_conversation().id
-            await self._call_notes(aci, conversation_id, None, [note])
+        await self.call_host.call_drop_waiting(aci)
 
     def call_interrupted(self, reply_id: int, heard: str) -> None:
-        """The user talked over the answer: history keeps what they heard of it."""
-        self.store.set_message_text(reply_id, heard)
-
-    async def _call_voice_ready(self) -> bool:
-        """The voice service can take a call now (both engines ready)."""
-        return self._call_voice is not None and voice_ready(await self._call_voice.health())
+        self.call_host.call_interrupted(reply_id, heard)
 
     async def call_note(self, aci: str, text: str) -> None:
-        conversation_id = self.store.current_conversation().id
-        await self._send(self.store.add_outgoing(conversation_id, aci, "note", text, None))
+        await self.call_host.call_note(aci, text)
 
     async def call_chords(self, aci: str) -> None:
-        """[chords]: after the call, one message from code: every chords result of the call in call order, its fixed
-        lines word for word (the exact chords, sections as found), then its source: the web page that holds the
-        chords, else the turn's Sources lines. Sent only when a transpose ran; stored as a note, never in her history.
-        The results wait in memory for this call only (a restart during the call loses them: a known gap)."""
-        results, self._call_chords = self._call_chords, []
-        self._chords_after = [result for result, _ in results if result.ok]  # the summary's check reads them
-        if not any(result.moved for result, _ in results):
-            return
-        parts = []
-        for result, sources in results:
-            if not result.ok:
-                continue
-            if result.source is not None:
-                source = f"\nSource: {result.source[0]}: {result.source[1]}"
-            else:
-                listed = [line for line in sources.splitlines()[1:] if line.strip()]
-                source = "\nSources:\n" + "\n".join(listed) if listed else ""
-            parts.append(result.lines + source)
-        await self.call_note(aci, f"{prompts.CHORDS_AFTER_CALL}\n" + "\n\n".join(parts))
-        log.info("calls: the chords message after the call sent (%d results)", len(parts))
+        await self.call_host.call_chords(aci)
 
     async def call_summary(self, aci: str, lines: list[str], minutes: int) -> None:
-        """A short summary of the call as a note (kept out of Gemma's history). After a call with a chords result, a
-        summary sentence with another chord is left out: code's message holds the exact ones."""
-        transcript = "\n".join(lines)[-12_000:]
-        messages = [
-            {"role": "system", "content": prompts.CALL_SUMMARY_RULES.format(name=self.cfg.name)},
-            {"role": "user", "content": transcript},
-        ]
-        try:
-            completion = await self.gemma.chat(messages, max_tokens=300)
-        except GemmaError as exc:
-            log.warning("call summary: Gemma failed: %s", exc)
-            return
-        summary = completion.content.strip()
-        if summary and self._chords_after:
-            checked = chords.check(summary, results=self._chords_after, sources=[], language=self.language)
-            if checked.left_out:
-                log.warning("call summary: %d sentences with chords not worked out left out", checked.left_out)
-                summary = checked.text
-        if summary:
-            await self.call_note(aci, prompts.CALL_SUMMARY.format(minutes=minutes, summary=summary))
+        await self.call_host.call_summary(aci, lines, minutes)
 
-    async def _call_notes(self, aci: str, conversation_id: int, reply_to: int | None, notes: list[str]) -> None:
-        for note in notes:
-            await self._send(self.store.add_outgoing(conversation_id, aci, "note", note, reply_to))
+    @property
+    def _glance(self) -> CallGlance | None:
+        return self.call_host.glance  # the host holds it; the tests read it here
+
+    # start-up, recovery, sweeping and retention: Lifecycle (lifecycle.py) does the work; these names stay for the tests,
+    # `process` and `_unlocked`
+    def sweep_files(self) -> int:
+        return self.lifecycle.sweep_files()
+
+    async def retention_pass(self) -> bool:
+        return await self.lifecycle.retention_pass()
+
+    def _welcome_text(self) -> str:
+        return self.lifecycle.welcome_text()
 
     def _is_stale(self, message: Message) -> bool:
-        """Sent before this start and older than the recovery window: missed while the bridge was down."""
-        sent_at = (message.signal_ts or 0) / 1000
-        return 0 < sent_at < self._started_at and self._clock() - sent_at > self.cfg.recover_window_seconds
+        return self.lifecycle.is_stale(message)
+
+    async def _offline_note(self, message: Message) -> None:
+        await self.lifecycle.offline_note(message)
+
+    async def _reminders_start_up(self) -> None:
+        await self.lifecycle.reminders_start_up()
 
     def _take_digest(self) -> str:
         count = int(self.store.get_state(UNANNOUNCED_KEY) or 0)
@@ -1597,121 +1153,12 @@ class App:
             await self._speak(message, text)
         self.profiler.note_activity()
 
+    # documents: DocumentsHost (documents_host.py) does the work; these names stay for the tests and `process`
     async def _save_documents(self, message: Message, attachments: list[Attachment]) -> tuple[str, bool]:
-        """Save the PDFs the allowed user sent into the documents folder and read them into the index; signal-cli's
-        copies go (as for photos). The message keeps where they were saved, the words sent with them below. Code's
-        note (saved where, or why not) and whether one was saved."""
-        notes: list[str] = []
-        paths: list[str] = []
-        documents = self.documents
-        when = datetime.fromtimestamp((message.signal_ts or 0) / 1000 or self._clock(), self.cfg.timezone)
-        for attachment in attachments[: prompts.DOCUMENTS_PER_MESSAGE]:
-            try:
-                if documents is None:
-                    raise DocumentError("not_shared")
-                if max(attachment.size, self._file_size(attachment.signal_id)) > MAX_BYTES:
-                    raise DocumentError("too_big")  # never fetched
-                data = await self.signal.get_attachment(message.peer_aci, attachment.signal_id)
-                file = await documents.save(data, attachment.filename, when)
-            except DocumentError as exc:
-                log.warning("message %d: a PDF not saved: %s", message.id, exc.code)
-                if exc.code == "not_shared" and documents is not None and not_estia_kb(documents.folder):
-                    notes.append(prompts.DOCUMENT_NOT_KB.format(folder=shown_folder(documents.folder)))  # as /docs
-                    continue
-                notes.append(prompts.DOCUMENT_NOT_SAVED.get(exc.code, prompts.DOCUMENT_NOT_SAVED["failed"]))
-                continue
-            except (SignalError, NotAllowedError) as exc:
-                log.warning("message %d: a PDF not fetched: %s", message.id, type(exc).__name__)
-                notes.append(prompts.DOCUMENT_NOT_SAVED["failed"])
-                continue
-            paths.append(file.path)
-            notes.append(saved_note(file))
-        if len(attachments) > prompts.DOCUMENTS_PER_MESSAGE:
-            notes.append(prompts.DOCUMENTS_LIMIT.format(count=prompts.DOCUMENTS_PER_MESSAGE))
-        self._drop_attachments(message.id)  # saved or not: signal-cli's copies go
-        words = message.text.partition("\n")[2]
-        where = ", ".join(paths) or prompts.DOCUMENT_NONE_SAVED
-        self.store.set_message_text(message.id, f"{prompts.DOCUMENT_MARK} {where}" + (f"\n{words}" if words else ""))
-        return "\n".join(notes), bool(paths)
-
-    async def _docs_command(self, args: str, message: Message) -> str:
-        """/docs: a look first (a PDF put there a minute ago is listed), then the list, newest first; the list names
-        them, so no note follows for these. /docs send N: that PDF back to the account that asked."""
-        documents = self.documents
-        if documents is None:
-            return prompts.DOCS_OFF
-        words = args.split()
-        if not words:
-            look = await documents.look(budget=LOOK_ON_REQUEST_SECONDS)
-            if look.problem:
-                if look.problem == "refused":
-                    return prompts.DOCS_REFUSED
-                if not_estia_kb(documents.folder):  # her config's folder, not the share, is the fix (live, 15 Oct)
-                    return prompts.DOCS_NOT_KB.format(folder=shown_folder(documents.folder))
-                return prompts.DOCS_CLOSED
-            documents.mark_announced([file.id for file in documents.files() if not file.announced])
-            return documents.listing()
-        if len(words) == 2 and words[0].lower() == "send" and words[1].lstrip("#").isdecimal():
-            return await self._send_document(documents, int(words[1].lstrip("#")), message)
-        return prompts.DOCS_USAGE
-
-    async def _send_document(self, documents: Documents, number: int, message: Message) -> str:
-        file = documents.find(f"#{number}")
-        if file is None:
-            return prompts.DOCS_NOT_FOUND.format(number=number)
-        try:
-            data = documents.read_file(file)
-        except DocumentError as exc:
-            return prompts.DOCS_NOT_SENT.format(why=prompts.DOCS_NOT_SENT_WHY.get(exc.code, exc.code))
-        try:
-            await self.signal.send_document(message.peer_aci, data, Path(file.path).name)
-        except (SignalError, NotAllowedError) as exc:
-            log.warning("/docs send: not sent: %s", type(exc).__name__)
-            return prompts.DOCS_NOT_SENT.format(why=prompts.DOCS_NOT_SENT_WHY["failed"])
-        log.info("/docs send: document %d sent, %d bytes", file.id, len(data))
-        return prompts.DOCS_SENT.format(number=file.id, name=file.path)
-
-    async def _documents_forever(self) -> None:
-        documents = self.documents
-        assert documents is not None
-        await asyncio.sleep(DOCUMENTS_FIRST_SECONDS)
-        await documents.warm()  # Vision's model prepared before the first scan (a deploy is a new build)
-        while True:
-            try:
-                await self.documents_tick()
-            except Exception:
-                log.exception("documents: the look failed; tried again later")
-            await asyncio.sleep(DOCUMENTS_TICK_SECONDS)
+        return await self.documents_host.save_documents(message, attachments)
 
     async def documents_tick(self) -> None:
-        """The hourly look at the folder (outside quiet hours; it starts never during a call, an answer or the lock,
-        reads LOOK_SECONDS at most and stops when a call or the lock begins: the rest a minute later), then the note
-        on new PDFs: held in quiet hours, skipped under /quiet. Gemma is used in neither."""
-        documents = self.documents
-        if documents is None or self.guard.locked or not self._no_call.is_set():
-            return
-        now = self._clock()
-        quiet = in_quiet_hours(datetime.fromtimestamp(now, self.cfg.timezone), self._documents_quiet)
-        try:
-            looked = float(self.store.get_state(LOOKED_KEY) or 0)
-        except ValueError:
-            looked = 0.0
-        if not quiet and not self._processing and now - looked >= self.cfg.documents_look_minutes * 60:
-            await documents.look(budget=LOOK_SECONDS, stop=lambda: self.guard.locked or not self._no_call.is_set())
-        text, found = documents.announcement()
-        if not found:
-            return
-        if self.initiative is not None and self.initiative.quiet:  # /quiet: skipped, not held
-            documents.mark_announced(found)
-            log.info("documents: the note on %d new document(s) skipped: /quiet", len(found))
-            return
-        if quiet or self.guard.locked:
-            return  # held until the quiet hours end
-        documents.mark_announced(found)
-        conversation = self.store.current_conversation()
-        for aci in sorted(self.cfg.allowed_acis):
-            await self._send(self.store.add_outgoing(conversation.id, aci, "note", text, None))
-        log.info("documents: the note on %d new document(s) sent", len(found))
+        await self.documents_host.documents_tick()
 
     async def _hear(
         self, message: Message, attachments: list[Attachment], *, language: str | None = None
@@ -1857,69 +1304,9 @@ class App:
             except OSError as exc:
                 log.warning("could not delete attachment file: %s", type(exc).__name__)
 
-    def sweep_files(self) -> int:
-        """Delete old files nothing waits for: signal-cli's downloads that no unanswered photo or voice note needs
-        (with their `<id>.preview` sidecars kept alongside), and leftovers of interrupted photo conversions and
-        spoken answers."""
-        keep = self.store.open_attachment_ids()
-        cutoff = self._clock() - SWEEP_SECONDS
-        removed = 0
-        folders: tuple[tuple[Path, set[str]], ...] = (
-            (self.cfg.signal_attachments_dir, keep),
-            (self.cfg.data_dir / "photos", set()),
-            (self.cfg.voice_dir, set()),
-        )
-        for folder, needed in folders:
-            try:
-                entries = list(folder.iterdir())
-            except FileNotFoundError:
-                continue
-            except OSError as exc:
-                log.warning("could not list %s: %s", folder.name, type(exc).__name__)
-                continue
-            for path in entries:
-                if path.name in needed or any(path.name.startswith(f"{name}.") for name in needed):
-                    continue
-                try:
-                    info = path.lstat()
-                    if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
-                        path.unlink()
-                        removed += 1
-                except OSError as exc:
-                    log.warning("could not sweep a file: %s", type(exc).__name__)
-        if removed:
-            log.info("swept %d old file(s) from the attachments and photo folders", removed)
-        return removed
-
-    async def _sweeper(self) -> None:
-        while True:
-            await asyncio.sleep(SWEEP_SECONDS)
-            self.sweep_files()
-
     def _mail_synced(self) -> bool:
         """The mail sync finished a round since the start (the digest's mail part waits for it)."""
         return self.mail_sync is None or self.mail_sync.rounds > 0
-
-    async def _status_lines(self) -> list[str]:
-        """Extra lines for mini_status: mail, the calendar, and which devices answer."""
-        lines = [self.mail_sync.status_line(self.cfg.timezone)] if self.mail_sync else []
-        if self.mail_sorter:
-            lines.append(self.mail_sorter.status_line())
-        if self.calendar:
-            lines.append(await self.calendar.status_line())
-        if self.devices:
-            lines.append(await self.devices.reachability())
-        if self.calls:
-            next_call = self.reminders.next_call() if self.reminders else ""
-            speech, turn = await self.calls.detectors()
-            lines.append(self.calls.status_line(next_call=next_call, detector=speech, turn=turn))
-        if self.music:
-            lines.append(self.music.status_line())
-        if self.web:
-            lines.append(f"Web search: {self.web.usage()}")
-        if self.maps:
-            lines.append(f"Maps: {self.maps.usage()}")
-        return lines
 
     async def _alert(self, text: str) -> None:
         """A watcher's alert or recovery: a note to every allowed user (never part of Gemma's history)."""
@@ -1927,25 +1314,6 @@ class App:
         for aci in sorted(self.cfg.allowed_acis):
             await self._send(self.store.add_outgoing(conversation.id, aci, "note", text, None))
         log.warning("alert sent: %d line(s)", text.count("\n") + 1)
-
-    async def status(self) -> StatusInfo:
-        return StatusInfo(
-            gemma=await self.gemma.status(),
-            queue_length=self.queue.qsize(),
-            last_learning_run=self.store.get_state(LAST_RUN_KEY),
-            db_bytes=self.store.db_size_bytes(),
-            messages=self.store.count_messages(),
-            restarts=self.signal.restarts,
-            parts=tuple(line.line() for line in part_lines(self.cfg, self.part_status.snapshot(), self._clock())),
-            security=tuple(
-                line.line()
-                for line in security_lines(
-                    self.part_status.security(), self._clock(), self.cfg.timezone, model=self.cfg.model
-                )
-            ),
-            reminders=self.reminders.status_line() if self.reminders else "",
-            initiative=tuple(self.initiative.status_lines()) if self.initiative else (),
-        )
 
     def _on_new(self) -> None:
         """/new: learn from the closing conversation soon; the kept video's captions go (memory only)."""
@@ -2099,7 +1467,7 @@ class App:
         out_id = self.store.add_outgoing(message.conversation_id, message.peer_aci, "note", busy, message.id)
         await asyncio.shield(self._send(out_id))  # once started, finish sending even if the answer arrives
 
-    # the lock, received problems, her account's devices, the model's pin, retention
+    # the lock, the model's pin
 
     async def _lock_reply(self, aci: str, timestamp: int, reply: str) -> None:
         """/lock and /unlock are answered at once, in code's words, and kept out of the history."""
@@ -2121,53 +1489,6 @@ class App:
             await self._reminders_start_up()
         if self.reminder_scheduler is not None:
             self.reminder_scheduler.notify()
-
-    async def _problems_loop(self) -> None:
-        async for problem in self.signal.problems():
-            try:
-                self.on_problem(problem)
-            except Exception:
-                log.exception("a receive problem could not be handled")
-
-    def on_problem(self, problem: ReceiveProblem) -> None:
-        """A message signal-cli could not open. From an allowed account with a changed safety number: recorded (doctor
-        and /status show it with the compare-then-trust steps), logged without the account."""
-        if problem.untrusted_identity and problem.sender in self.cfg.allowed_acis:
-            self._identity_changed.add(problem.sender)
-            self.part_status.identity_changed()
-            log.error(
-                "a message from the user was dropped: their safety number changed. Compare it on the phone, then trust "
-                "it with signal-cli (setup_assistant.md, 7. Operations, 'Safety number changed')"
-            )
-        elif problem.untrusted_identity:
-            log.info("a message from an account that is not allowed could not be opened (changed safety number)")
-        else:
-            log.warning("signal-cli could not open a message (%s)", problem.kind)
-
-    async def _linked_devices_loop(self) -> None:
-        while True:
-            try:
-                await self.check_linked_devices()
-            except Exception:
-                log.exception("linked devices: the check failed")
-            await asyncio.sleep(LINKED_DEVICES_SECONDS)
-
-    async def check_linked_devices(self) -> int | None:
-        """Count her own Signal account's devices (only this Mac is expected): kept in status.json; one note when the
-        count goes above this Mac (or up again)."""
-        try:
-            devices = await self.signal.list_devices()
-        except SignalError as exc:
-            log.warning("linked devices: not counted (%s)", type(exc).__name__)
-            return None
-        count = len(devices)
-        before = self.part_status.security().linked_devices
-        self.part_status.linked_devices(count)
-        if count > 1:
-            log.error("linked devices: %d devices on her Signal account; only this Mac is expected", count)
-            if before is None or count > before:
-                await self._alert(prompts.LINKED_ALERT.format(count=count))
-        return count
 
     def _paused_why_now(self) -> str:
         return self.model_pin.why if self.model_pin is not None else ""
@@ -2218,47 +1539,6 @@ class App:
                 await self.model_pin.check()
             except Exception:
                 log.exception("model pin: the check failed")
-
-    async def _retention_loop(self) -> None:
-        while True:
-            await asyncio.sleep(PRUNE_CHECK_SECONDS)
-            try:
-                await self.retention_pass()
-            except Exception:
-                log.exception("retention: the pass failed")
-
-    async def retention_pass(self) -> bool:
-        """With [privacy] keep_days: once a night (03:00-05:00), when nothing else runs, delete the older history, then
-        compact the database (it blocks for a moment). Whether it ran."""
-        keep = self.cfg.keep_days
-        if keep is None:
-            return False
-        now = self._clock()
-        local = datetime.fromtimestamp(now, self.cfg.timezone)
-        last = self.store.get_state(PRUNED_KEY)
-        if last is not None and now - float(last) < 20 * 3600:
-            return False
-        if not PRUNE_HOURS[0] <= local.hour < PRUNE_HOURS[1] or self._is_busy():
-            return False
-        pruned = self.store.prune(keep, now=now)
-        self.store.compact()
-        self.store.set_state(PRUNED_KEY, f"{now:.0f}")
-        log.info(
-            "retention: %d messages, %d pages and %d tool calls older than %d days deleted",
-            pruned.messages,
-            pruned.documents,
-            pruned.tool_calls,
-            keep,
-        )
-        return True
-
-    def _mark_alive(self) -> None:
-        self.store.set_state(ALIVE_KEY, f"{self._clock():.0f}")
-
-    async def _heartbeat(self) -> None:
-        while True:
-            await asyncio.sleep(ALIVE_SECONDS)
-            self._mark_alive()
 
 
 BRIDGE_LOG_BYTES = 10_000_000  # bridge.log is rotated in-process at this size ...

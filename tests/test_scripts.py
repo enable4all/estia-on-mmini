@@ -256,7 +256,7 @@ def test_setup_refuses_a_folder_that_is_not_a_git_clone(tmp_path: Path, dry: boo
     tools_stubs(bin_dir, called)
     result = in_a_terminal([*setup_sh(clone), *(["--dry-run"] if dry else [])], env)
     assert result.returncode == 1
-    assert "git clone https://github.com/enable4all/estia-on-mmini.git ~/estia" in result.stderr
+    assert "git clone https://github.com/enable4all/estia-one-mmini.git ~/estia" in result.stderr
     assert not called.exists()
 
 
@@ -304,6 +304,19 @@ def test_a_failed_homebrew_download_names_the_network_and_runs_nothing(tmp_path:
     assert result.returncode == 1
     assert "Could not download Homebrew's installer: check the internet connection" in result.stderr
     assert "brew: command not found" not in result.stderr
+
+
+def test_the_homebrew_question_says_why_and_what_is_recommended(tmp_path: Path) -> None:
+    """What Homebrew is for, what a no does, that nothing shows at the password, and "Recommendation: yes" before the
+    hint; Enter keeps the no (not a safety question: a no only stops setup)."""
+    clone, bin_dir, called, env = fake_mac(tmp_path)
+    stub(bin_dir, "curl", f'echo "curl $*" >> "{called}"; exit 7')
+    result = in_a_terminal(setup_sh(clone), env, typed="\n")
+    out = result.stdout + result.stderr
+    assert result.returncode == 1 and "curl" not in (called.read_text() if called.exists() else "")
+    assert "signal-cli (for Signal) and uv (for Python)" in out and "nothing shows while you type" in out
+    assert "No stops setup." in out and "Install Homebrew now? Recommendation: yes. [y/N] " in out
+    assert all(len(line) <= 135 for line in out.splitlines() if "Homebrew" in line)
 
 
 def test_the_homebrew_installer_is_shown_as_one_line_never_its_text(tmp_path: Path) -> None:
@@ -662,7 +675,7 @@ def test_every_program_after_sudo_is_named_by_its_full_path() -> None:
     assert programs_after_sudo("/usr/bin/sudo -u _estia -e /var/estia/x; /usr/bin/sudo -n -l -U alex (as root)") == []
     assert programs_after_sudo('"$sudo" "$estia" doctor; /usr/bin/sudo /bin/launchctl print x') == []
     sources = [
-        *sorted((ROOT / "src/local_assistant").glob("*.py")),
+        *sorted((ROOT / "src/local_assistant").rglob("*.py")),  # the prompts package's files too
         *sorted((ROOT / "scripts").glob("*.sh")),
         ROOT / "scripts/estia",
         ROOT / "scripts/estia-deploy",
@@ -897,6 +910,7 @@ def test_the_migration_dry_run_changes_nothing_and_never_calls_sudo(tmp_path: Pa
     tree = "'user:_estia allow list,search,readattr,readextattr,readsecurity,read,file_inherit,directory_inherit'"
     assert f"would run: /bin/chmod -h +a {tree} {home / 'dev'} … and 1 more" in done.stdout  # as you, after the move
     assert f"would run: /bin/chmod +a 'user:_estia allow search' {home}" in done.stdout
+    assert "Her projects folder, read-only for her, at the end of the move (no admin rights needed):" in done.stdout
     assert "sk-made-up-0000" not in done.stdout + done.stderr
     assert not log.exists() and snapshot(tmp_path) == before
     assert (
@@ -918,6 +932,7 @@ def test_the_migration_dry_run_without_projects_shares_nothing(tmp_path: Path) -
     assert "config: projects: off (no [projects] in your config)" in done.stdout
     assert "+a" not in done.stdout  # no ACL entry for her, and no folder suggested
     assert "Projects are off (no [projects] in the config): nothing to share." in done.stdout
+    assert "Her projects folder" not in done.stdout  # no heading over nothing to share
     assert not log.exists()
 
 

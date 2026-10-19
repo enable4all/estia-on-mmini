@@ -1,6 +1,7 @@
 """Her read-only access to your projects folder: the exact chmod argv (a recording runner and canned ACLs, since her
 user does not exist in tests), and one real run on a temporary folder with the current user."""
 
+import io
 import json
 import os
 import pwd
@@ -723,7 +724,7 @@ def test_the_share_names_what_every_account_may_open_in_your_home(home: Path) ->
     assert share.share_projects(home / "dev", home, run=Recorder(), acl=no_acl, say=said.append) == 0
     text = "\n".join(said)
     assert ".config" in text and ".zshrc" in text and "secret.txt" not in text and "Notes" not in text
-    assert f"chmod o-rwx {shlex.quote(str(home / '.config'))} {shlex.quote(str(home / '.zshrc'))}" in text
+    assert f"chmod -h o-rwx {shlex.quote(str(home / '.config'))} {shlex.quote(str(home / '.zshrc'))}" in text
 
 
 def test_the_share_names_what_every_account_may_open_in_each_folder_on_the_way(home: Path) -> None:
@@ -744,7 +745,7 @@ def test_the_share_names_what_every_account_may_open_in_each_folder_on_the_way(h
     assert share.share_projects(work, home, run=Recorder(), acl=no_acl, say=said.append) == 0
     line = next(line for line in said if str(home / "code") in line and line.startswith("!"))
     assert "other" in line and "notes.txt" in line and "mine" not in line and "work" not in line.split(":", 1)[0]
-    assert f"chmod o-rwx {shlex.quote(str(home / 'code' / 'notes.txt'))} {shlex.quote(str(other))}" in line
+    assert f"chmod -h o-rwx {shlex.quote(str(home / 'code' / 'notes.txt'))} {shlex.quote(str(other))}" in line
 
 
 def test_a_home_that_cannot_be_listed_is_read_by_the_usual_names(home: Path) -> None:
@@ -778,4 +779,407 @@ def test_the_documents_share_names_them_too(documents: Path) -> None:
         )
         == 0
     )
-    assert any(".gitconfig" in line and "chmod o-rwx" in line for line in said)
+    assert any(".gitconfig" in line and "chmod -h o-rwx" in line for line in said)
+
+
+# closing what is open (owner, 19 Oct): the share asks once, in a terminal, and Enter keeps everything as it is
+
+
+class Closing(Recorder):
+    """Records every argv and really runs the share's own `chmod -h o-rwx` (it touches only the test's files)."""
+
+    def __call__(self, argv: Sequence[str]) -> tuple[int, str]:
+        self.asked.append(tuple(argv))
+        if tuple(argv[:3]) in ((CHMOD, "-h", "o-rwx"), (CHMOD, "-h", "o-r")):
+            return share.run_tool(argv)
+        return self.code, self.out
+
+
+def open_home(home: Path) -> None:
+    home.chmod(0o750)
+    (home / ".ssh").chmod(0o700)
+    (home / ".zshrc").write_text("export PATH=x\n")
+    (home / ".zshrc").chmod(0o644)
+    (home / ".config").mkdir()
+    (home / ".config").chmod(0o755)
+
+
+def closing(argvs: Sequence[tuple[str, ...]]) -> list[tuple[str, ...]]:
+    return [argv for argv in argvs if argv[:3] in ((CHMOD, "-h", "o-rwx"), (CHMOD, "-h", "o-r"))]
+
+
+def test_with_a_yes_the_share_closes_what_every_account_may_open(home: Path) -> None:
+    open_home(home)
+    run, said, questions = Closing(), list[str](), list[str]()
+
+    def ask(question: str) -> bool:
+        questions.append(question)
+        return True
+
+    assert share.share_projects(home / "dev", home, run=run, acl=no_acl, say=said.append, ask=ask) == 0
+    assert questions == [share.CLOSE_ASK]
+    assert closing(run.asked) == [(CHMOD, "-h", "o-rwx", str(home / ".config"), str(home / ".zshrc"))]
+    assert share.open_to_others(home, {home / "dev"}) == []
+    assert (home / ".zshrc").stat().st_mode & 0o777 == 0o640  # you and your group keep it
+    assert (home / ".config").stat().st_mode & 0o777 == 0o750
+    assert said[-1] == share.CLOSED.format(names=".config, .zshrc")
+
+
+def test_without_a_yes_nothing_is_closed_and_the_fix_stays_printed(home: Path) -> None:
+    open_home(home)
+    run, said = Closing(), list[str]()
+    assert share.share_projects(home / "dev", home, run=run, acl=no_acl, say=said.append, ask=lambda q: False) == 0
+    assert closing(run.asked) == []
+    assert share.open_to_others(home, {home / "dev"}) == [home / ".config", home / ".zshrc"]
+    assert any("chmod -h o-rwx" in line for line in said)
+
+
+def test_without_a_terminal_or_in_a_dry_run_nothing_is_asked(home: Path) -> None:
+    open_home(home)
+
+    def never(question: str) -> bool:
+        raise AssertionError("asked")
+
+    run = Closing()
+    assert share.share_projects(home / "dev", home, run=run, acl=no_acl, say=lambda line: None) == 0
+    assert (
+        share.share_projects(home / "dev", home, run=run, acl=no_acl, say=lambda line: None, ask=never, dry=True) == 0
+    )
+    assert closing(run.asked) == []
+    assert share.open_to_others(home, {home / "dev"}) == [home / ".config", home / ".zshrc"]
+
+
+def test_nothing_open_means_no_question(home: Path) -> None:
+    home.chmod(0o750)
+    (home / ".ssh").chmod(0o700)
+
+    def never(question: str) -> bool:
+        raise AssertionError("asked")
+
+    assert share.share_projects(home / "dev", home, run=Closing(), acl=no_acl, say=lambda line: None, ask=never) == 0
+
+
+def test_one_question_closes_your_home_and_each_folder_on_the_way(home: Path) -> None:
+    open_home(home)
+    (home / "dev").chmod(0o700)  # not the shared folder here
+    work = home / "code" / "work"
+    work.mkdir(parents=True)
+    (home / "code").chmod(0o700)
+    (home / "code" / "notes.txt").write_text("x\n")
+    (home / "code" / "notes.txt").chmod(0o644)
+    run, questions = Closing(), []
+
+    def ask(question: str) -> bool:
+        questions.append(question)
+        return True
+
+    assert share.share_projects(work, home, run=run, acl=no_acl, say=lambda line: None, ask=ask) == 0
+    assert len(questions) == 1
+    closed = [path for argv in closing(run.asked) for path in argv[3:]]
+    assert closed == [str(home / ".config"), str(home / ".zshrc"), str(home / "code" / "notes.txt")]
+    assert share.open_to_others(home / "code", {work}) == []
+
+
+def test_a_close_that_fails_is_said_and_the_share_still_counts(home: Path) -> None:
+    open_home(home)
+
+    def refuse(argv: Sequence[str]) -> tuple[int, str]:  # the share's own chmods work: only the close fails
+        return (1, "chmod: Operation not permitted") if tuple(argv[:3]) == (CHMOD, "-h", "o-rwx") else (0, "")
+
+    said: list[str] = []
+    assert share.share_projects(home / "dev", home, run=refuse, acl=no_acl, say=said.append, ask=lambda q: True) == 0
+    paths = shlex.join([str(home / ".config"), str(home / ".zshrc")])
+    assert said[-1] == share.NOT_CLOSED.format(
+        names=".config, .zshrc", why="chmod: Operation not permitted", fix=share.OPEN_FIX.format(paths=paths)
+    )
+
+
+def test_the_documents_share_asks_too(documents: Path) -> None:
+    (documents / ".ssh").chmod(0o700)
+    (documents / ".gitconfig").write_text("[user]\n")
+    (documents / ".gitconfig").chmod(0o644)
+    run = Closing()
+    assert (
+        share.share_documents(
+            documents / "Estia-KB",
+            documents,
+            owner="alex",
+            run=run,
+            acl=no_acl,
+            say=lambda line: None,
+            ask=lambda q: True,
+        )
+        == 0
+    )
+    assert closing(run.asked) == [(CHMOD, "-h", "o-rwx", str(documents / ".gitconfig"))]
+    assert (documents / ".gitconfig").stat().st_mode & 0o777 == 0o640
+
+
+def test_the_question_is_read_from_the_terminal_and_enter_closes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Owner, 19 Oct: Enter takes the safe answer, closing; a no, anything else, the end of input and (below) a Ctrl-C
+    keep everything as it is."""
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    assert share.terminal_ask() is None  # no terminal (the move's end in a pipe): the fix is printed, nothing asked
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+    ask = share.terminal_ask()
+    assert ask is not None
+    monkeypatch.setattr("sys.stdin", io.StringIO("y\n\nno\nYes\nlater\n"))  # then the end of input
+    assert [ask("Close?") for _ in range(6)] == [True, True, False, True, False, False]
+
+
+def test_the_usual_names_cover_ai_tools_and_toolchains() -> None:
+    """Doctor, as her, cannot list your home: an open ~/.claude (an AI's notes and settings) went unnamed (19 Oct)."""
+    usual = set(share.USUAL_NAMES)
+    assert {".claude", ".claude.json", ".codex", ".gemini", ".cargo", ".rustup", ".swiftpm", ".matplotlib"} <= usual
+    assert ".ollama" in usual  # Ollama's models and key: Ollama runs as you, nothing of hers reads them
+    assert "opt" not in usual  # Ollama's own build: doctor reads it as her (test below)
+    assert list(share.USUAL_NAMES) == sorted(share.USUAL_NAMES)
+
+
+def test_opt_keeps_her_way_to_ollamas_build_and_what_else_is_open_is_named(home: Path) -> None:
+    """~/opt/ollama is Ollama's official build: doctor, run as her, reads its program and libraries through ~/opt, so
+    ~/opt keeps its pass-through and only its listing closes (chmod o-r); what else in ~/opt lets every account in is
+    named and closed like any other entry (review of 0.9.5: skipping ~/opt whole left a token in it unnamed)."""
+    open_home(home)
+    (home / "opt" / "ollama").mkdir(parents=True)
+    (home / "opt").chmod(0o755)
+    (home / "opt" / "ollama").chmod(0o755)
+    (home / "opt" / "token.txt").write_text("x\n")
+    (home / "opt" / "token.txt").chmod(0o644)
+    run, said = Closing(), list[str]()
+    assert share.share_projects(home / "dev", home, run=run, acl=no_acl, say=said.append, ask=lambda q: True) == 0
+    text = "\n".join(said)
+    assert "chmod -h o-r " + shlex.quote(str(home / "opt")) in text  # the narrower fix for ~/opt itself
+    assert "token.txt" in text and "ollama" not in text.replace("Ollama", "")
+    assert (CHMOD, "-h", "o-r", str(home / "opt")) in closing(run.asked)
+    assert (home / "opt").stat().st_mode & 0o777 == 0o751  # she still passes through to Ollama's build
+    assert (home / "opt" / "ollama").stat().st_mode & 0o777 == 0o755
+    assert (home / "opt" / "token.txt").stat().st_mode & 0o777 == 0o640
+
+
+def test_an_opt_without_ollamas_build_or_in_a_folder_on_the_way_is_like_any_other(home: Path) -> None:
+    open_home(home)
+    (home / "opt").mkdir()
+    (home / "opt").chmod(0o755)
+    assert home / "opt" in share.open_to_others(home, {home / "dev"})
+    (home / "dev").chmod(0o700)
+    work = home / "code" / "work"
+    work.mkdir(parents=True)
+    (home / "code").chmod(0o700)
+    (home / "code" / "opt" / "ollama").mkdir(parents=True)
+    (home / "code" / "opt").chmod(0o755)
+    said: list[str] = []
+    assert share.share_projects(work, home, run=Closing(), acl=no_acl, say=said.append) == 0
+    line = next(line for line in said if str(home / "code") in line and line.startswith("!"))
+    assert "chmod -h o-rwx" in line and str(home / "code" / "opt") in line  # only your home's ~/opt is Ollama's
+
+
+def test_an_entry_gone_before_the_close_is_no_failure(home: Path) -> None:
+    """Gone between the question and the chmod: nothing of it is open any more, so it is not named as not closed,
+    and what was closed is said (review, 19 Oct: the line named every path, the closed one too)."""
+    open_home(home)
+    said: list[str] = []
+
+    def vanish_first(argv: Sequence[str]) -> tuple[int, str]:
+        if tuple(argv[:3]) == (CHMOD, "-h", "o-rwx"):
+            (home / ".zshrc").unlink()
+            return share.run_tool(argv)  # chmod closes .config and fails on the gone .zshrc
+        return 0, ""
+
+    assert (
+        share.share_projects(home / "dev", home, run=vanish_first, acl=no_acl, say=said.append, ask=lambda q: True) == 0
+    )
+    assert said[-1] == share.CLOSED.format(names=".config")
+    assert (home / ".config").stat().st_mode & 0o777 == 0o750
+
+
+def test_without_a_terminal_for_the_answer_or_the_question_nothing_is_asked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Output sent to a file would hide the question while the script waits: both ends must be a terminal."""
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: False)
+    assert share.terminal_ask() is None
+
+
+def test_ctrl_c_at_the_question_is_a_no(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The share is done by then: a Ctrl-C keeps everything as it is, never a traceback and a failed exit (the move's
+    end reads that as the share failing)."""
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+    ask = share.terminal_ask()
+    assert ask is not None
+
+    def interrupted() -> str:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("sys.stdin.readline", interrupted)
+    assert ask("Close?") is False
+
+
+def test_an_access_rule_that_lets_her_in_is_never_called_closed(home: Path) -> None:
+    """The mode bits close, an ACL entry for every account (or her account) may still let her in: then the name is
+    not closed, and the line says why (review of 0.9.5)."""
+    open_home(home)
+    everyone = "group:ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000000C:everyone:12:allow:read"  # privacy-ok: macOS's id of everyone
+
+    def acl(path: Path) -> list[str]:
+        return [everyone] if path.name == ".zshrc" else []
+
+    said: list[str] = []
+    assert share.share_projects(home / "dev", home, run=Closing(), acl=acl, say=said.append, ask=lambda q: True) == 0
+    assert said[-1].startswith("! Not closed: .zshrc") and "access rule" in said[-1]
+    assert (home / ".config").stat().st_mode & 0o777 == 0o750
+
+
+def test_nothing_left_to_close_says_nothing(home: Path) -> None:
+    open_home(home)
+    (home / ".config").chmod(0o700)
+    said: list[str] = []
+
+    def vanish(argv: Sequence[str]) -> tuple[int, str]:
+        if tuple(argv[:3]) == (CHMOD, "-h", "o-rwx"):
+            (home / ".zshrc").unlink()
+            return share.run_tool(argv)
+        return 0, ""
+
+    assert share.share_projects(home / "dev", home, run=vanish, acl=no_acl, say=said.append, ask=lambda q: True) == 0
+    assert not any(line.startswith("✓ Closed") or line.startswith("! Not closed") for line in said)
+
+
+def test_the_question_is_written_where_the_answer_is_read(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """input() may write its prompt to stderr: the share writes the question to stdout itself, the one end it checks
+    is a terminal, then reads the answer from stdin (review of 0.9.5)."""
+
+    class Typed(io.StringIO):
+        def isatty(self) -> bool:
+            return True
+
+    monkeypatch.setattr("sys.stdin", Typed("y\n"))
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+    ask = share.terminal_ask()
+    assert ask is not None and ask("Close them now?") is True
+    assert "Close them now? [Y/n] " in capsys.readouterr().out
+
+
+# the close question in plain words (owner, 19 Oct: "word it good, I do not fully understand it, go safe"): what is
+# open, to whom, what closing changes and never breaks, the command that really runs; Recommendation: yes, Enter: yes
+
+
+def asked_close(home: Path) -> tuple[list[str], list[str]]:
+    said: list[str] = []
+    questions: list[str] = []
+
+    def ask(question: str) -> bool:
+        questions.append(question)
+        return False
+
+    assert share.share_projects(home / "dev", home, run=Closing(), acl=no_acl, say=said.append, ask=ask) == 0
+    return said, questions
+
+
+def test_the_close_question_says_what_closing_does_and_never_breaks(home: Path) -> None:
+    open_home(home)
+    said, questions = asked_close(home)
+    assert questions == [share.CLOSE_ASK]
+    assert "chmod -h o-rwx" in share.CLOSE_ASK and "Recommendation: yes." in share.CLOSE_ASK
+    assert said[-1] == share.CLOSE_WHAT  # said just before the question
+    what = share.CLOSE_WHAT
+    assert "her account" in what and "you keep full access" in what and "people who log in" in what.lower()
+    assert "Nothing in them changes" in what and "her share and Ollama keep working" in what
+    # review, 19 Oct: no "your group (staff)" or "accounts that programs run as" alone; what stops, by example
+    assert "a guest file share or a web page served from them stops too" in what and "group (staff)" not in what
+    opened = next(line for line in said if line.startswith("! In your home"))
+    assert "the macOS default for a new file or folder" in opened
+    assert "her code never opens them, but a program that took over her account could" in opened
+    assert "by name" not in opened and "so may she" not in opened
+    text, fix = opened.split("\n")  # the fix on a line of its own
+    assert fix.startswith("  Close what should stay yours (no admin rights needed): chmod -h o-rwx ")
+    assert "as you" not in opened
+    for text in (share.CLOSE_WHAT, share.CLOSE_ASK, share.CLOSE_ASK_OPT, share.CLOSE_ASK_OPT_ONLY):
+        assert all(len(line) <= 135 for line in text.splitlines()), text
+
+
+def test_the_close_question_names_opts_own_command(home: Path) -> None:
+    """~/opt with Ollama's build closes with chmod -h o-r, not o-rwx: the question names the one that runs."""
+    open_home(home)
+    (home / "opt" / "ollama").mkdir(parents=True)
+    (home / "opt").chmod(0o755)
+    _said, questions = asked_close(home)
+    assert questions == [share.CLOSE_ASK_OPT] and "chmod -h o-r " in share.CLOSE_ASK_OPT
+    (home / ".zshrc").chmod(0o600)
+    (home / ".config").chmod(0o700)
+    _said, questions = asked_close(home)
+    assert questions == [share.CLOSE_ASK_OPT_ONLY]
+    assert "chmod -h o-r " in share.CLOSE_ASK_OPT_ONLY and "o-rwx" not in share.CLOSE_ASK_OPT_ONLY
+
+
+def test_without_a_terminal_the_share_says_where_the_question_is_asked(home: Path) -> None:
+    """Run by an installing AI (no terminal): nothing is asked, and the line says how the person closes them
+    (audit, 19 Oct, 4.11): the chmod line above in their own Terminal window, or the script there."""
+    open_home(home)
+    said: list[str] = []
+    assert share.share_projects(home / "dev", home, run=Closing(), acl=no_acl, say=said.append) == 0
+    assert said[-1] == share.CLOSE_NO_TERMINAL.format(script=share.SCRIPT)
+    assert "the chmod lines above" in said[-1]
+    said.clear()
+    assert share.share_documents(home / "Estia-KB", home, owner="alex", run=Closing(), acl=no_acl, say=said.append) == 0
+    assert said[-1] == share.CLOSE_NO_TERMINAL.format(script=share.DOCUMENTS_SCRIPT)
+
+
+def test_a_dry_run_shows_the_close_question_it_would_ask(home: Path) -> None:
+    """The dry run an AI reads names the question a terminal gets (audit, 19 Oct, 4.12), and asks nothing."""
+    open_home(home)
+    said: list[str] = []
+
+    def never(question: str) -> bool:
+        raise AssertionError("asked")
+
+    assert (
+        share.share_projects(home / "dev", home, run=Closing(), acl=no_acl, say=said.append, ask=never, dry=True) == 0
+    )
+    assert said[-1] == share.CLOSE_DRY_RUN.format(ask=share.CLOSE_ASK)
+
+
+def test_after_the_move_the_heading_comes_only_with_a_folder_to_share(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The move's end (--after-move): "Her projects folder" is said only when there is one; with projects off, one
+    line and no heading (audit, 19 Oct, 4.10)."""
+    config = home / ".config/local-assistant/config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text('bot_number = "+306900000000"\n')
+    monkeypatch.setenv("HOME", str(home))
+    assert share.main(["--after-move", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "Her projects folder" not in out and "Projects are off" in out
+    config.write_text('bot_number = "+306900000000"\n[projects]\n')
+    assert share.main(["--after-move", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith(share.AFTER_MOVE_DRY_RUN) and "no admin rights needed" in share.AFTER_MOVE_DRY_RUN
+
+
+def test_the_share_says_her_account_only_passes_through_in_plain_words(home: Path) -> None:
+    """Review, 19 Oct: "passes through, by name" was jargon; doctor's words: her account cannot list your home."""
+    said: list[str] = []
+    assert share.share_projects(home / "dev", home, run=Recorder(), acl=no_acl, say=said.append) == 0
+    shared = next(line for line in said if line.startswith("✓"))
+    assert "it only passes through to that folder: her account cannot list your home" in shared
+    assert "by name" not in shared
+    said.clear()
+    assert (
+        share.share_documents(home / "Estia-KB", home, owner="alex", run=Recorder(), acl=no_acl, say=said.append) == 0
+    )
+    shared = next(line for line in said if line.startswith("✓"))
+    assert "she only passes through to that folder: her account cannot list your home" in shared
+    assert "by name" not in shared
+
+
+def test_opts_line_says_what_stays_in_plain_words() -> None:
+    assert share.OPT_TEXT == (
+        "every account may see what is in opt, which holds Ollama; her account still needs its way through it (the "
+        "doctor checks Ollama as her)"
+    )
+    assert all(len(line) <= 135 for line in share.CLOSE_ASK_OPT.splitlines() if line)
+    assert len(share.CLOSE_ASK_OPT + " [Y/n] ") <= 135

@@ -6,7 +6,7 @@ Please do not open a public issue for a security problem.
 
 Report it privately with GitHub's private vulnerability reporting: on the repository's **Security** tab, choose
 **Report a vulnerability**. Direct link:
-<https://github.com/enable4all/estia-on-mmini/security/advisories/new>.
+<https://github.com/enable4all/estia-one-mmini/security/advisories/new>.
 
 Useful details: the commit you tested, the steps to reproduce, and what an attacker could do. Please leave real
 phone numbers, account IDs, mail, calendar entries and keys out of the report; a made-up example is enough.
@@ -360,11 +360,15 @@ her folders before the move into her own user: a copy taken then still works. In
   by her account once it knows the name. That is the macOS default for a new file or folder: `~/.zshrc`, `~/.gitconfig`,
   `~/.config` and the settings in it, other folders of code. Her code never does; a program that took over her
   account (a flaw in PDFKit or Vision, below) could. Both share scripts, and doctor in her own user, name what directly
-  in your home lets every account in, with the command that closes it (`chmod o-rwx`); they change nothing of yours.
-  Doctor runs as her and cannot list your home: it looks up only the usual names (`.zshrc`, `.config`, `.ssh` and the
-  like), and says so. A projects folder deeper than your home's first level (`~/code/work`) passes her through each
+  in your home lets every account in, with the command that closes it (`chmod -h o-rwx`); an `~/opt` that holds Ollama's
+  own build keeps only her way through it (doctor reads that build as her), so for it the fix closes its listing
+  (`chmod -h o-r`), and what else in it lets every account in is named too. In a terminal the share scripts then ask once
+  whether to run it, as you (Enter runs it; a no keeps everything as it is), and say what is closed; a name an access rule (an ACL
+  entry) still opens to her is never called closed. Doctor changes nothing of yours.
+  Doctor runs as her and cannot list your home: it looks up only the usual names (`.zshrc`, `.config`, `.ssh`,
+  `.claude` and the like), and says so. A projects folder deeper than your home's first level (`~/code/work`) passes her through each
   folder on the way too (`~/code`), whatever its own mode: the projects share names what each of those folders holds
-  that every account may open, with the same `chmod o-rwx`; doctor does not look there.
+  that every account may open, with the same `chmod -h o-rwx`; doctor does not look there.
 - Any compromise of her account could also leave files of any kind in `~/Estia-KB`: a PDF that exploits a flaw in
   PDFKit or Vision, or a flaw in signal-cli (which reads every sender's messages) or in the call helper (which starts
   for every incoming call). A `.command` file or an app made on the Mac carries no download mark, so Gatekeeper

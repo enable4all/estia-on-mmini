@@ -65,7 +65,7 @@ disk_free_min_percent = 10
 #]
 
 # Projects (extra, off by default): the git projects in one folder of this Mac, read-only. Off without [projects];
-# setup asks (most people: no). Levels: summary (the README, open to-do items and recent commits), docs (also the
+# setup asks (Recommendation: no). Levels: summary (the README, open to-do items and recent commits), docs (also the
 # project's documents) and code (also its source code). Only files git tracks, never secret-like names such as .env,
 # never outside the folder you named. In her own user (_estia) root is your folder's absolute path (the move writes
 # it), and her user reads that folder read-only, nothing else in your home but ~/Estia-KB with [documents] (below):

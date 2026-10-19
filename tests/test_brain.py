@@ -1340,7 +1340,7 @@ async def test_a_youtube_link_in_the_message_puts_codes_line_last(store: Store) 
 async def test_without_a_youtube_link_her_request_is_the_one_from_before(store: Store) -> None:
     """No YouTube link in the current message (and no video kept), or a call: the request is byte for byte the one
     before code's line for a link in the message: the context's messages as they are, the same tools. A text in every
-    request once cost call_goodbye 30 points (AGENTS.md, Gotchas)."""
+    request once cost call_goodbye 30 points (docs/agents/prompts-evals.md, Gotchas)."""
     profile = Profile(store)
     context = ContextBuilder(store, profile, TZ)
     tools = Tools(store, profile, TZ, no_fetch, videos=VideoReader(OneLine(), FakeGemma(), kept=KeptVideos()))

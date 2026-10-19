@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 ACTIONS = ("transpose", "capo", "notes", "key")
 NAME = "chords"  # never music_…: that prefix is Spotify's handler, which refuses calls
 
-# One tool, not four: every description is in every request, calls included (AGENTS.md, Gotchas)
+# One tool, not four: every description is in every request, calls included (docs/agents/prompts-evals.md, Gotchas)
 CHORDS_SCHEMA: dict[str, Any] = {
     "type": "function",
     "function": {

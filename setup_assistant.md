@@ -44,7 +44,7 @@ Then get the code. Clone it to `~/estia`, outside Desktop, Documents and Downloa
 from those folders, so the bridge would fail at boot with "Operation not permitted".
 
 ```sh
-git clone https://github.com/enable4all/estia-on-mmini.git ~/estia && cd ~/estia
+git clone https://github.com/enable4all/estia-one-mmini.git ~/estia && cd ~/estia
 ```
 
 From here on, `<repo>` is that folder. Homebrew sends anonymous usage reports (analytics) unless told not to:
@@ -148,7 +148,8 @@ Memory: while loaded, the model needs about 18 to 20 GB, so this guide assumes a
 `gemma4:12b-mlx` (7.7 GB, ID `ded7a2735003`), as `scripts/setup.sh` does there: in the commands below in place of
 `gemma4:26b-mlx`, with `num_ctx 16384` on 16 GB. Its answers will be weaker. A Mac with 16 or 24 GB of memory gets the
 smaller model, Gemma 4 12B (`gemma4:12b-mlx`), which failed some of her safety tests (15 Oct, run twice; SECURITY.md,
-known gaps): setup says what failed and downloads it only on a yes. 32 GB with Gemma 26B is the tested setup.
+known gaps): setup says to use it with caution, and what that means for her answers, and downloads it only on a
+yes. 32 GB with Gemma 26B is the tested setup.
 
 Then give the model the name the code uses, with a larger context window and the prompt Google wrote for its size.
 Ollama's default window is small on many setups, and Ollama cuts a longer prompt without a word. Estia sends about 12,000
@@ -245,7 +246,7 @@ another version, and doctor's signal-cli line shows ! for one.
 
 **Registration Lock.** Right after the SMS code, `scripts/setup.sh` asks to set one: a PIN, typed hidden twice, that
 Signal asks for before her number can be registered on another device. Without it, whoever receives her SMS code (a SIM
-swap, a lapsed prepaid number, the device with her SIM) can take her number over. Store the PIN in your password
+swap, a lapsed prepaid number, the device with her SIM) can take her number over. Keep the PIN in your password
 manager: without it and her data, the number is locked for 7 days. Setup passes it to signal-cli the same way, on its
 input, never on a command line and never on the screen:
 
@@ -316,7 +317,7 @@ Edit the file:
 5. `signal_cli`: `"signal-cli"` finds the Homebrew binary on the PATH, which the launchd service also uses. Give a full
    path if you installed it elsewhere.
 6. Everything else can stay commented out until you turn that part on (section 3). `[projects]` is an extra too, off
-   by default: setup asks whether she should see projects on this Mac (most people: no), then the folder and the level
+   by default: setup asks whether she should see projects on this Mac (Recommendation: no), then the folder and the level
    (section 3, Projects). `[documents]` (your PDFs) is an extra, off by default, that setup does not ask about yet
    (section 3, Documents). `[chords]` (transposing chords) is an extra, off by default, that `scripts/setup.sh
    --extras` adds (section 3, Transposing chords). One exception: reminders are on without a `[reminders]`
@@ -472,7 +473,8 @@ one may have, follow SECURITY.md, "If the Mac is compromised".
 projects folder of yours. Besides it, only `~/Estia-KB` with Documents on (section 3, Documents), and nothing
 else in your home: there she only passes through to those folders, by name, and her code never lists or reads anything
 (SECURITY.md, known gaps, says what passing through by name leaves open; in her own user, doctor's Your home line
-names what in your home lets every account in, with the `chmod o-rwx` that closes it). The move shares the projects
+names what in your home lets every account in, with the `chmod -h o-rwx` that closes it; the share scripts name it too,
+and ask once whether to run it). The move shares the projects
 folder at its end; run it again, or take it back, any time (as you, no admin rights):
 
 ```sh
@@ -621,14 +623,18 @@ yet. The order that worked for moving an install with voice, on a Mac reached ov
 move; with calls set up, her text "My voice is ready: you can call me now." (up to about 15 minutes), else
 `curl -s http://127.0.0.1:8150/health` showing `stt` and `tts` ready, then a text and a call; then `scripts/harden.sh`
 in your own Terminal with a second SSH session open; then a new SSH login from your laptop and one more call (after
-`--nuclear`, also the programs on the Mac you open from your laptop: the firewall). Each setting is shown with its state and one line on why; a
-change is made only on your yes, and `/usr/bin/sudo` asks for your Mac password once, before the first change.
+`--nuclear`, also the programs on the Mac you open from your laptop: the firewall). Each setting is shown with its
+state and one line on why; a change is made only on your yes. `/usr/bin/sudo` asks for your Mac password when first
+needed (in her own user also to read her files as her), again once 5 minutes have passed since admin rights were last
+used, and once more after a rule that skips it is removed. Enter takes yes at each offer below, except a rule file that
+gives another account admin rights or gives them for some programs only; the nuclear option's questions keep Enter as
+a no.
 
 | Setting | On your yes |
 |---|---|
-| SSH with passwords | keys only, when Remote Login is on and your `~/.ssh/authorized_keys` holds a key: a drop-in `/etc/ssh/sshd_config.d/000-estia-keys-only.conf` (also `DenyUsers _estia`), checked with `sshd -t` and taken back if sshd refuses it. This session stays open: test a new login from your laptop before you close it |
+| SSH with passwords | keys only, when Remote Login is on and your `~/.ssh/authorized_keys` holds a key SSH would take (keys on, read from that file, and the file, the file a link there leads to, `~/.ssh` and your home not changeable by other accounts): a drop-in `/etc/ssh/sshd_config.d/000-estia-keys-only.conf` (also `DenyUsers _estia`), checked with `sshd -t` and taken back if sshd refuses it. This session stays open: test a new login from your laptop before you close it; if it fails, the command the step prints, `/usr/bin/sudo /bin/rm /etc/ssh/sshd_config.d/000-estia-keys-only.conf`, typed in that session, takes it back |
 | Her files | folders 0700, files 0600: readable only by her (in her own user: `chmod` run as her, from code's own command; her helper only reports) |
-| Rules that let admin commands skip your password (`NOPASSWD` in `/etc/sudoers.d`) | removed only while `/usr/bin/sudo` also works with your password (`/usr/bin/sudo -l` shows a rule without NOPASSWD); `/usr/bin/sudo -k; /usr/bin/sudo -v` checks it afterwards |
+| Rules that let admin commands skip your password (`NOPASSWD` in `/etc/sudoers.d`) | removed only while `/usr/bin/sudo` also works with your password (`/usr/bin/sudo -l` shows a rule without NOPASSWD); Enter removes only a file whose rules give you (or the admins) every program, and another account's admin rule, or one for some programs only, is asked with Enter as a no (a script or scheduled job that uses it then stops at the password); `/usr/bin/sudo -k; /usr/bin/sudo -v` checks it afterwards (your Mac password once more) |
 | Registration Lock for her number | set in a maintenance window: she stops, the PIN (typed hidden twice) goes to signal-cli on its input as `_estia`, she starts again (also when the PIN step fails). Not offered before her number is registered |
 
 Shown with the fix, never applied: FileVault, automatic login, the screen lock, automatic security responses, other
@@ -1432,8 +1438,8 @@ extra_checks = [
 ### Projects (extra, off by default)
 
 Estia reads the git repositories directly in one folder of this Mac, read-only, at one of three levels. Off without
-`[projects]`: most people need none of it. `scripts/setup.sh` asks "Should she see projects on this Mac? Most people:
-no." when it writes the config, and `scripts/setup.sh --extras` asks again later: the folder and the level. The folder
+`[projects]`, and setup recommends leaving it off. `scripts/setup.sh` asks "Should she see projects on this Mac?
+Recommendation: no." when it writes the config, and `scripts/setup.sh --extras` asks again later: the folder and the level. The folder
 follows the share's rules: it must exist, your home itself and a symbolic link (the folder or one on the way) are
 refused, and one outside your home is taken but never shared by the move: you give `_estia` read access to it
 yourself (setup says so). A move whose last step, that share, fails still counts: setup says she runs in her own user,

@@ -75,7 +75,7 @@ class ModelChoice:
     num_ctx: int  # the context window the local-worker alias gets
     note: str
     ollama: str = ollama_build.MIN_TEXT  # the oldest Ollama it works with: JSON-schema output on the MLX engine
-    tested: bool = True  # passed her safety tests; False: setup says what failed and asks before the download
+    tested: bool = True  # passed her safety tests; False: setup says to use it with caution and asks first
 
 
 # Gemma 4's builds for Apple silicon (MLX), by their explicit tags (owner, 15 Oct). Never the bare gemma4:26b or
@@ -89,17 +89,18 @@ GEMMA_12B_DIGEST = "ded7a27350032202d9e9b2a6071e8aa89959ab156771b5228f30863c741c
 
 def choose_model(memory_gb: float) -> ModelChoice | None:
     """The best model for this Mac's memory, or None below 16 GB. Gemma 4 26B (a mixture of experts, 4B active) is
-    the tested one and fast on Apple silicon, but needs about 18 GB of the GPU's share; 12B fits next to macOS and the
-    voice models on 16 and 24 GB, but failed some of her safety tests (15 Oct, run twice; SECURITY.md, known gaps):
-    setup says what failed and asks first (`Wizard.model`). Both need Ollama 0.33.1 or later."""
+    the tested one and fast on Apple silicon, but its 18.3 GB need that much of the GPU's share; 12B fits next to macOS
+    and the voice models on 16 and 24 GB, but failed some of her safety tests (15 Oct, run twice; SECURITY.md, known
+    gaps): setup says to use it with caution and asks first (`Wizard.model`; owner, 19 Oct: never what failed). Both
+    need Ollama 0.33.1 or later."""
     if memory_gb < 15:
         return None
     if memory_gb < 30:
-        return ModelChoice(
-            GEMMA_12B, GEMMA_12B_DIGEST, 16_384 if memory_gb < 20 else 32_768, "about 8 GB download", tested=False
-        )
+        note = "a 7.7 GB download, about 10 minutes at 100 Mbit/s"
+        return ModelChoice(GEMMA_12B, GEMMA_12B_DIGEST, 16_384 if memory_gb < 20 else 32_768, note, tested=False)
     context = 32_768 if memory_gb < 44 else 65_536
-    return ModelChoice(GEMMA_26B, GEMMA_26B_DIGEST, context, "about 18 GB download; the tested model")
+    note = "an 18.3 GB download, about 25 minutes at 100 Mbit/s; the tested model"
+    return ModelChoice(GEMMA_26B, GEMMA_26B_DIGEST, context, note)
 
 
 def memory_gb() -> float:
@@ -366,28 +367,32 @@ class _Where:
 @dataclass(frozen=True)
 class Extra:
     title: str
-    leaves_the_mac: str
+    leaves_the_mac: str  # what leaves the Mac, and to which service by name
     how: str
+    needs: str  # what it takes from you: an account, a sign-in, a key, a device
 
 
 EXTRAS: dict[str, Extra] = {  # new ones go last: the numbers of the others stay
     "voice": Extra(
         "Voice notes and spoken answers (speech stays on the Mac)",
-        "nothing (the speech models are downloaded once)",
+        "nothing (the speech models are downloaded once, from Hugging Face)",
         "Take the # off [voice] and its lines in her config (the voice line has the voice that goes with her name),\n"
         "  then run scripts/install-voice-daemon.sh (setup_assistant.md, 3, Voice notes).",
+        "macOS 15.6 or later (not 26.4 or 26.5), about 1.7 GB of disk and your Mac password once",
     ),
     "calendar": Extra(
         "Calendars (Google, Outlook, iCloud, Fastmail or Nextcloud) in the morning digest and on request",
-        "each calendar is read from its own service, read-only",
+        "each calendar, read-only, from its own service: Google, Microsoft, iCloud, Fastmail or Nextcloud",
         "Google: scripts/set-calendar-url.sh; iCloud, Fastmail or Nextcloud: scripts/set-calendar-password.sh;\n"
         "  Outlook: its mailbox's sign-in (mail); then add [calendar] (setup_assistant.md, 3, Calendar).",
+        "a Google calendar's secret address, an app-specific password (iCloud, Fastmail, Nextcloud) or the mail extra",
     ),
     "mail": Extra(
         "Read-only mail from Microsoft 365 mailboxes, sorted for you",
-        "mail is read from Microsoft Graph; bodies are never stored",
+        "mail is read from Microsoft (Microsoft Graph); bodies are never stored",
         "Register an Entra app (Microsoft's admin site), add [mail], then scripts/mail-login.sh <address>\n"
         "  (a code typed at Microsoft's sign-in page) (setup_assistant.md, 3, Mail).",
+        "a Microsoft 365 mailbox, an app registered in Microsoft's admin site and a Microsoft sign-in",
     ),
     "lights": Extra(
         "Lights and plugs at home: Kasa, Tapo and Philips Hue",
@@ -395,31 +400,36 @@ EXTRAS: dict[str, Extra] = {  # new ones go last: the numbers of the others stay
         "Kasa and Tapo: scripts/tapo-discover.sh (newer ones also scripts/set-tapo-credentials.sh, the TP-Link\n"
         "  login); Hue: scripts/hue-pair.sh (press the Hue Bridge's button when asked); then add [[tapo.devices]]\n"
         "  (setup_assistant.md, 3, Lights and plugs).",
+        "the devices on your home network; newer Kasa and Tapo: the TP-Link login; Hue: the Bridge's button",
     ),
     "web": Extra(
         "Web search with sources",
-        "your search words, to Ollama's web search (Brave as backup)",
+        "your search words, to Ollama's web search (Brave Search as backup)",
         "In her own user, type each key at a hidden prompt (also over SSH):\n"
         "    /usr/bin/sudo /usr/local/estia/bin/estia secret set web.env OLLAMA_API_KEY   (then BRAVE_API_KEY)\n"
         "  On the Mac's own screen the login keychain works too, typed hidden:\n"
         '    security add-generic-password -U -a "$USER" -s ollama -w   (-s brave-search for Brave\'s key)\n'
         "  then scripts/set-web-keys.sh copies them to her. Then add [web] (setup_assistant.md, 3, Web search).",
+        "an API key from your account at ollama.com (and Brave Search's, for the backup)",
     ),
     "maps": Extra(
         "Places and routes",
-        "the place or route you ask about; 'near me' is rounded to about 1 km",
+        "the place or route you ask about, to Google; 'near me' is rounded to about 1 km",
         "Run scripts/setup-google-maps.sh (a Google Cloud project with billing; gcloud's own sign-in first),\n"
         "  then add [maps] (setup_assistant.md, 3, Places and routes).",
+        "a Google Cloud project with billing, and a Google sign-in (gcloud)",
     ),
     "music": Extra(
         "Spotify by text message",
         "play and pause commands, to Spotify",
         "Create a Spotify app, add [spotify], then scripts/spotify-login.sh (setup_assistant.md, 3, Spotify).",
+        "Spotify Premium, an app on Spotify's developer site and a Spotify sign-in",
     ),
     "projects": Extra(
         "Your git projects in one folder of this Mac, read-only: summary, docs or code",
         "nothing (the files are read on the Mac)",
         "Nothing to install: setup asks the folder and the level now (setup_assistant.md, 3, Projects).",
+        "a folder of git projects in your home",
     ),
     "documents": Extra(
         "Your PDFs in ~/Estia-KB and the ones you send her, read on the Mac",
@@ -427,19 +437,23 @@ EXTRAS: dict[str, Extra] = {  # new ones go last: the numbers of the others stay
         "Run scripts/share-documents.sh (as you, no admin rights: it makes ~/Estia-KB and lets her account read it\n"
         '  and add files to it), then add [documents] with folder = "/Users/<you>/Estia-KB"\n'
         "  (setup_assistant.md, 3, Documents).",
+        "nothing: the share makes ~/Estia-KB",
     ),
     "calls": Extra(
         "Voice calls with her, and wake-up calls (needs voice)",
-        "the calls, through Signal (end-to-end encrypted); the build downloads its code from GitHub and crates.io",
+        "the calls, through Signal (end-to-end encrypted); the build's code comes from GitHub and crates.io",
         "Needs voice first. Sign in to GitHub once (gh auth login: a GitHub account of yours), then run\n"
         "  tools/call-tunnel/install-signal-cli-jvm.sh and tools/call-tunnel/build.sh (several GB, a long build);\n"
         "  in her own user then /usr/bin/sudo /usr/local/estia/bin/estia-deploy (it copies the builds into her\n"
         "  release; [calls] before it stops her texts too); then add [calls] (setup_assistant.md, 3, Calls).",
+        "voice first, a GitHub account (its sign-in) and several GB of disk for a long build",
     ),
     "chords": Extra(
         "Chords transposed, moved for a capo, a chord's notes and the key of given chords, worked out on the Mac",
         "nothing (the chords are worked out on the Mac)",
-        "Nothing to install: setup adds [chords] to her config now (GUIDE.md, Transposing chords).",
+        "Nothing to install: setup adds [chords] to your config now; in her own user it prints the line to add, as\n"
+        "  her config is hers alone (GUIDE.md, Transposing chords).",
+        "nothing",
     ),
 }
 
@@ -559,8 +573,18 @@ class Wizard:
     def ask(self, question: str, default: str = "") -> str:
         return self.typed(question) or default  # no terminal: take the default
 
-    def yes(self, question: str) -> bool:
-        return self.ask(f"{question} [y/N]").lower().startswith("y")
+    def terminal(self) -> bool:
+        """The person's own terminal shows the question and answers it: only there may Enter mean yes."""
+        return harden.in_terminal()
+
+    def yes(self, question: str, *, default: bool = False) -> bool:
+        """y or n. Enter takes the safe answer, `default` (owner, 19 Oct: [Y/n] or [y/N] says which), only from a
+        terminal; the end of input (Ctrl-D, a pipe) is always a no, and Ctrl-C stops setup (`main`)."""
+        enter = default and self.terminal()
+        answer = self.typed(f"{question} {'[Y/n]' if enter else '[y/N]'}")
+        if answer is None:
+            return False
+        return answer.lower().startswith("y") if answer else enter
 
     def again(self, question: str) -> bool:
         """Enter (or anything but q): try again; q, or no terminal (Ctrl-D, a pipe): stop."""
@@ -653,16 +677,14 @@ class Wizard:
         if choice is None:
             self.say(prompts.SETUP_TOO_SMALL.format(memory=memory, name=self.name))
             raise SystemExit(1)
-        self.say(
-            f"Model: {choice.tag} for this Mac's {memory:.0f} GB ({choice.note}; needs Ollama {choice.ollama} or later)."
-        )
+        self.say(f"Model: {choice.tag} for this Mac's {memory:.0f} GB ({choice.note}).")
         if not choice.tested:  # owner, 15 Oct: still picked, but said plainly and never downloaded without a yes
             self.say(prompts.SETUP_SMALLER_MODEL)
             if self.dry_run:
                 self.say(prompts.SETUP_SMALLER_MODEL_DRY_RUN.format(ask=prompts.SETUP_SMALLER_MODEL_ASK))
             elif not self.yes(prompts.SETUP_SMALLER_MODEL_ASK):
                 raise SystemExit(prompts.SETUP_SMALLER_MODEL_NO)
-        self.say("  The download can take a while; the Mac stays awake meanwhile. If it stops, run setup again.")
+        self.say(prompts.SETUP_DOWNLOAD)
         if self.run(["caffeinate", "-i", self.ollama_program, "pull", choice.tag]).returncode != 0:
             raise SystemExit("The download did not finish. Run scripts/setup.sh again to resume it.")
         got = "" if self.dry_run else self.listed_digest(choice.tag)
@@ -780,30 +802,24 @@ class Wizard:
                 f"Signal number: asks for {self.name}'s number (+ and country code), then runs\n"
                 f"  $ {rpc}   (register <number> on stdin; with <captcha link> if Signal asks, typed hidden)\n"
                 f"  $ {rpc}   (verify <number> with <SMS code> on stdin; the code is typed hidden)\n"
-                "Then Registration Lock, if you say yes: a PIN typed hidden twice, set with\n"
+                f'Then "{prompts.SETUP_LOCK_ASK} [Y/n]": a PIN typed hidden twice, set with\n'
                 f"  $ {' '.join(harden.set_pin_argv('signal-cli', '<number>'))}   (setPin with <PIN> on stdin)\n"
                 f"  ({harden.LOCK_NOTE})"
             )
             return PLACEHOLDER_NUMBER
         numbers = self.registered_numbers()
-        if len(numbers) == 1 and self.yes(f"Use the Signal number already set up here ({numbers[0]})?"):
-            return numbers[0]
-        self.say(
-            f"{self.name} needs her own Signal number: a phone number you control that no Signal app uses (a cheap prepaid\n"
-            "SIM is fine; the SIM only has to receive one SMS). Registering it here logs out any Signal app on it."
-        )
-        number = self.ask("The number, with + and the country code (like +306900000000):")
+        if len(numbers) == 1:  # a run that stopped after the SMS code: what yes and no do, then the question
+            self.say(prompts.SETUP_KNOWN_NUMBER.format(number=numbers[0]))
+            if self.yes(prompts.SETUP_KNOWN_NUMBER_ASK.format(number=numbers[0])):
+                return numbers[0]
+        self.say(prompts.SETUP_NUMBER.format(name=self.name))
+        number = re.sub(r"[\s-]", "", self.ask(prompts.SETUP_NUMBER_ASK))  # spaces and dashes are fine (the prompt)
         if not _NUMBER.match(number):
-            raise SystemExit("That does not look like +<country code><number>. Run setup again.")
+            raise SystemExit(prompts.SETUP_NUMBER_BAD)
         done, why = self.registration("register", {"account": number}, f"register {number}", {})
         if not done and "captcha" in why.lower():
-            self.say(
-                "Signal asks for a captcha (new numbers usually do):\n"
-                "  1. On any device, open https://signalcaptchas.org/registration/generate.html and solve it.\n"
-                "  2. Right-click (or long-press) 'Open Signal' and copy the link; it starts with signalcaptcha://\n"
-                "  3. Paste it below (hidden). It is a one-time code; it is not stored."
-            )
-            captcha = self.hidden("captcha link: ")
+            self.say(prompts.SETUP_CAPTCHA)
+            captcha = self.hidden(prompts.SETUP_CAPTCHA_ASK)
             if captcha.lower() == "q":
                 raise SystemExit("Registration stopped: run setup again (a new captcha link for each try).")
             token = captcha.removeprefix("signalcaptcha://")
@@ -815,12 +831,12 @@ class Wizard:
             )
         if not done:
             raise SystemExit(f"Registration failed: {why.strip()[:300]}")
-        pin_prompt = "Registration-lock PIN, only if this number had one (hidden, Enter to skip): "
+        self.say(prompts.SETUP_SMS_SENT.format(number=number))
         while True:  # a mistyped code or PIN can be typed again; q stops
-            code = self.hidden("The code Signal sent by SMS (hidden): ").replace("-", "")
-            pin = "" if code.lower() == "q" else self.hidden(pin_prompt)
-            if "q" in (code.lower(), pin.lower()):
-                raise SystemExit("Verification failed: check the code and run setup again.")
+            code = self.hidden(prompts.SETUP_SMS_ASK).replace("-", "")
+            pin = "" if code.lower() == "q" else self.hidden(prompts.SETUP_OLD_PIN_ASK)
+            if "q" in (code.lower(), pin.lower()):  # a stop, not a failed check
+                raise SystemExit(prompts.SETUP_CODE_STOPPED)
             params: dict[str, object] = {"account": number, "verificationCode": code, **({"pin": pin} if pin else {})}
             done, why = self.registration(  # shown without the code and the PIN: the terminal may be an AI's transcript
                 "verify",
@@ -840,12 +856,13 @@ class Wizard:
         """Right after registering: a PIN typed hidden twice, set over signal-cli's JSON-RPC on stdin (never argv,
         never printed). Skipped, scripts/harden.sh offers it again."""
         self.say(harden.LOCK_NOTE)
-        if not self.yes("Turn on Registration Lock now?"):
+        self.say(prompts.SETUP_LOCK_HOW)
+        if not self.yes(prompts.SETUP_LOCK_ASK, default=True):
             self.say("  Later: scripts/harden.sh offers it again.")
             return
         shown = [*harden.set_pin_argv(self.signal_cli, number), "(setPin with <PIN> on stdin)"]
         while True:
-            pin = self.hidden("Registration Lock PIN (hidden; q to skip): ")
+            pin = self.hidden(prompts.SETUP_LOCK_PIN)
             if pin.lower() == "q":
                 self.say("  Skipped: scripts/harden.sh offers it again.")
                 return
@@ -853,7 +870,7 @@ class Wizard:
             if problem:
                 self.say(f"  The PIN needs {problem}.")
                 continue
-            if self.hidden("The same PIN again (hidden): ") != pin:
+            if self.hidden(prompts.SETUP_LOCK_AGAIN) != pin:
                 self.say("  The two did not match; type it again.")
                 continue
             self.say("  $ " + " ".join(shown))
@@ -863,7 +880,7 @@ class Wizard:
                 self.say("✓ Registration Lock: on. Keep the PIN in your password manager.")
                 return
             self.say(f"✗ Registration Lock: not set ({why}).")
-            if not self.again("Press Enter to try again, or type q to leave it for scripts/harden.sh."):
+            if not self.again(prompts.SETUP_LOCK_RETRY):
                 return
 
     # 3. who may talk to her: the owner's account ID, found from a message they send
@@ -877,8 +894,8 @@ class Wizard:
             )
             return PLACEHOLDER_ACI
         word = one_time_word(self.name, secrets.randbelow(9000) + 1000)
-        self.say(f"Now, from your own Signal on your phone, send exactly this word to {number}:  {word}")
-        self.ask("Press Enter once it is sent.")
+        self.say(prompts.SETUP_WORD.format(number=number, word=word, name=self.name))
+        self.ask(prompts.SETUP_WORD_ASK.format(seconds=RECEIVE_SECONDS))
         receive = [
             self.signal_cli,
             IPV4,
@@ -931,7 +948,8 @@ class Wizard:
         self.say(prompts.SETUP_NAME_CHOSEN.format(name=self.name, kind=kind, voice=self.voice))
 
     def _voice(self) -> str:
-        """Female (Enter) or male, for a name that is not a suggestion."""
+        """Female (Enter) or male, for a name that is not a suggestion: what the voice is for, said once."""
+        self.say(prompts.SETUP_VOICE)
         while True:
             answer = self.ask(prompts.SETUP_VOICE_ASK).lower()
             if answer in ("", "f", "female"):
@@ -992,7 +1010,7 @@ class Wizard:
         return ""
 
     def projects(self) -> tuple[str, str] | None:
-        """Projects, an extra: asked, never guessed from the Mac's folders (most people: no). Yes: the folder (as typed,
+        """Projects, an extra: asked, never guessed from the Mac's folders (recommendation: no). Yes: the folder (as typed,
         ~ allowed; it must exist, and not be your home itself) and the level. A dry run only shows the question."""
         self.say(prompts.SETUP_PROJECTS.format(name=self.name))
         if self.dry_run:
@@ -1024,6 +1042,7 @@ class Wizard:
                 self.say(prompts.SETUP_PROJECTS_REFUSED.format(why=why[:1].upper() + why[1:]))
             else:
                 break
+        self.say(prompts.SETUP_PROJECTS_LEVELS)
         while True:
             level = self.ask(prompts.SETUP_PROJECTS_LEVEL, "summary").lower()
             if level in PROJECT_LEVELS:
@@ -1197,25 +1216,19 @@ class Wizard:
             return True
         legacy = (estia_root() / ownuser.DAEMONS.relative_to("/") / f"{ownuser.BRIDGE}.plist").exists()
         move = str(REPO / "scripts" / "migrate-to-own-user.sh")
-        if legacy:
-            self.say(
-                f"Always on: {self.name} runs as you today. Her own hidden user {ownuser.ROLE_USER} keeps her data and keys\n"
-                f"away from every program you run: the move copies her data to {ownuser.HOME} (only that user can read it)\n"
-                f"and her code to {ownuser.CODE} (owned by root). It needs your Mac password once; she never runs as you or as root."
-            )
-        else:
-            self.say(
-                f"Always on: {self.name} runs as a background service that starts when the Mac starts, as her own hidden\n"
-                f"user {ownuser.ROLE_USER}: her data moves to {ownuser.HOME} (only that user can read it) and her code to\n"
-                f"{ownuser.CODE} (owned by root). Installing it needs your Mac password once (sudo creates the user and\n"
-                "copies the files and the two service files). She never runs as you or as root."
-            )
-        if self.dry_run:
-            self.say(f"  $ {move}   (if you say yes; --dry-run first shows every step)")
-            return True
-        if os.environ.get("SSH_CONNECTION") and not (os.environ.get("STY") or os.environ.get("TMUX")):
+        self.say((prompts.SETUP_MOVE_OLDER if legacy else prompts.SETUP_MOVE).format(name=self.name))
+        unkept = bool(os.environ.get("SSH_CONNECTION")) and not (os.environ.get("STY") or os.environ.get("TMUX"))
+        if unkept:
             self.say(prompts.SETUP_SSH_SCREEN)  # a dropped connection would stop the move halfway
-        if not self.yes("Install it now?" if not legacy else "Move her into her own user now?"):
+        # Enter moves her (the safe answer), except over SSH without screen, where the line above says no
+        if unkept:
+            ask = prompts.SETUP_MOVE_OLDER_ASK_SSH if legacy else prompts.SETUP_MOVE_ASK_SSH
+        else:
+            ask = prompts.SETUP_MOVE_OLDER_ASK if legacy else prompts.SETUP_MOVE_ASK
+        if self.dry_run:
+            self.say(f'  $ {move}   (asks "{ask} {"[y/N]" if unkept else "[Y/n]"}"; --dry-run first shows every step)')
+            return True
+        if not self.yes(ask, default=not unkept):
             return True
         code = self.run([move]).returncode
         if code != 0:
@@ -1232,18 +1245,16 @@ class Wizard:
     # 5b. the Mac's security around her, then the phone
     def security(self) -> None:
         harden_sh = str(REPO / "scripts" / "harden.sh")
-        self.say(
-            f"Security level {hostsec.HARDENED}: SSH with keys only, no passwordless sudo, her files private and her\n"
-            "Registration Lock, each with one line on why; a change is made only on your yes, and sudo asks for your\n"
-            "password once. FileVault and the other settings only you can change are shown with their fixes.\n"
-            f"  {hostsec.NUCLEAR_LINE[0].upper()}{hostsec.NUCLEAR_LINE[1:]}; never part of setup."
-        )
+        self.say(prompts.SETUP_SECURITY)
+        self.say(prompts.SETUP_NUCLEAR)
         if self.dry_run:
-            self.say(f"  $ {harden_sh}   (if you say yes; {harden_sh} --dry-run shows every check)")
+            self.say(
+                f'  $ {harden_sh}   (asks "{prompts.SETUP_SECURITY_ASK} [Y/n]"; {harden_sh} --dry-run shows every check)'
+            )
             for line in harden.PHONE_CHECKLIST:
                 self.say(line)
             return
-        if self.yes("Go through the security step now?"):
+        if self.yes(prompts.SETUP_SECURITY_ASK, default=True):
             self.run([harden_sh])  # it ends with the phone checklist
             return
         self.say(f"  Later: {harden_sh}")
@@ -1252,13 +1263,15 @@ class Wizard:
 
     # 6. extras
     def extras(self) -> None:
-        self.say("Extras (all optional, add any later with scripts/setup.sh --extras):")
-        for i, (name, extra) in enumerate(EXTRAS.items(), 1):
-            self.say(f"  {i:>2}. {name:9} {extra.title}. Leaves the Mac: {extra.leaves_the_mac}.")
+        self.say(prompts.SETUP_EXTRAS)
+        for i, (name, extra) in enumerate(EXTRAS.items(), 1):  # each in three lines: what, what leaves, what it needs
+            self.say(f"  {i:>2}. {name:9} {extra.title}.")
+            self.say(f"{'':16}Leaves the Mac: {extra.leaves_the_mac}.")
+            self.say(f"{'':16}Needs: {extra.needs}.")
         if self.dry_run:
             self.say("  (asks which ones, then shows how to add each)")
             return
-        picked, unknown = parse_extras(self.ask("Which ones? (names or numbers, Enter for none)"))
+        picked, unknown = parse_extras(self.ask(prompts.SETUP_EXTRAS_ASK))
         if unknown:
             self.say(f"  (not an extra: {', '.join(unknown)})")
         for name in picked:
@@ -1290,7 +1303,7 @@ class Wizard:
 
     def check(self) -> int:
         if self.own_user():  # her config and data are hers alone: read through her wrapper, by its fixed path
-            self.say("sudo asks for your Mac password: her doctor runs as her own user.")
+            self.say(prompts.SETUP_CHECK_HERS)
             return self.run([SUDO, str(ownuser.BIN / "estia"), "doctor"]).returncode
         findings = doctor.run(self.config_path, doctor.Probe())
         self.say(doctor.render(findings))
@@ -1350,9 +1363,7 @@ def run_setup(argv: list[str] | None = None) -> int:
             wizard.style = cfg.personality_style
         except ConfigError as exc:
             problem = exc
-    wizard.say(
-        f"{wizard.name} setup: Ollama, the model, her Signal number, who may talk to her, the config, always on.\n"
-    )
+    wizard.say(prompts.SETUP_OPENING.format(name=wizard.name))
     if problem is not None:
         wizard.say(f"✗ Config: {problem}")
         wizard.say(

@@ -1,6 +1,6 @@
 """Mail pre-filter: bulk mail recognised from its headers (no model), then AgentJev (a small local decision model on
-the CPU) for "needs nothing from the user", before Gemma sorts the rest. The whole funnel: AGENTS.md, "Mail sorting
-funnel".
+the CPU) for "needs nothing from the user", before Gemma sorts the rest. The whole funnel:
+docs/agents/mail-calendar.md, "Mail sorting funnel".
 
 Jev answers with a probability, never text, so nothing a mail says can reach Gemma or a tool through it.
 """

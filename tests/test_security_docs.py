@@ -1,11 +1,14 @@
-"""SECURITY.md, AGENTS.md and the live checklist say what the hardening does, and the runbook lists every step."""
+"""SECURITY.md, AGENTS.md with its rule files and the live checklist say what the hardening does, and the runbook lists
+every step."""
 
 import re
 from pathlib import Path
 
+from tests.agent_docs import agent_docs
+
 ROOT = Path(__file__).resolve().parents[1]
 SECURITY = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
-AGENTS = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+AGENTS = agent_docs()  # AGENTS.md and docs/agents/*.md: the AGENTS.md diet moved the area rules there, word for word
 CHECKLIST = (ROOT / "docs" / "e2e-checklist.md").read_text(encoding="utf-8")
 
 

@@ -6,6 +6,8 @@
 #   - the projects folder and every folder and file in it, also what is made there later: read-only.
 # Only folders and files you own are changed; a symbolic link is never followed. Run it again any time: an entry
 # already there is never added twice.
+# At its end it names what in your home every account may open, and in a terminal asks once whether to close it
+# (chmod -h o-rwx, as you; Enter closes them, a no keeps everything as it is).
 #   scripts/share-projects.sh [folder]             share (default: the folder in her config, recorded by the move)
 #   scripts/share-projects.sh --dry-run [folder]   every chmod command, nothing changed
 #   scripts/share-projects.sh --revoke [folder]    take it back: your home closes first

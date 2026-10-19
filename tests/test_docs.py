@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.agent_docs import AGENT_DOCS, agent_docs, agent_gotchas
+
 ROOT = Path(__file__).resolve().parent.parent
 DEVICE_LOGIN = (
     "Older Kasa devices need no login; newer Kasa firmware and Tapo devices need the TP-Link login (Tapo is untested)."
@@ -22,10 +24,28 @@ NOT_AFFILIATED = (  # every company or service README.md and GUIDE.md name (owne
 )
 
 
+def private_todo() -> str | None:
+    """todo.md, the private repository's own notes, or None where it is not there: the public export leaves it out,
+    so a public clone runs the same tests without it (review of 0.9.5)."""
+    path = ROOT / "todo.md"
+    return path.read_text(encoding="utf-8") if path.is_file() else None
+
+
 def prose(path: Path) -> str:
     """The file's words on one line: comment marks, list dashes and line breaks left out."""
     lines = (re.sub(r"^\s*(#+|-)?\s*", "", line) for line in path.read_text(encoding="utf-8").splitlines())
     return " ".join(line for line in lines if line)
+
+
+def agents_prose() -> str:
+    """prose() of AGENTS.md and every rule file: since the AGENTS.md diet (0.9.5) an area's rules and gotchas are in
+    its rule file (docs/agents), word for word."""
+    return " ".join(prose(ROOT / name) for name in AGENT_DOCS)
+
+
+def doc_prose(name: str) -> str:
+    """prose() of one doc; AGENTS.md is read with its rule files (agents_prose)."""
+    return agents_prose() if name == "AGENTS.md" else prose(ROOT / name)
 
 
 @pytest.mark.parametrize(
@@ -49,7 +69,7 @@ def test_the_readme_says_estia_and_that_every_home_names_its_own() -> None:
     assert 'name = "Estia"' in (ROOT / "config.example.toml").read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("name", ["README.md", "GUIDE.md", "SETUP-WITH-YOUR-AI.md", "setup_assistant.md", "AGENTS.md"])
+@pytest.mark.parametrize("name", ["README.md", "GUIDE.md", "SETUP-WITH-YOUR-AI.md", "setup_assistant.md", *AGENT_DOCS])
 def test_the_docs_call_her_estia_and_tiffany_only_as_ours(name: str) -> None:
     for line in (ROOT / name).read_text(encoding="utf-8").splitlines():
         if "Tiffany" in line:
@@ -80,8 +100,9 @@ def test_the_tagline_is_a_thinking_partner_living_at_home() -> None:
 
 
 def test_every_link_names_the_new_repo() -> None:
-    """The project lives at enable4all/estia-on-mmini; the old repo's name is gone from every tracked file."""
-    old = "tiffany-on-" + "mmini"  # split, so this file does not name it either
+    """The project lives at enable4all/estia-one-mmini (renamed 19 Oct, owner); the old repos' names are gone from every
+    tracked file."""
+    olds = ("tiffany-on-" + "mmini", "estia-on-" + "mmini")  # split, so this file does not name them either
     tracked = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, check=True).stdout
     spec = importlib.util.spec_from_file_location("privacy_scan", ROOT / "scripts" / "privacy_scan.py")
     assert spec and spec.loader
@@ -93,11 +114,12 @@ def test_every_link_names_the_new_repo() -> None:
             continue
         path = ROOT / name
         if path.is_file() and path.suffix not in {".png", ".ttf"}:
-            assert old not in path.read_text(encoding="utf-8", errors="replace"), name
-    clone = "git clone https://github.com/enable4all/estia-on-mmini.git ~/estia && cd ~/estia"
+            text = path.read_text(encoding="utf-8", errors="replace")
+            assert not [old for old in olds if old in text], name
+    clone = "git clone https://github.com/enable4all/estia-one-mmini.git ~/estia && cd ~/estia"
     for name in ("README.md", "GUIDE.md", "setup_assistant.md"):
         assert clone in (ROOT / name).read_text(encoding="utf-8"), name
-    advisories = "https://github.com/enable4all/estia-on-mmini/security/advisories/new"
+    advisories = "https://github.com/enable4all/estia-one-mmini/security/advisories/new"
     assert advisories in (ROOT / "SECURITY.md").read_text(encoding="utf-8")
 
 
@@ -106,7 +128,8 @@ def test_the_speech_detector_is_documented_and_credited() -> None:
     assert '#interrupt = "only speech"' in example  # the default, as config.py has it (owner, 14 Oct)
     assert "barge" in example.split('#interrupt = "only speech"', 1)[1].split("\n\n", 1)[0]  # the old key still read
     for name in ("GUIDE.md", "setup_assistant.md", "AGENTS.md"):
-        text = (ROOT / name).read_text(encoding="utf-8")
+        # AGENTS.md with its rule files: the calls' rules are in docs/agents/calls.md since the AGENTS.md diet
+        text = agent_docs() if name == "AGENTS.md" else (ROOT / name).read_text(encoding="utf-8")
         assert 'interrupt = "only speech"' in text and 'interrupt = "any sound"' in text, name
     setup = prose(ROOT / "setup_assistant.md")
     assert 'grep "calls: barge-in"' in setup  # the call's end line, to read the counts in the log
@@ -125,7 +148,7 @@ def test_the_speech_detector_is_documented_and_credited() -> None:
     assert 'barge = "speech"' in setup and 'barge = "loudness"' in setup  # the old wording, still read
     assert "loudness" not in readme  # the old rule's name stays in the guide's log lines
     assert "only speech stops her" not in readme
-    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    agents = agent_docs()  # the voice service's commands are in docs/agents/calls.md (the AGENTS.md diet)
     assert "VOICE_MODEL_TESTS=1 swift test --filter SpeechDetection" in agents
     notices = (ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
     assert "Silero VAD" in notices and "MIT" in notices.split("Silero VAD", 1)[1].split("\n", 1)[0]
@@ -196,15 +219,19 @@ def test_the_early_end_is_documented_and_credited() -> None:
     assert "BSD-2-Clause" in smart and "pinned" in smart and "not in this repository" in smart
     silero = notices.split("Silero VAD", 1)[1].split("\n", 1)[0]
     assert "`[calls] interrupt` and `pause`" in silero
-    todo = (ROOT / "todo.md").read_text(encoding="utf-8")  # owner, 17 Oct: "yes, on by default"
-    assert "public default decided 17 Oct" in todo and "`early_end = false` is the way" in todo
+    todo = private_todo()  # owner, 17 Oct: "yes, on by default"
+    if todo is not None:
+        assert "public default decided 17 Oct" in todo and "`early_end = false` is the way" in todo
 
 
 def test_the_release_list_checks_googles_prompt_and_top_p_with_the_gemma_test_set_before_the_public_push() -> None:
     """Review of 17 Oct (I2): RENDERER gemma4-large changes the prompt Gemma sees, and top_p 0.95 every request's
     sampling from the deploy on; AGENTS.md checks prompt changes with the Gemma test set, run twice. The release list
     names both runs, their gate, the idle Tiffany they need and the render check, before 0.9.3's public push."""
-    todo = " ".join((ROOT / "todo.md").read_text(encoding="utf-8").split())
+    todo = private_todo()
+    if todo is None:
+        pytest.skip("todo.md is the private repository's own: never in a public clone")
+    todo = " ".join(todo.split())
     item = todo.split("0.9.3, before the public push:", 1)[1].split("- [", 1)[0]
     assert "uv run python -m evals.gemma_suite" in item and "twice" in item and "Tiffany is idle" in item
     assert "every safety case and at least 90% of the rest" in item
@@ -423,7 +450,7 @@ def test_the_installing_ai_sends_every_sudo_to_the_persons_own_terminal() -> Non
 
 # a fake `sudo` earlier on the owner's PATH catches the password: every documented command types /usr/bin/sudo
 
-OWNER_DOCS = ("README.md", *INSTALL_DOCS, "SECURITY.md", "AGENTS.md", "docs/e2e-checklist.md")
+OWNER_DOCS = ("README.md", *INSTALL_DOCS, "SECURITY.md", *AGENT_DOCS, "docs/e2e-checklist.md")
 # plain words (owner, 14 Oct): the same two limits, without "PATH", "deploy" or "commits"; since the split (owner,
 # 15 Oct) README.md and GUIDE.md leave them to SECURITY.md, which names them in its own words
 DEPLOY_LIMIT = (
@@ -495,7 +522,7 @@ def test_the_live_checklist_numbers_are_unique_and_the_guide_counts_them() -> No
     assert sorted(int(number) for number in plain) == list(range(1, highest + 1))
     guide = (ROOT / "setup_assistant.md").read_text(encoding="utf-8")
     assert f"({highest} items:" in guide
-    for name in ("AGENTS.md", "SECURITY.md", "setup_assistant.md", "README.md", "GUIDE.md"):
+    for name in (*AGENT_DOCS, "SECURITY.md", "setup_assistant.md", "README.md", "GUIDE.md"):
         for cited in re.findall(r"e2e-checklist\.md, (\d+)(?:-(\d+))?\)", (ROOT / name).read_text(encoding="utf-8")):
             for number in filter(None, cited):
                 assert 1 <= int(number) <= highest, (name, number)
@@ -529,7 +556,7 @@ def test_the_readme_has_projects_as_an_extra_as_the_site_reads() -> None:
 
 @pytest.mark.parametrize("name", ["setup_assistant.md", "config.example.toml", "AGENTS.md", "SECURITY.md"])
 def test_projects_are_off_by_default_in_every_doc(name: str) -> None:
-    text = prose(ROOT / name)
+    text = doc_prose(name)
     assert "off by default" in text or "off without [projects]" in text or "off without `[projects]`" in text, name
     assert "is on by default" not in text and "On by default" not in text, name
 
@@ -540,14 +567,14 @@ def test_the_call_glance_is_documented_with_its_limit() -> None:
     assert "At the start of a call she knows today's numbers, never the titles" in readme
     guide = prose(ROOT / "setup_assistant.md")
     assert "What she knows at the start of a call." in guide and "Calendar today: 3 events left" in guide
-    agents = prose(ROOT / "AGENTS.md")
+    agents = agents_prose()  # the call's glance is in docs/agents/calls.md (the AGENTS.md diet)
     assert "call's glance" in agents and "never a title" in agents
 
 
 def test_a_spoken_project_name_is_documented() -> None:
     """With neutral names: the owner's own projects stay out of the public docs (the tests keep the real case)."""
     for name in ("GUIDE.md", "setup_assistant.md", "AGENTS.md"):
-        text = prose(ROOT / name)
+        text = doc_prose(name)  # AGENTS.md with its rule files: the rule is in docs/agents/documents-projects.md
         assert "nearest project" in text and "Do you mean" in text, name
         assert not re.search(r"\b(?:authe|othie)\b", text, re.IGNORECASE), name
 
@@ -615,7 +642,7 @@ def test_the_guide_reads_the_other_ten_languages_aloud_one_line_per_family() -> 
 def test_the_readme_links_the_website_under_its_tagline() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     tagline = readme.index("\n**An insanely secure & private thinking partner")
-    assert readme.index("\nWebsite: [estia.fun](https://estia.fun)\n") > tagline
+    assert readme.index("\nWebsite: [estia.one](https://estia.one)\n") > tagline
     assert "Estia started as Tiffany, our own thinking partner, before" in readme
     assert "our own assistant" not in readme
 
@@ -694,7 +721,7 @@ def test_the_firewall_docs_name_every_tool_and_the_known_gaps() -> None:
     assert "Untested as her on the live Mac" in guide
     assert "block all incoming connections is on" in guide
     assert "-nP -iTCP:<port> -sTCP:LISTEN" in guide
-    gotchas = prose(ROOT / "AGENTS.md").split("Gotchas (learned the hard way)", 1)[1]
+    gotchas = agent_gotchas()  # every rule file's Gotchas, AGENTS.md's until the AGENTS.md diet
     assert "the owner's only in `scripts/doctor.sh` before the move" in gotchas
     assert "merged with the owner's own from `lsof`" not in gotchas
     checklist = (ROOT / "docs" / "e2e-checklist.md").read_text(encoding="utf-8")
@@ -725,7 +752,7 @@ def test_the_installing_ai_asks_for_her_log_and_knows_the_order_that_worked() ->
 
 
 def test_the_gotchas_keep_what_the_live_move_taught() -> None:
-    gotchas = prose(ROOT / "AGENTS.md").split("Gotchas (learned the hard way)", 1)[1]
+    gotchas = agent_gotchas()  # every rule file's Gotchas, AGENTS.md's until the AGENTS.md diet
     for words in (
         "sysadminctl",
         "eDSPermissionError",
@@ -749,7 +776,7 @@ def test_commands_people_copy_from_the_screen_never_name_a_bare_sudo() -> None:
     assert ownuser.DEPLOY_CMD == deploy.DEPLOY == "/usr/bin/sudo /usr/local/estia/bin/estia-deploy"
     found = [
         f"{path.relative_to(ROOT)}:{number}"
-        for path in sorted((ROOT / "src/local_assistant").glob("*.py"))
+        for path in sorted((ROOT / "src/local_assistant").rglob("*.py"))  # the prompts package's files too
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
         if BARE_SUDO.search(line)
     ]
@@ -820,7 +847,7 @@ def test_the_readme_puts_the_ai_and_the_code_in_plain_words() -> None:
 def test_the_secrets_typed_at_setup_never_reach_a_command_line_in_any_doc() -> None:
     """F1: the captcha link, the SMS code and a PIN go to signal-cli on its input (JSON-RPC), as setup sends them;
     no doc shows them as arguments, which every user of the Mac can read."""
-    for name in ("README.md", "GUIDE.md", "SETUP-WITH-YOUR-AI.md", "setup_assistant.md", "SECURITY.md", "AGENTS.md"):
+    for name in ("README.md", "GUIDE.md", "SETUP-WITH-YOUR-AI.md", "setup_assistant.md", "SECURITY.md", *AGENT_DOCS):
         text = (ROOT / name).read_text(encoding="utf-8")
         assert "--captcha" not in text and "--pin" not in text and "<code-from-the-sms>" not in text, name
     readme = prose(GUIDE)
@@ -1131,9 +1158,9 @@ HOLD_RULE = (
 
 
 def test_outside_data_may_hold_her_back_and_never_start_anything() -> None:
-    """G6: one written rule in AGENTS.md, and the same plain words in the threat model."""
-    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
-    rules = agents.split("## Rules (safety)", 1)[1].split("\n## ", 1)[0]
+    """G6: one written rule in docs/agents/safety.md (AGENTS.md's Rules (safety) until the AGENTS.md diet), and
+    the same plain words in the threat model."""
+    rules = (ROOT / "docs" / "agents" / "safety.md").read_text(encoding="utf-8")
     rule = rules.split("- Outside data may hold her back, never start anything but a code-written note", 1)[1]
     rule = rule.split("\n- ", 1)[0]
     for words in (
@@ -1236,16 +1263,16 @@ def test_the_guide_says_a_slash_command_is_spoken() -> None:
 
 
 # ------------------------------------------------------------------ P1: what the website quotes
-# the site estia.fun quotes these word for word: changing one means telling the site session
+# the site estia.one quotes these word for word: changing one means telling the site session
 # (its drift test, tests/drift.test.mjs in the site's own repo, reads them with ESTIA_REPO=<this checkout>: README.md and
 # GUIDE.md as written, SECURITY.md and setup_assistant.md with their line breaks read as spaces; the lists are the site
 # session's asks of 14 Oct, 03:00 and 06:40, and the Projects strings of 13 Oct; the interrupt sentence and the practice
 # row in their form of 14 Oct). Since the split (owner, 15 Oct) a SITE_README sentence may live in README.md, the
 # front page, or GUIDE.md, the rest, as its guide-page drift test reads them (the two files together)
 SITE_README = (
-    "git clone https://github.com/enable4all/estia-on-mmini.git ~/estia && cd ~/estia",
+    "git clone https://github.com/enable4all/estia-one-mmini.git ~/estia && cd ~/estia",
     "**An insanely secure & private thinking partner, living at home.**",
-    "Website: [estia.fun](https://estia.fun)",
+    "Website: [estia.one](https://estia.one)",
     '<img src="docs/brand/estia-hero-light.png" alt="A stone garden seen from above, its gravel raked in rings around a '
     'Mac mini"',
     "Name her what you like. Ours is called Tiffany.",
@@ -1511,8 +1538,9 @@ SITE_AGENTS = (  # AGENTS.md sentences the site quotes (dev-60, 15 Oct)
     "turns markup into Signal's text styles",
     '"- " and "* " line starts "• "',
 )
-SITE_PROMPTS = (  # src/local_assistant/prompts.py text the site quotes (dev-60, 15 Oct): a prompt change tells the site
+SITE_PROMPTS = (  # her prompts' text the site quotes (dev-60, 15 Oct): a prompt change tells the site
     "Asked for fun or a joke, or when the user banters: end with one short joke or pun",
+    "Her config is hers alone, so setup does not write it",  # SETUP_CHORDS_HERS: the chords card says it
 )
 
 
@@ -1524,6 +1552,15 @@ def site_flat(path: Path) -> str:
 def site_docs(root: Path) -> str:
     """README.md and GUIDE.md as written, one after the other, as the site's guide-page drift test reads them."""
     return "\n".join((root / name).read_text(encoding="utf-8") for name in ("README.md", "GUIDE.md"))
+
+
+def site_prompts(root: Path) -> str:
+    """Her prompts' text as the site's drift test reads it: prompts.py when it exists, then every file of the prompts/
+    package by name, one after the other (a line may move between them without breaking a pin)."""
+    folder = root / "src/local_assistant"
+    files = [path for path in [folder / "prompts.py"] if path.is_file()]
+    files += sorted((folder / "prompts").glob("*.py"), key=lambda path: path.name)
+    return "\n".join(path.read_text(encoding="utf-8") for path in files)
 
 
 def site_misses(root: Path) -> list[str]:
@@ -1542,12 +1579,9 @@ def site_misses(root: Path) -> list[str]:
     if "\n## Known accepted gaps\n" not in (root / "SECURITY.md").read_text(encoding="utf-8"):
         missing.append("SECURITY.md: ## Known accepted gaps (the site links #known-accepted-gaps)")
     missing += [f"setup_assistant.md: {said}" for said in SITE_SETUP if said not in guide]
-    agents, prompts = (
-        (root / "AGENTS.md").read_text(encoding="utf-8"),
-        (root / "src/local_assistant/prompts.py").read_text(encoding="utf-8"),
-    )
+    agents, prompts = (root / "AGENTS.md").read_text(encoding="utf-8"), site_prompts(root)
     missing += [f"AGENTS.md: {said}" for said in SITE_AGENTS if said not in agents]
-    missing += [f"src/local_assistant/prompts.py: {said}" for said in SITE_PROMPTS if said not in prompts]
+    missing += [f"src/local_assistant/prompts: {said}" for said in SITE_PROMPTS if said not in prompts]
     upgrade = re.search(r"^\| Upgrade \|(.+)$", (root / "setup_assistant.md").read_text(encoding="utf-8"), re.MULTILINE)
     deploy = "In her own user: `git pull` in your checkout, then `/usr/bin/sudo /usr/local/estia/bin/estia-deploy`"
     if not upgrade or deploy not in upgrade.group(1):
@@ -1716,7 +1750,9 @@ def test_nothing_else_in_your_home_is_said_only_with_the_documents_folder_beside
 # owner, 14 Oct: the documents folder moved out of ~/Documents (macOS guards Documents, Desktop and Downloads: live,
 # the share could not open ~/Documents to her), and then from a folder named Estia in the home (on a Mac's usual disk,
 # which ignores case, the README's clone ~/estia) to ~/Estia-KB. No file of the code or the docs names an old one, but
-# AGENTS.md's history note. The patterns are written so that a grep for the old names does not find them here
+# the history note, a gotcha in HISTORY_NOTE (AGENTS.md's until the AGENTS.md diet). The patterns are written so that
+# a grep for the old names does not find them here
+HISTORY_NOTE = "docs/agents/documents-projects.md"  # the gotcha on macOS's guarded folders, which names ~/estia
 MOVED_FROM = re.compile(
     r'Documents[/]Estia|"Documents" / "Estia"|Path\("Documents"\)|~[/]Estia(?![-\w])|[/]Estia"|/ "Estia"'
     r'|Path\("Estia"\)|\b(?:your|their) Estia folder'
@@ -1731,14 +1767,14 @@ def test_nothing_names_the_old_documents_folder() -> None:
         text=True,
         check=True,
     ).stdout.split()
-    names += ["README.md", "GUIDE.md", "SECURITY.md", "setup_assistant.md", "SETUP-WITH-YOUR-AI.md", "AGENTS.md"]
+    names += ["README.md", "GUIDE.md", "SECURITY.md", "setup_assistant.md", "SETUP-WITH-YOUR-AI.md", *AGENT_DOCS]
     names += ["config.example.toml"]
     for name in names:
         path = ROOT / name
         if name == "tests/test_docs.py" or not path.is_file() or path.suffix in {".pdf", ".png", ".wav", ".db"}:
             continue
         for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            history = name == "AGENTS.md" and "~/estia" in line  # the gotcha that says why, by the clone's name
+            history = name == HISTORY_NOTE and "~/estia" in line  # the gotcha that says why, by the clone's name
             assert history or not MOVED_FROM.search(line), (name, line[:200])
 
 
@@ -1824,7 +1860,7 @@ def test_the_docs_say_what_a_caldav_calendar_reads_and_where_it_goes() -> None:
     guide = site_flat(ROOT / "setup_assistant.md")
     assert "only CalDAV's two read requests" in guide and "`scripts/set-calendar-password.sh family`" in guide
     assert "Only Google calendars and the Outlook calendars of your mailboxes are supported" not in guide
-    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    agents = agent_docs()  # the calendar's commands and rules are in docs/agents/mail-calendar.md (AGENTS.md diet)
     assert "`scripts/set-calendar-password.sh [name]`" in agents and "PROPFIND and REPORT only" in agents
 
 
@@ -1836,7 +1872,7 @@ def test_the_docs_say_a_caldav_calendars_requests_go_to_its_own_server_only() ->
     security = site_flat(ROOT / "SECURITY.md")
     assert "to the configured server only (iCloud: Apple's icloud.com servers, as it answers from several)" in security
     assert "all within 12 seconds" in security
-    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    agents = agent_docs()  # the calendar's rules are in docs/agents/mail-calendar.md (the AGENTS.md diet)
     assert "`MULTI_HOST_SITES`" in agents and "`CALDAV_SECONDS`" in agents
     for text in (readme, security, agents):
         assert "own domain" not in text and "last two names" not in text and "last two labels" not in text
@@ -1906,7 +1942,7 @@ def test_the_docs_say_a_first_install_has_no_rollback(name: str) -> None:
         assert "older install" in held.group(0), (name, held.group(0))
 
 
-@pytest.mark.parametrize("name", ("README.md", *INSTALL_DOCS, "SECURITY.md", "AGENTS.md", "docs/e2e-checklist.md"))
+@pytest.mark.parametrize("name", ("README.md", *INSTALL_DOCS, "SECURITY.md", *AGENT_DOCS, "docs/e2e-checklist.md"))
 def test_her_config_is_edited_as_her_and_the_docs_say_how_to_save(name: str) -> None:
     """sudoedit gives your account a copy of her config while it is edited, and runs the editor as you (a `nano` of
     yours earlier on your PATH reads and changes it): every edit runs nano as her, through her wrapper (review 15 Oct,
@@ -1928,7 +1964,7 @@ def test_the_ai_guide_is_a_hand_over_to_the_persons_own_terminal() -> None:
         "`screen` (built into macOS)",
         'eval "$(/opt/homebrew/bin/brew shellenv)"',
         "3. The briefing: what setup asks, in order",
-        "captcha link:",
+        "captcha link (hidden",
         "Nothing shows: press Enter once.",
     ):
         assert words in guide, words
@@ -2116,7 +2152,7 @@ def test_the_guide_links_https_or_the_repo_and_every_anchor_hits_its_own_heading
 
 def test_every_link_into_the_guide_or_the_readme_hits_a_heading() -> None:
     guide, readme = anchors(GUIDE), anchors(ROOT / "README.md")
-    for name in ("README.md", "GUIDE.md", "SETUP-WITH-YOUR-AI.md", "setup_assistant.md", "SECURITY.md", "AGENTS.md"):
+    for name in ("README.md", "GUIDE.md", "SETUP-WITH-YOUR-AI.md", "setup_assistant.md", "SECURITY.md", *AGENT_DOCS):
         for target in link_targets(ROOT / name):
             if target.startswith("GUIDE.md#"):
                 assert target.split("#", 1)[1] in guide, (name, target)
@@ -2184,14 +2220,14 @@ def test_the_install_time_is_said_the_same_on_the_front_page_and_in_the_guide() 
         "| signal-cli and uv from Homebrew, when missing: 60 MB | About 5 seconds | Computed from the size |" in table
     )
     assert "Ollama's official build from GitHub, when no official one runs yet: 168 MB | About 15 seconds |" in table
-    assert "| About 15 minutes | Measured live, 13 Oct |" in table  # the Neural Engine (AGENTS.md, Gotchas)
+    assert "| About 15 minutes | Measured live, 13 Oct |" in table  # the Neural Engine (calls.md, Gotchas)
     rows = [line for line in table.splitlines() if line.startswith("| ") and not line.startswith("| Step ")]
     sources = {"Measured", "Measured live, 13 Oct", "Computed from the size", "Not measured"}
     assert rows and all(row.rstrip(" |").rsplit("| ", 1)[1] in sources for row in rows), rows
     assert "your own typing" in guide.lower() and "typing" not in readme.lower()
 
 
-@pytest.mark.parametrize("name", ["README.md", *INSTALL_DOCS, "AGENTS.md", "SECURITY.md"])
+@pytest.mark.parametrize("name", ["README.md", *INSTALL_DOCS, *AGENT_DOCS, "SECURITY.md"])
 def test_no_doc_installs_or_starts_homebrews_ollama_or_pulls_a_bare_gemma_tag(name: str) -> None:
     """Owner, 15 Oct: only Ollama's official build, and the explicit -mlx tags (the bare ones are lists)."""
     text = (ROOT / name).read_text(encoding="utf-8")
@@ -2213,7 +2249,7 @@ def test_the_ollama_docs_say_what_the_code_does() -> None:
     assert "`opt/ollama/current` in `~/.zprofile`" in row
     assert "osascript -e 'quit app \"Ollama\"'" in guide
     assert "only new ones find `ollama`" in (ROOT / "GUIDE.md").read_text(encoding="utf-8")
-    for name in ("setup_assistant.md", "SETUP-WITH-YOUR-AI.md", "AGENTS.md"):
+    for name in ("setup_assistant.md", "SETUP-WITH-YOUR-AI.md", *AGENT_DOCS):
         text = " ".join((ROOT / name).read_text(encoding="utf-8").split())
         assert "setup refuses both" not in text and "the Ollama app stops setup with the fix" not in text, name
         assert "bootout system/com.local-assistant.ollama` first" not in text, name
@@ -2240,7 +2276,8 @@ def test_the_small_model_failed_some_safety_tests_in_every_doc_in_the_same_words
         flat = site_flat(root / name)
         assert SMALL_MODEL in flat and TESTED_SETUP in flat, name
     assert SMALL_MODEL_HOLDS in site_flat(root / "SECURITY.md")
-    assert SMALL_MODEL_HOLDS.replace("`ask first`", '"ask first"') in " ".join(prompts.SETUP_SMALLER_MODEL.split())
+    # setup's own lines say "use it with caution" and what that means, never what failed (owner, 19 Oct): test_setup
+    assert "use it with caution" in prompts.SETUP_SMALLER_MODEL and "test" not in prompts.SETUP_SMALLER_MODEL
     assert "each device change" not in site_flat(root / "SECURITY.md")
     for name in ("README.md", "GUIDE.md", "setup_assistant.md", "SETUP-WITH-YOUR-AI.md", "SECURITY.md"):
         flat = site_flat(root / name)
@@ -2250,7 +2287,14 @@ def test_the_small_model_failed_some_safety_tests_in_every_doc_in_the_same_words
     requirements = site_flat(root / "GUIDE.md").split("## Requirements", 1)[1].split("## ", 1)[0]
     assert "failed some of her safety tests" in requirements and TESTED_SETUP in requirements
     briefing = site_flat(root / "SETUP-WITH-YOUR-AI.md").split("**The model download:**", 1)[1].split("- **", 1)[0]
-    assert "failed some of her safety tests" in briefing and TESTED_SETUP in briefing
+    # the briefing says what setup says (owner, 19 Oct: "use with caution", never what failed) and where the details are
+    assert "use it with caution" in briefing and TESTED_SETUP in briefing
+    assert "Recommendation: yes, with caution" in briefing and "SECURITY.md, known gaps" in briefing
+    for name in ("README.md", "GUIDE.md", "setup_assistant.md", "SETUP-WITH-YOUR-AI.md"):  # review, 19 Oct
+        flat = site_flat(root / name)
+        assert "setup says what failed" not in flat, name
+        if name in ("GUIDE.md", "setup_assistant.md"):
+            assert "setup says to use it with caution, and what that means for her answers" in flat, name
 
 
 def test_the_ai_guide_names_ports_as_readme_and_security_do() -> None:
@@ -2305,7 +2349,7 @@ def check_changelog(text: str) -> list[tuple[int, ...]]:
     for line in text.splitlines():
         if line.startswith("### "):
             assert line[4:] in {"Added", "Changed", "Fixed", "Security"}, line
-    repo = "https://github.com/enable4all/estia-on-mmini"
+    repo = "https://github.com/enable4all/estia-one-mmini"
     tags = [".".join(map(str, version)) for version in versions]
     links = {"Unreleased": f"{repo}/compare/v{tags[0]}...HEAD"}  # moved to the new tag at each release
     links.update({tag: f"{repo}/compare/v{older}...v{tag}" for tag, older in itertools.pairwise(tags)})
@@ -2332,13 +2376,13 @@ def with_a_repeated_section(tmp_path: Path) -> Path:
 
 
 def released_as(version: str, *, unreleased_moved: bool) -> str:
-    """This CHANGELOG.md after AGENTS.md's release step for `version` (after the newest), the [Unreleased] link moved to
-    the new tag or (`unreleased_moved` False) left where it was."""
+    """This CHANGELOG.md after the release step (docs/agents/docs-release.md) for `version` (after the newest), the
+    [Unreleased] link moved to the new tag or (`unreleased_moved` False) left where it was."""
     text = CHANGELOG.read_text(encoding="utf-8")
     newest = VERSION_HEADING.search(text)
     assert newest is not None
     text = text.replace("## [Unreleased]", f"## [Unreleased]\n\n## [{version}] - 2026-10-20", 1)
-    repo = "https://github.com/enable4all/estia-on-mmini"
+    repo = "https://github.com/enable4all/estia-one-mmini"
     old_link = f"[Unreleased]: {repo}/compare/v{newest[1]}...HEAD\n"
     assert old_link in text
     new_tag = version if unreleased_moved else newest[1]
@@ -2403,7 +2447,7 @@ def test_the_release_step_publishes_the_tags_section_or_stops_without_one(tmp_pa
         f'cp release.md "{tmp_path}/published.md"\n'
     )
     gh.chmod(0o755)
-    env = {"PATH": f"{stubs}:/usr/bin:/bin", "TAG": tag, "GITHUB_REPOSITORY": "enable4all/estia-on-mmini"}
+    env = {"PATH": f"{stubs}:/usr/bin:/bin", "TAG": tag, "GITHUB_REPOSITORY": "enable4all/estia-one-mmini"}
     work = tmp_path / "work"
     work.mkdir()
     done = subprocess.run(
@@ -2415,19 +2459,143 @@ def test_the_release_step_publishes_the_tags_section_or_stops_without_one(tmp_pa
         return
     assert done.returncode == 0, done.stdout + done.stderr
     assert log.read_text() == (
-        f"release create {tag} --repo enable4all/estia-on-mmini --verify-tag --notes-file release.md "
+        f"release create {tag} --repo enable4all/estia-one-mmini --verify-tag --notes-file release.md "
         f"--title Estia {version}\n"
     )
     page = RELEASE_PAGE.read_text(encoding="utf-8").replace("{{VERSION}}", version)
     assert (tmp_path / "published.md").read_text() == page.replace("{{SECTION}}\n", release_notes(version), 1)
 
 
-def test_the_release_page_holds_the_readme_tagline_the_section_and_what_is_in_0_9() -> None:
-    """Owner, 18 Oct: "leave also the 0.9": the page around a release's section, with the README's tagline in its
-    words (the same fact, the same words)."""
+def test_the_release_page_holds_the_readme_tagline_and_the_section_only() -> None:
+    """The page around a release's section, with the README's tagline in its words (the same fact, the same words).
+    Owner, 19 Oct, for 0.9.5: "no need for 0.9, does not say that much": no list of what is in 0.9 any more."""
     page = RELEASE_PAGE.read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     tagline = page.split("**", 2)[1]
     assert f"**{tagline}**" in readme and tagline.startswith("An insanely secure & private thinking partner")
-    assert page.count("{{SECTION}}") == 1 and "## What changed in {{VERSION}}" in page and "## What is in 0.9" in page
-    assert "transposing chords" in page
+    assert page.count("{{SECTION}}") == 1 and "## What changed in {{VERSION}}" in page
+    assert "## What is in 0.9" not in page and page.rstrip().endswith("{{SECTION}}")
+
+
+# the setup questions (owner, 19 Oct): the briefing says each one's recommendation, as setup does; "Recommendation",
+# never "Most people"; the AI asks the extras and the projects folder before setup; one model size everywhere
+
+SETUP_DOCS = (
+    "README.md",
+    "GUIDE.md",
+    "SETUP-WITH-YOUR-AI.md",
+    "setup_assistant.md",
+    "SECURITY.md",
+    "config.example.toml",
+)
+
+
+def briefing_text() -> str:
+    text = (ROOT / "SETUP-WITH-YOUR-AI.md").read_text(encoding="utf-8")
+    return text.split("## 3. The briefing", 1)[1].split("\n## ", 1)[0]
+
+
+@pytest.mark.parametrize("name", SETUP_DOCS)
+def test_no_doc_says_most_people_about_a_setup_answer(name: str) -> None:
+    assert "most people" not in (ROOT / name).read_text(encoding="utf-8").lower(), name
+
+
+def test_the_briefing_gives_each_questions_recommendation() -> None:
+    bullets = [line for line in briefing_text().splitlines() if line.lstrip().startswith("- **")]
+    asked = [line for line in bullets if '"' in line.split("**", 2)[1] or "?" in line]
+    assert len(asked) >= 12
+    for line in asked:
+        assert "Recommendation" in line or "recommendation" in line, line
+    text = " ".join(briefing_text().split())
+    assert "Enter takes it (`[Y/n]`)" in text and "never a yes" in text
+    assert (
+        "nothing shows while it is typed" in text
+        and "once 5 minutes have passed since admin rights were last used" in text
+    )
+
+
+def test_the_ai_shows_the_extras_and_asks_the_projects_folder_before_setup() -> None:
+    text = " ".join(briefing_text().split())
+    before = text.split("**Then the questions, in setup's order:**", 1)[0]
+    assert "the list of extras in 5" in before and "each extra in one line" in before
+    for words in ("what leaves the Mac and to which service", "what it needs", "brief only those"):
+        assert words in before, words
+    assert "which folder in their home holds them" in before and "never guess the folder or search their home" in before
+    assert "`scripts/setup.sh --extras --dry-run`" in prose(ROOT / "SETUP-WITH-YOUR-AI.md").split("You may run only")[1]
+
+
+def test_the_briefing_holds_the_extras_list_as_setup_prints_it() -> None:
+    """Review, 19 Oct: on a fresh clone (no .venv yet) `scripts/setup.sh --extras --dry-run` prints only a summary, so
+    the AI had no list to show and could make one up. The list is in the file, and each row is setup's own words."""
+    from local_assistant.setup import EXTRAS
+
+    text = (ROOT / "SETUP-WITH-YOUR-AI.md").read_text(encoding="utf-8")
+    listed = text.split("## 5. Adding an extra", 1)[1].split("\n## ", 1)[0]
+    rows = [line for line in listed.splitlines() if line.startswith("- `")]
+    assert rows == [
+        f"- `{name}`: {extra.title}. Leaves the Mac: {extra.leaves_the_mac}. Needs: {extra.needs}."
+        for name, extra in EXTRAS.items()
+    ]
+
+
+def test_the_nuclear_level_is_offered_only_to_a_deeply_technical_person() -> None:
+    text = prose(ROOT / "SETUP-WITH-YOUR-AI.md")
+    assert "only for deeply technical users" in " ".join(briefing_text().split())
+    assert "Offer it only to a deeply technical person who asks for the strictest settings." in text
+
+
+def test_the_briefing_quotes_the_close_question_and_the_hidden_prompts_as_setup_asks_them() -> None:
+    from local_assistant import prompts, share
+
+    text = " ".join(briefing_text().split())
+    assert share.CLOSE_ASK.split(" (", 1)[0] in text and "`chmod -h o-r`" in text
+    assert f"`{prompts.SETUP_CAPTCHA_ASK.strip()}`" in text
+    assert prompts.SETUP_SMALLER_MODEL_ASK.split("?", 1)[0] in text
+
+
+def test_the_documents_share_run_by_the_ai_leaves_closing_to_the_person() -> None:
+    """Run by the AI it has no terminal and asks nothing (audit, 19 Oct, 4.11): the AI reads the "!" line out."""
+    documents = prose(ROOT / "SETUP-WITH-YOUR-AI.md").split("**Documents**", 1)[1][:2000]
+    assert 'read its "!" lines to the person' in documents and "in their own Terminal window" in documents
+
+
+def test_the_readme_says_screen_over_ssh_in_the_guides_words() -> None:
+    words = "Over a remote login (SSH), run it inside `screen` (built into macOS), so a dropped connection does not stop it."
+    assert words in (ROOT / "README.md").read_text(encoding="utf-8")
+    assert words in (ROOT / "GUIDE.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("name", (*SETUP_DOCS, "src/local_assistant/setup.py"))
+def test_the_model_sizes_are_said_one_way(name: str) -> None:
+    text = " ".join((ROOT / name).read_text(encoding="utf-8").split())
+    for other in ("about 8 GB", "about 18 GB", "8 GB download", "18 GB download"):
+        assert other not in text, (name, other)
+
+
+def test_the_docs_name_the_same_enter_yes_questions() -> None:
+    """Review, 19 Oct: GUIDE.md said Enter is yes only at three questions, the briefing and CHANGELOG at more. Each now
+    names them all in the same words, and the label is "Recommendation:" everywhere (owner, 19 Oct)."""
+    guide = site_flat(ROOT / "GUIDE.md")
+    briefing = " ".join(briefing_text().split())
+    changelog = site_flat(ROOT / "CHANGELOG.md").split("## [0.9.5]", 1)[1].split("## [0.9.4]", 1)[0]
+    for text in (guide, briefing, changelog):
+        assert "the security step and its offers" in text
+        assert "another account's admin rule, or one for some programs only" in text
+    assert "(a no over a remote login without `screen`)" in guide
+    assert "the question that closes what every account may open in your home" in guide
+    for name in ("GUIDE.md", "setup_assistant.md", "config.example.toml", "SETUP-WITH-YOUR-AI.md"):
+        assert "recommendation: " not in (ROOT / name).read_text(encoding="utf-8"), name
+
+
+def test_the_guide_says_the_security_steps_password_and_ssh_as_harden_does() -> None:
+    from local_assistant import harden, hostsec
+
+    step = (
+        site_flat(ROOT / "setup_assistant.md").split("### 2.10 Security step", 1)[1].split("**The nuclear option.**")[0]
+    )
+    assert "asks for your Mac password once, before the first change" not in step
+    assert "once 5 minutes have passed since admin rights were last used" in step
+    assert "once more after a rule that skips it is removed" in step
+    assert "holds a key SSH would take" in step and f"`{hostsec.SUDO} {hostsec.RM} {hostsec.SSH_DROP_IN_PATH}`" in step
+    assert "sudo is asked once, before the first change" not in (harden.__doc__ or "")
+    assert "sudo is asked once, before the first change" not in (ROOT / "scripts/harden.sh").read_text()

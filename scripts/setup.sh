@@ -11,7 +11,7 @@ cd "$(dirname "$0")/.."
 [[ "$(uname -s)/$(uname -m)" == "Darwin/arm64" ]] || { echo "Estia needs a Mac with Apple silicon (M1 or later)." >&2; exit 1; }
 if [[ ! -e .git ]]; then  # her releases and every update are built from git: a ZIP download can never be installed
   echo "This folder is not a git clone, and her install and every update are built from git. Clone it, then run setup:" >&2
-  echo "  git clone https://github.com/enable4all/estia-on-mmini.git ~/estia && cd ~/estia && scripts/setup.sh" >&2
+  echo "  git clone https://github.com/enable4all/estia-one-mmini.git ~/estia && cd ~/estia && scripts/setup.sh" >&2
   exit 1
 fi
 dry=""; for a in "$@"; do [[ "$a" == "--dry-run" ]] && dry=1; done
@@ -38,8 +38,9 @@ if ! command -v brew >/dev/null && [[ -x "$homebrew/bin/brew" ]]; then on_path; 
 if ! command -v brew >/dev/null && [[ -n "$dry" ]]; then
   echo "Homebrew: would offer to install it (its installer asks for your Mac password once)"
 elif ! command -v brew >/dev/null; then
-  echo "Homebrew installs the tools Estia needs. Its installer asks for your Mac password once (it writes to /opt/homebrew)."
-  read -r -p "Install Homebrew now? [y/N] " answer || answer=""
+  echo "Homebrew, the usual installer for Mac tools, installs the two Estia needs: signal-cli (for Signal) and uv (for Python)."
+  echo "  Its installer asks for your Mac password once (nothing shows while you type) and may ask you to press Return. No stops setup."
+  read -r -p "Install Homebrew now? Recommendation: yes. [y/N] " answer || answer=""
   [[ "$answer" == [yY]* ]] || { echo "Install Homebrew from https://brew.sh, then run this again." >&2; exit 1; }
   installer="$(mktemp)"
   trap 'rm -f "$installer"' EXIT

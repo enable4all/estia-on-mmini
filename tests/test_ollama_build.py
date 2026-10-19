@@ -1082,7 +1082,7 @@ def test_a_dry_run_reads_but_changes_nothing(tmp_path: Path, home: Path) -> None
     assert RELEASE.url in text
     assert f"$ {SUDO} {TEE} {DAEMON}   (the service file on its input)" in text
     assert f"$ {SUDO} {LAUNCHCTL} bootstrap system {DAEMON}" in text
-    assert "would add" in text and "sudo asks for your Mac password" in text
+    assert "would add" in text and "Your Mac password next, if asked" in text and "nothing shows" in text
 
 
 @pytest.mark.parametrize("what", ["app", "homebrew-answers"])
@@ -1533,3 +1533,15 @@ def test_a_large_gemma_4_with_the_small_models_prompt_is_found_from_its_modelfil
 def test_the_size_can_come_from_the_model_info() -> None:
     answer = shown("gemma4", "") | {"model_info": {"general.parameter_count": 25_805_000_000}}
     assert ollama_build.gets_small_prompt("local-worker", answer)
+
+
+def test_the_password_lines_fit_the_terminal() -> None:
+    """Review, 19 Oct: the log line ran to about 168 characters with the usual log path."""
+    from local_assistant import prompts
+
+    for text in (
+        prompts.OLLAMA_LOG_PRIVATE.format(log=ollama_build.LOG),
+        prompts.OLLAMA_SERVICE.format(daemon=ollama_build.DAEMON, log=ollama_build.LOG),
+    ):
+        assert all(len(line) <= 135 for line in text.splitlines()), text
+        assert "nothing shows while you type" in text

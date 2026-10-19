@@ -7,7 +7,7 @@
 
 **An insanely secure & private thinking partner, living at home.** Estia (Εστία, the hearth) runs on one Mac at home and is reached only through Signal: encrypted texts, voice notes and calls. Name her what you like. Ours is called Tiffany. Estia started as Tiffany, our own thinking partner, before she was opened up for every home. Her Signal picture is her name's first letter with Estia's orange full stop, accents left out (Ángela gets an a.); a first letter outside a to z even then, such as Greek or Chinese, keeps Estia's e.
 
-Website: [estia.fun](https://estia.fun)
+Website: [estia.one](https://estia.one)
 
 ## Security
 
@@ -85,10 +85,10 @@ One line and one example each. Every detail and limit: [What she can do](GUIDE.m
 
 **1. A Mac and a number.** A Mac with Apple silicon and 16 GB of memory or more, plus a spare phone number for her Signal account. On 16 or 24 GB the smaller model failed some of her safety tests (SECURITY.md, known gaps). 32 GB with Gemma 26B is the tested setup.
 
-**2. Two lines, in your own Terminal window.** Setup asks its questions there, and the Signal codes, passwords and keys are typed hidden.
+**2. Two lines, in your own Terminal window.** Setup asks its questions there, and the Signal codes, passwords and keys are typed hidden. Over a remote login (SSH), run it inside `screen` (built into macOS), so a dropped connection does not stop it.
 
 ```sh
-git clone https://github.com/enable4all/estia-on-mmini.git ~/estia && cd ~/estia
+git clone https://github.com/enable4all/estia-one-mmini.git ~/estia && cd ~/estia
 scripts/setup.sh
 ```
 

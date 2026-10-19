@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The Mac's security step around her: each setting with its state and one line on why; on your yes it is applied
-# (sudo is asked once, before the first change): SSH with keys only, no passwordless sudo, her files private, her
+# (your Mac password when first needed): SSH with keys only, no passwordless sudo, her files private, her
 # Registration Lock. What only you can change (FileVault, automatic login, the screen lock, security responses, other
 # admins, Tailscale) is shown with its fix, never applied. Ends with the phone checklist.
 #   scripts/harden.sh            ask, then apply what you said yes to

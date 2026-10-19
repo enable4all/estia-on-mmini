@@ -155,8 +155,9 @@ def not_estia_kb(folder: Path) -> bool:
 
 def helper_env() -> dict[str, str]:
     """A clean environment: no API keys, proxy settings or other secrets of the bridge's. HOME is also Foundation's
-    home (CFFIXED_USER_HOME): her account's record keeps /var/empty (AGENTS.md, Gotchas), and with that home Vision's
-    text recognition fails at once (live, 15 Oct: scanned pages and the warm-up failed; text pages still read)."""
+    home (CFFIXED_USER_HOME): her account's record keeps /var/empty (docs/agents/own-user-deploy.md, Gotchas), and
+    with that home Vision's text recognition fails at once (live, 15 Oct: scanned pages and the warm-up failed; text
+    pages still read)."""
     env = {key: os.environ[key] for key in ("HOME", "USER", "LOGNAME", "TMPDIR", "LANG") if key in os.environ}
     home = {"CFFIXED_USER_HOME": env["HOME"]} if "HOME" in env else {}
     return env | home | {"PATH": "/usr/bin:/bin"}

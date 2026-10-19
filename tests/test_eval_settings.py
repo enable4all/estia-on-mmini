@@ -213,8 +213,8 @@ def test_the_eval_style_is_hearth_unless_set(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_a_developers_eval_settings_never_reach_a_test(tmp_path: Path) -> None:
-    """An exported EVAL_SOUL (AGENTS.md's command names the live soul.md) is never read by a test: conftest's
-    no_live_system drops every EVAL_ setting, so a test that needs one sets it itself."""
+    """An exported EVAL_SOUL (the command in docs/agents/prompts-evals.md names the live soul.md) is never read by a
+    test: conftest's no_live_system drops every EVAL_ setting, so a test that needs one sets it itself."""
     for key in ("EVAL_SOUL", "EVAL_STYLE", "EVAL_LANGUAGE", "EVAL_NAME", "EVAL_MODEL", "EVAL_BASE_URL"):
         assert key not in os.environ, key
     assert not Harness(tmp_path, FakeGemma()).soul_path.exists()  # no soul.md copied into the case's folder
@@ -2230,7 +2230,7 @@ def test_fisher_worse_is_the_one_sided_exact_p() -> None:
     from evals.gemma_suite import fisher_worse
 
     assert fisher_worse(10, 0, 10) == pytest.approx(1 / 184_756)  # 10 of 10 against 0 of 10: one table in C(20, 10)
-    assert fisher_worse(24, 9, 30) < 0.001  # AGENTS.md, Gotchas: the list on calls, 24 of 30 to 9 of 30
+    assert fisher_worse(24, 9, 30) < 0.001  # prompts-evals.md, Gotchas: the list on calls, 24 of 30 to 9 of 30
     assert fisher_worse(18, 18, 20) > 0.5  # no change: far from the gate
     assert fisher_worse(0, 20, 20) == 1.0  # better with it: never "worse"
 

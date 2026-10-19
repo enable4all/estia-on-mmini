@@ -116,8 +116,8 @@ def is_estia_kb(folder: Path) -> bool:
 def _default_documents_folder() -> Path:
     """The owner's ~/Estia-KB, written out (in her own user her config names the owner's folder in full). Directly in
     the home: macOS guards Documents, Desktop and Downloads (live, 14 Oct: the share could not open ~/Documents to her).
-    "-KB" keeps it apart from the README's clone ~/estia on a Mac's usual disk, which ignores case (AGENTS.md,
-    Gotchas)."""
+    "-KB" keeps it apart from the README's clone ~/estia on a Mac's usual disk, which ignores case
+    (docs/agents/documents-projects.md, Gotchas)."""
     return Path.home() / DOCUMENTS_FOLDER
 
 

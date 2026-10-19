@@ -86,13 +86,17 @@ def step(
     said: list[str] | None = None,
     nuclear: bool = False,
     new_pin: bool = False,
+    enter: bool = False,
 ) -> harden.Harden:
+    """`yes`: words of the questions answered y; `enter`: every other question answered with Enter (its default)."""
     typed = iter(pins)
     asked: list[str] = []
+    defaults: dict[str, bool] = {}
 
-    def ask(question: str) -> bool:
+    def ask(question: str, default: bool = False) -> bool:
         asked.append(question)
-        return any(word in question for word in yes)
+        defaults[question] = default
+        return any(word in question for word in yes) or (enter and default)
 
     run = harden.Harden(
         host,
@@ -107,6 +111,7 @@ def step(
         nuclear=nuclear,
     )
     run.questions = asked
+    run.defaults = defaults  # type: ignore[attr-defined]
     return run
 
 
@@ -244,9 +249,9 @@ def test_passwordless_sudo_is_offered_only_while_password_sudo_works(tmp_path: P
         },
     )
     host = FakeMac(root, answers)
-    run = step(host, home, yes=["passwordless sudo"])
+    run = step(host, home, yes=["rule file(s)"])
     run.run()
-    assert any("passwordless sudo" in q for q in run.questions)
+    assert any("rule file(s)" in q for q in run.questions)
     assert (SUDO, "-n", hostsec.RM, "-f", "/etc/sudoers.d/zz-alex-setup") in host.asked
     assert host.asked.index((SUDO, "-k")) > host.asked.index(
         (SUDO, "-n", hostsec.RM, "-f", "/etc/sudoers.d/zz-alex-setup")
@@ -260,9 +265,9 @@ def test_passwordless_sudo_is_offered_only_while_password_sudo_works(tmp_path: P
         },
     )
     host = FakeMac(root, only_nopasswd)
-    run = step(host, home, yes=["passwordless sudo"])
+    run = step(host, home, yes=["rule file(s)"])
     run.run()
-    assert not any("passwordless sudo" in q for q in run.questions)  # removing it would lock you out of sudo
+    assert not any("rule file(s)" in q for q in run.questions)  # removing it would lock you out of sudo
     assert not any(argv[:3] == (SUDO, "-n", hostsec.RM) for argv in host.asked)
 
 
@@ -273,7 +278,7 @@ def test_a_passwordless_rule_in_etc_sudoers_is_named_and_never_removed(tmp_path:
     listing = "User alex may run the following commands on mini:\n    (ALL) ALL\n    (ALL) NOPASSWD: ALL\n"
     host = FakeMac(root, mac_state(root, **{f"{SUDO} -n -k -l": (0, listing)}))
     said: list[str] = []
-    step(host, home, yes=["passwordless sudo"], said=said).run()
+    step(host, home, yes=["rule file(s)"], said=said).run()
     assert "! Passwordless sudo: 1 sudo rule runs without your password (NOPASSWD)" in "\n".join(said)
     assert any("/usr/bin/sudo /usr/sbin/visudo" in line for line in said)
     assert not any(argv[:3] == (SUDO, "-n", hostsec.RM) for argv in host.asked)
@@ -673,3 +678,333 @@ def test_a_link_out_of_her_folders_is_shown_and_no_chmod_is_offered_for_it(tmp_p
     run.run()
     assert any("link" in line and "out of her folders" in line for line in said)
     assert not any("private" in question for question in run.questions)
+
+
+# Enter picks the safe answer (owner, 19 Oct): the hardened level's changes, none of which can lock anyone out; never
+# the nuclear ones; keys only only once a key login is set up
+
+
+def test_enter_takes_the_hardened_changes_and_never_the_nuclear_ones(tmp_path: Path) -> None:
+    root, home = mac(tmp_path)
+    keychain(root, home)
+    loose = home / ".config/local-assistant/config.toml"
+    loose.parent.mkdir(parents=True)
+    loose.write_text("x")
+    loose.chmod(0o644)
+    (root / "etc/sudoers.d/zz-alex-setup").write_text("alex ALL=(ALL) NOPASSWD: ALL\n")
+    answers = mac_state(
+        root,
+        **{
+            f"{SUDO} -n /bin/cat /etc/sudoers.d/zz-alex-setup": (0, "alex ALL=(ALL) NOPASSWD: ALL\n"),
+            f"{SUDO} -n -k -l": (0, "User alex may run:\n    (ALL) ALL\n    (ALL) NOPASSWD: ALL\n"),
+            f"{SUDO} -n -l": (0, "User alex may run:\n    (ALL) ALL\n    (ALL) NOPASSWD: ALL\n"),
+        },
+    )
+    host = FakeMac(root, answers)
+    run = step(host, home, nuclear=True, enter=True)
+    assert run.run() == 0
+    defaults: dict[str, bool] = run.defaults  # type: ignore[attr-defined]
+    words = ("keys only", "rule file(s)", "private")
+    by_word = {word: [defaults[q] for q in defaults if word in q] for word in words}
+    assert by_word == {"keys only": [True], "rule file(s)": [True], "private": [True]}
+    strict = [q for q in defaults if any(word in q for word in ("firewall", "stealth", "python3", "keychain"))]
+    assert strict and not any(defaults[q] for q in strict)  # the nuclear ones: Enter is a no
+    assert any(argv[:3] == (SUDO, "-n", hostsec.INSTALL) for argv in host.asked)  # keys only
+    assert (SUDO, "-n", hostsec.RM, "-f", "/etc/sudoers.d/zz-alex-setup") in host.asked
+    assert ("/bin/chmod", "-R", "go-rwx", str(home / ".config/local-assistant")) in host.asked
+    assert not any(argv[:3] == (SUDO, "-n", SOCKETFILTERFW) for argv in host.asked)
+    assert not any(argv[:2] == (hostsec.SECURITY, "set-keychain-settings") for argv in host.asked)
+
+
+def test_enter_offers_her_registration_lock(tmp_path: Path) -> None:
+    root, home = mac(tmp_path)
+    (root / "Library/LaunchDaemons").mkdir(parents=True)
+    (root / "Library/LaunchDaemons/com.local-assistant.bridge.plist").write_text("x")
+    her = {"data_modes": {"status": "ok"}, "registration_lock": {"status": "warn"}}
+    answers = mac_state(
+        root,
+        **{
+            f"{SUDO} -n -u _estia -H -- *--her-checks": (0, json.dumps(her)),
+            f"{SUDO} -n -u _estia -H -- *--set-pin": (0, "Registration Lock: on\n"),
+            f"{LAUNCHCTL} print system/com.local-assistant.bridge": (0, "pid = 77\n"),
+        },
+    )
+    host = FakeMac(root, answers)
+    run = step(host, home, pins=[PIN, PIN], own_user=True, enter=True)
+    assert run.run() == 0
+    defaults: dict[str, bool] = run.defaults  # type: ignore[attr-defined]
+    assert [defaults[q] for q in defaults if "Registration Lock" in q] == [True]
+    assert any(argv[-1] == "--set-pin" for argv in host.asked)
+
+
+@pytest.mark.parametrize(
+    ("sshd", "mode", "why"),
+    [
+        ("PubkeyAuthentication no\n", 0o644, "PubkeyAuthentication no"),
+        ("AuthorizedKeysFile /etc/ssh/keys/%u\n", 0o644, "AuthorizedKeysFile"),
+        ("", 0o664, "other accounts can change"),  # StrictModes: sshd ignores a key in a file others may change
+    ],
+    ids=["keys-off", "other-file", "loose-file"],
+)
+def test_keys_only_is_offered_only_once_ssh_takes_the_key(tmp_path: Path, sshd: str, mode: int, why: str) -> None:
+    """Keys only with a key SSH would refuse locks every login out: never offered then; the line says what to fix,
+    then to test a login with the key first."""
+    root, home = mac(tmp_path)
+    (root / "etc/ssh/sshd_config").write_text(sshd + "Include /etc/ssh/sshd_config.d/*\n")
+    (home / ".ssh/authorized_keys").chmod(mode)
+    host = FakeMac(root, mac_state(root))
+    said: list[str] = []
+    run = step(host, home, yes=["keys only"], enter=True, said=said)
+    run.run()
+    assert not any("keys only" in q for q in run.questions)
+    assert not any(argv[:3] == (SUDO, "-n", hostsec.INSTALL) for argv in host.asked)
+    fix = next(line for line in said if line.startswith("    → ") and "keys only" in line)
+    assert why in fix and "test a login" in fix
+
+
+def test_the_key_login_check_reads_what_sshd_reads(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    (home / ".ssh/authorized_keys").write_text(KEY)
+    assert hostsec.key_login_problem(home, {}) == ""
+    assert hostsec.key_login_problem(home, {"authorizedkeysfile": ".ssh/authorized_keys .ssh/authorized_keys2"}) == ""
+    assert hostsec.key_login_problem(home, {"authorizedkeysfile": "%h/.ssh/authorized_keys"}) == ""
+    assert hostsec.key_login_problem(home, {"strictmodes": "no", "pubkeyauthentication": "yes"}) == ""
+    (home / ".ssh").chmod(0o777)
+    assert "other accounts can change" in hostsec.key_login_problem(home, {})
+    assert hostsec.key_login_problem(home, {"strictmodes": "no"}) == ""
+
+
+def _key_home(tmp_path: Path, name: str = "home") -> Path:
+    home = tmp_path / name
+    (home / ".ssh").mkdir(parents=True)
+    (home / ".ssh/authorized_keys").write_text(KEY)
+    return home
+
+
+def _linked_into_an_open_folder(tmp_path: Path, home: Path) -> None:
+    folder = tmp_path / "open"
+    folder.mkdir()
+    (folder / "keys").write_text(KEY)
+    folder.chmod(0o777)
+    (home / ".ssh/authorized_keys").unlink()
+    (home / ".ssh/authorized_keys").symlink_to(folder / "keys")
+
+
+def _linked_to_an_open_file(tmp_path: Path, home: Path) -> None:
+    (tmp_path / "keys").write_text(KEY)
+    (tmp_path / "keys").chmod(0o666)
+    (home / ".ssh/authorized_keys").unlink()
+    (home / ".ssh/authorized_keys").symlink_to(tmp_path / "keys")
+
+
+@pytest.mark.parametrize(
+    ("settings", "change"),
+    [
+        ({"authorizedkeysfile": "~/.ssh/authorized_keys"}, None),  # sshd expands ~ as root: root's home
+        ({"authorizedkeysfile": "~alex/.ssh/authorized_keys"}, None),
+        ({}, _linked_into_an_open_folder),  # StrictModes checks the file a link leads to, and its folders
+        ({}, _linked_to_an_open_file),
+    ],
+    ids=["tilde", "tilde-user", "link-into-open-folder", "link-to-open-file"],
+)
+def test_a_key_sshd_would_not_take_is_never_a_key_login(tmp_path: Path, settings: dict[str, str], change: Any) -> None:
+    """Review, 19 Oct: each of these passed as set up, and a yes (Enter) turned passwords off while sshd ignored the
+    key."""
+    home = _key_home(tmp_path)
+    if change is not None:
+        change(tmp_path, home)
+    assert hostsec.key_login_problem(home, settings, user="alex") != ""
+
+
+def test_percent_u_is_the_account_name_not_the_home_folders_name(tmp_path: Path) -> None:
+    home = _key_home(tmp_path, "home")  # a home folder named apart from its account
+    named = {"authorizedkeysfile": f"{tmp_path}/%u/.ssh/authorized_keys"}
+    assert "another file" in hostsec.key_login_problem(home, named, user="alex")
+    assert hostsec.key_login_problem(home, named, user="home") == ""
+    assert hostsec.key_login_problem(home, {"authorizedkeysfile": "%h/.ssh/authorized_keys"}, user="alex") == ""
+
+
+@pytest.mark.parametrize(
+    ("answer", "tty", "shown", "default", "said_yes", "hint"),
+    [
+        ("\n", True, True, True, True, "[Y/n]"),
+        ("n\n", True, True, True, False, "[Y/n]"),
+        ("\n", True, True, False, False, "[y/N]"),
+        ("y\n", True, True, False, True, "[y/N]"),
+        ("", True, True, True, False, "[Y/n]"),  # the end of input is never a yes
+        ("\n", False, True, True, False, "[y/N]"),  # no terminal (a pipe): Enter keeps the no
+        ("\n", True, False, True, False, "[y/N]"),  # the question sent to a file, unseen: Enter keeps the no
+    ],
+    ids=["enter", "n", "enter-no-default", "y", "end-of-input", "no-terminal", "output-to-a-file"],
+)
+def test_harden_asks_in_the_terminal_with_the_default_shown(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    answer: str,
+    tty: bool,
+    shown: bool,
+    default: bool,
+    said_yes: bool,
+    hint: str,
+) -> None:
+    import io
+    import sys
+
+    class Typed(io.StringIO):
+        def isatty(self) -> bool:
+            return tty
+
+    monkeypatch.setattr("sys.stdin", Typed(answer))
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: shown)
+    assert harden.terminal_ask("Safe?", default) is said_yes
+    assert f"Safe? {hint} " in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("stdin", "stdout", "answers"), [(True, True, True), (True, False, False), (False, True, False)]
+)
+def test_a_terminal_answers_only_when_it_shows_the_question_too(
+    monkeypatch: pytest.MonkeyPatch, stdin: bool, stdout: bool, answers: bool
+) -> None:
+    """The real check, unpatched (setup's Wizard.terminal and harden's terminal_ask both use it): output sent to a file
+    hides the question, so Enter may mean yes only when both ends are the person's terminal."""
+
+    class End:
+        def __init__(self, tty: bool) -> None:
+            self.tty = tty
+
+        def isatty(self) -> bool:
+            return self.tty
+
+    monkeypatch.setattr("sys.stdin", End(stdin))
+    monkeypatch.setattr("sys.stdout", End(stdout))
+    assert harden.in_terminal() is answers
+
+
+def sudo_rule_mac(tmp_path: Path, rule: str) -> tuple[FakeMac, Path]:
+    root, home = mac(tmp_path)
+    (root / "etc/sudoers.d/zz-rule").write_text(rule)
+    listing = "User alex may run:\n    (ALL) ALL\n    (ALL) NOPASSWD: ALL\n"
+    answers = mac_state(
+        root,
+        **{
+            f"{SUDO} -n /bin/cat /etc/sudoers.d/zz-rule": (0, rule),
+            f"{SUDO} -n -k -l": (0, listing),
+            f"{SUDO} -n -l": (0, listing),
+        },
+    )
+    return FakeMac(root, answers), home
+
+
+@pytest.mark.parametrize(
+    ("rule", "enter"),
+    [
+        ("alex ALL=(ALL) NOPASSWD: ALL\n", True),
+        ("%admin ALL = (ALL:ALL) NOPASSWD:ALL\n", True),
+        ("zabbix ALL=(ALL) NOPASSWD: /usr/bin/true\n", False),  # another account's
+        ("alex ALL=(root) NOPASSWD: /usr/bin/pmset\n", False),  # one program a tool of yours runs
+        ("alex,ci ALL=(ALL) NOPASSWD: ALL\n", False),
+        ("ALL ALL=(ALL) NOPASSWD: ALL\n", False),
+    ],
+    ids=["yours", "admins", "another-account", "one-program", "and-another-account", "every-account"],
+)
+def test_enter_removes_only_your_own_rule_for_every_program(tmp_path: Path, rule: str, enter: bool) -> None:
+    """Review, 19 Oct: Enter = yes removed any rule file without a password, another account's or a tool's narrow one
+    too, and what used it stopped. Enter takes yes only for a rule that gives you (or the admins) every program;
+    another rule is asked about with Enter = no, and the question says what stops."""
+    host, home = sudo_rule_mac(tmp_path, rule)
+    run = step(host, home, enter=True)
+    run.run()
+    defaults: dict[str, bool] = run.defaults  # type: ignore[attr-defined]
+    asked = [q for q in defaults if "zz-rule" in q]
+    assert len(asked) == 1 and defaults[asked[0]] is enter
+    assert ((SUDO, "-n", hostsec.RM, "-f", "/etc/sudoers.d/zz-rule") in host.asked) is enter
+    if not enter:
+        assert "stops at the password" in asked[0]
+
+
+def test_the_password_asked_again_after_a_rule_is_removed_says_why_first(tmp_path: Path) -> None:
+    """Review, 19 Oct: sudo -k, then sudo -v asks the Mac password at once; the line before it says why."""
+    events: list[object] = []
+
+    class Logged(FakeMac):
+        def run(self, argv: Sequence[str], **kwargs: Any) -> tuple[int, str]:
+            events.append(tuple(argv))
+            return super().run(argv, **kwargs)
+
+    host, home = sudo_rule_mac(tmp_path, "alex ALL=(ALL) NOPASSWD: ALL\n")
+    host = Logged(host.root, host.answers)
+    run = harden.Harden(
+        host,
+        owner="alex",
+        owner_home=home,
+        own_user=False,
+        ask=lambda question, default: "zz-rule" in question,
+        hidden=lambda prompt: "",
+        say=events.append,
+        tailscale_tools=(),
+    )
+    run.run()
+    forget = events.index((SUDO, "-k"))
+    check = events.index((SUDO, "-v"), forget)
+    assert harden.PASSWORD_ONCE_MORE in events[forget:check]
+
+
+def test_the_step_says_when_the_password_is_asked() -> None:
+    """Asked when first needed and once more after a rule that skips it is removed; again only once 5 minutes have
+    passed since admin rights were last used (sudo restarts its 5 minutes at each use, not only at the password)."""
+    for text in (harden.PASSWORD_HERS, harden.PASSWORD_YOURS):
+        assert "once 5 minutes have passed since admin rights were last used" in text
+    assert "nothing shows while you type" in harden.PASSWORD_ONCE_MORE
+    assert "once more after a rule that skips it is removed" in harden.PASSWORD_WHEN
+
+
+@pytest.mark.parametrize("sshd_takes_it", [True, False], ids=["sshd-t-passes", "sshd-t-fails"])
+def test_keys_only_prints_how_to_take_it_back_once_it_is_in_place(tmp_path: Path, sshd_takes_it: bool) -> None:
+    """Review, 19 Oct: the undo line is the guard against a lockout, so it comes after the drop-in is installed and
+    sshd -t passed, and never when sshd refused it (taken back already)."""
+    root, home = mac(tmp_path)
+    events: list[object] = []
+
+    class Logged(FakeMac):
+        def run(self, argv: Sequence[str], **kwargs: Any) -> tuple[int, str]:
+            events.append(tuple(argv))
+            return super().run(argv, **kwargs)
+
+    host = Logged(root, mac_state(root, **({} if sshd_takes_it else {f"{SUDO} -n {SSHD} -t": (1, "bad")})))
+    run = harden.Harden(
+        host,
+        owner="alex",
+        owner_home=home,
+        own_user=False,
+        ask=lambda question, default: "keys only" in question,
+        hidden=lambda prompt: "",
+        say=events.append,
+        tailscale_tools=(),
+    )
+    run.run()
+    done = harden.SSH_DONE.format(undo=f"{SUDO} {hostsec.RM} {hostsec.SSH_DROP_IN_PATH}")
+    assert (done in events) is sshd_takes_it
+    if sshd_takes_it:
+        install = next(
+            i
+            for i, event in enumerate(events)
+            if isinstance(event, tuple) and event[:3] == (SUDO, "-n", hostsec.INSTALL)
+        )
+        check = events.index((SUDO, "-n", SSHD, "-t"))
+        assert install < check < events.index(done)
+        assert "type this here to take it back" in done
+
+
+def test_the_keys_only_question_says_what_a_no_keeps() -> None:
+    question = harden.QUESTIONS["ssh_password"]
+    assert "No: passwords keep working." in question and not question.startswith(" ")
+
+
+def test_each_hardened_question_says_what_a_no_does() -> None:
+    """Enter takes yes at each of these (ENTER_YES): the question says what a no leaves, then the Recommendation."""
+    for key in sorted(harden.ENTER_YES):
+        question = harden.QUESTIONS[key]
+        assert "No" in question.split("?")[-1] or "No:" in question, key
+        assert "Recommendation: yes" in question, key

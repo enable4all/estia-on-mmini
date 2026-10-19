@@ -71,10 +71,12 @@ ALLOWED = {
 def live_paths() -> set[tuple[str, str]]:
     """(module, path) for every system path in the code that is not read through the root on its own line."""
     found: set[tuple[str, str]] = set()
-    for module in sorted((ROOT / "src" / "local_assistant").glob("*.py")):
+    package = ROOT / "src" / "local_assistant"
+    for module in sorted(package.rglob("*.py")):  # the prompts package's files too
+        name = module.relative_to(package).as_posix()
         for line in module.read_text(encoding="utf-8").splitlines():
             if not UNDER_ROOT.search(line):
-                found.update((module.name, path) for path in LIVE_PATH.findall(line))
+                found.update((name, path) for path in LIVE_PATH.findall(line))
     return found
 
 

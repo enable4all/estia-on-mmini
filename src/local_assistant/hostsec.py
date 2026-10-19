@@ -26,6 +26,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import pwd
 import re
 import shlex
 import stat
@@ -33,7 +34,7 @@ import subprocess
 import tempfile
 import time
 import unicodedata
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -89,7 +90,8 @@ NUCLEAR_LEVEL = "nuclear"
 # one neutral line for the nuclear option, outside it (harden at the hardened level; doctor with the firewall off)
 NUCLEAR_ITEMS = "the firewall, stealth mode, python3 and ruby off the firewall's list, and the keychain lock"
 NUCLEAR_LINE = (
-    f"the {NUCLEAR_LEVEL} level: {NUCLEAR_ITEMS}: only with {NUCLEAR}, which may stop other services on this Mac"
+    f"the {NUCLEAR_LEVEL} level: {NUCLEAR_ITEMS}: only with {NUCLEAR}, only for deeply technical users; it may stop "
+    "other services on this Mac"
 )
 # the SSH drop-in that harden installs: read before macOS's own 100-macos.conf (sshd takes the first value it reads)
 SSH_DROP_IN_PATH = Path("/etc/ssh/sshd_config.d/000-estia-keys-only.conf")
@@ -679,6 +681,57 @@ def _read_own(path: Path) -> str | None:
         return None
 
 
+def key_login_problem(home: Path, settings: Mapping[str, str], user: str | None = None) -> str:
+    """Why sshd would not let a key in `home`'s ~/.ssh/authorized_keys log in for `user` (default: the account this
+    runs as), from its settings (`sshd_settings`): keys turned off, keys read from another file, or (StrictModes,
+    sshd's default) that file, or the file a link there leads to, or a folder above it up to the home (to / outside
+    it), owned by another account or changeable by other accounts, so sshd ignores the key (sshd's auth_secure_path).
+    "" when it would: only then is a key login set up, and keys only offered (else it would lock every login out)."""
+    if settings.get("pubkeyauthentication", "yes").lower() == "no":
+        return "SSH takes no keys now (PubkeyAuthentication no)"
+    name = user if user is not None else pwd.getpwuid(os.getuid()).pw_name
+    wanted = os.path.normpath(home / ".ssh" / "authorized_keys")
+    tokens = {"%%": "%", "%h": str(home), "%u": name, "%U": str(os.getuid())}
+    named = settings.get("authorizedkeysfile", ".ssh/authorized_keys .ssh/authorized_keys2").split()
+    # sshd expands a leading ~ when it reads its config, as root (servconf.c): never your home, so never this file
+    expanded = (re.sub(r"%[%huU]", lambda found: tokens[found.group()], file) for file in named if file[:1] != "~")
+    if not any(os.path.normpath(home / file) == wanted for file in expanded):
+        return "SSH reads keys from another file (AuthorizedKeysFile)"
+    if settings.get("strictmodes", "yes").lower() == "no":
+        return ""
+    return _secure_path_problem(home / ".ssh" / "authorized_keys", home)
+
+
+def _secure_path_problem(path: Path, home: Path) -> str:
+    """sshd's StrictModes check: the file a name leads to (links followed) is a regular file, and it and every folder
+    above it, up to the home (or /, outside it), belong to you or root and no other account may change them."""
+
+    def loose(info: os.stat_result) -> bool:
+        return info.st_uid not in (os.getuid(), 0) or bool(stat.S_IMODE(info.st_mode) & 0o022)
+
+    try:
+        real = Path(os.path.realpath(path, strict=True))
+        info = real.stat()
+    except OSError:
+        return f"{path} cannot be read"
+    if not stat.S_ISREG(info.st_mode):
+        return f"{path} is not a file, so SSH ignores the key"
+    if loose(info):
+        return f"other accounts can change {real}, so SSH ignores the key"
+    top = os.path.realpath(home)
+    folder = real.parent
+    while True:
+        try:
+            info = folder.stat()
+        except OSError:
+            return f"{folder} cannot be read"
+        if loose(info):
+            return f"other accounts can change {folder}, so SSH ignores the key"
+        if str(folder) == top or folder == folder.parent:
+            return ""
+        folder = folder.parent
+
+
 def ssh_password(host: Host, key_home: Path | None = None) -> Check:
     """Remote Login with passwords (or keyboard-interactive, which PAM turns into a password). Key-only is offered only
     when Remote Login is on and `key_home`'s authorized_keys holds a key; doctor passes no home and never applies."""
@@ -712,12 +765,21 @@ def ssh_password(host: Host, key_home: Path | None = None) -> Check:
             "add your laptop's public key to ~/.ssh/authorized_keys and test a login with it; then "
             f"{HARDEN} allows keys only",
         )
+    problem = key_login_problem(key_home, settings)
+    if problem:  # keys only would lock every login out: never offered
+        return Check(
+            "ssh_password",
+            "warn",
+            "SSH",
+            text,
+            f"{problem}: fix that and test a login with your key first; then {HARDEN} allows keys only",
+        )
     return Check(
         "ssh_password",
         "warn",
         "SSH",
         text,
-        f"{HARDEN} allows keys only; this session stays open: test a new login before you close it",
+        f"{HARDEN} allows keys only (it asks first)",
         (
             _sudo(INSTALL, "-m", "644", "-o", "root", "-g", "wheel", DROP_IN_SOURCE, str(SSH_DROP_IN_PATH)),
             _sudo(SSHD, "-t"),
@@ -790,6 +852,23 @@ def security_responses(host: Host) -> Check:
     )
 
 
+def sudoers_lines(text: str | None) -> list[str]:
+    """A sudoers file's rule lines: neither empty nor a comment."""
+    return [line.strip() for line in (text or "").splitlines() if line.strip() and not line.strip().startswith("#")]
+
+
+# a rule in its usual form, for every host and program: `alex ALL=(ALL) NOPASSWD: ALL`, `%admin ALL = (ALL:ALL)
+# NOPASSWD:ALL`; anything else (other tags, a list of programs, an alias) is not taken for one
+_EVERY_PROGRAM = re.compile(r"(?P<users>[^\s=]+)\s+ALL\s*=\s*(?:\([^)]*\)\s*)?NOPASSWD\s*:\s*ALL")
+
+
+def rule_for_you_alone(line: str, user: str) -> bool:
+    """A rule that gives `user` (or the admins, %admin) every program without the password, and no one else: removing
+    it takes nothing from another account or from a tool that was given one program (review, 19 Oct)."""
+    found = _EVERY_PROGRAM.fullmatch(line.strip())
+    return found is not None and all(name in (user, "%admin") for name in found.group("users").split(","))
+
+
 def sudoers(host: Host, contents: dict[str, str | None] | None = None) -> Check:
     """Rules in /etc/sudoers.d that let sudo run without a password. The files are readable only by root: pass
     `contents` (name -> text, None when unreadable) when they were read with sudo; names are shown, never rules."""
@@ -801,10 +880,7 @@ def sudoers(host: Host, contents: dict[str, str | None] | None = None) -> Check:
             names = []
         contents = {name: host.read(Path("/etc/sudoers.d") / name) for name in names}
     unread = sorted(name for name, text in contents.items() if text is None)
-    rules = {
-        name: [line.strip() for line in (text or "").splitlines() if line.strip() and not line.strip().startswith("#")]
-        for name, text in contents.items()
-    }
+    rules = {name: sudoers_lines(text) for name, text in contents.items()}
     passwordless = sorted(name for name, lines in rules.items() if any("NOPASSWD" in line for line in lines))
     if passwordless:
         removable = [name for name in passwordless if all("NOPASSWD" in line for line in rules[name])]
@@ -1092,9 +1168,7 @@ def data_modes(home: Path, *, sudo: bool = False) -> Check:
         if found:
             roots.append(top)
     if not files and not folders and not links:
-        return Check(
-            "data_modes", "ok", "Her files", "only their own account can read her folders and files (0700, 0600)"
-        )
+        return Check("data_modes", "ok", "Her files", "no other account can read her folders and files (0700, 0600)")
     texts: list[str] = []
     fixes: list[str] = []
     if files or folders:
@@ -1218,7 +1292,7 @@ def registration_lock_check(home: Path, number: str = "") -> Check:
             "registration_lock",
             "warn",
             "Registration Lock",
-            "off: whoever gets her SMS code can register her number elsewhere",
+            "off: whoever receives her SMS code can register her number elsewhere",
             f"{HARDEN} sets a PIN (keep it in your password manager)",
         )
     if state == "none":

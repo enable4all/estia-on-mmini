@@ -31,7 +31,7 @@ Thanks for looking at Estia. Keep changes small, tested and free of personal dat
   [setup_assistant.md](setup_assistant.md).
 - **Prompt changes** are checked with the Gemma test set, as above.
 - **Her name is a setting.** Every install names its own assistant (`name` in the config, default Estia). A text that
-  names her takes the name at runtime (in `prompts.py`: a `name` argument or a `{name}` template); never write a name
+  names her takes the name at runtime (in `prompts/`: a `name` argument or a `{name}` template); never write a name
   into code, prompts or tests that do not mean it.
 - **New features** start with an issue that agrees the design, then the code. Design specs and plans are not kept in
   this repository.

@@ -4051,6 +4051,9 @@ async def test_history_older_than_keep_days_is_pruned_once_a_night_when_idle(
 
     harness = await start(tmp_path, monkeypatch, FakeGemma(), clock=clock, prepare=old_message, keep_days=30)
     try:
+        # the start-up note about the old message may still be on its way: the pass runs only when nothing else does
+        # (under a loaded suite it raced that note, review of 0.9.5)
+        await until(lambda: not harness.app._is_busy())
         assert await harness.app.retention_pass() is True
         texts = [row[0] for row in harness.app.store._conn.execute("SELECT text FROM messages")]
         assert texts and "from long ago" not in texts  # the offline note about it (sent now) stays

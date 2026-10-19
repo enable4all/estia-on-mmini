@@ -9,6 +9,8 @@
 # extra permission. Only folders and files you own are changed; a symbolic link is never followed, and a file with a
 # second name (a hard link: it may be a file of yours from elsewhere) is never shared, and a folder that holds a git
 # checkout (.git) is refused. Run it again any time: an entry already there is never added twice.
+# At its end it names what in your home every account may open, and in a terminal asks once whether to close it
+# (chmod -h o-rwx, as you; Enter closes them, a no keeps everything as it is).
 #   scripts/share-documents.sh             share
 #   scripts/share-documents.sh --dry-run   every command, nothing changed
 #   scripts/share-documents.sh --revoke    take it back: the way closes first; her index of the documents goes at her

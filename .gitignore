@@ -32,6 +32,9 @@ dist/
 # brand sources: the font and renders stay local
 docs/brand/source/fonts/
 docs/brand/source/out/
+# a run's own output in the repo's top folder (19 Oct: ten empty .jsonl files came in with 0.9.4 and went public)
+/*.jsonl
+/*.tsv
 
 # internal working files (kept out of the public repo)
 docs/superpowers/

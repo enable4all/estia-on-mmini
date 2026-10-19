@@ -35,12 +35,10 @@ case "${1:-}" in
   --rehearse) exec "$python" -I -m local_assistant.ownuser migrate --checkout "$repo" "$1" ;;
   --dry-run)
     "$python" -I -m local_assistant.ownuser migrate --checkout "$repo" --dry-run
-    echo "Her projects folder, read-only for her, at the end of the move (as you, no sudo):"
-    share --dry-run ;;
+    share --after-move --dry-run ;;  # its heading only over a folder to share
   "")
     "$sudo" "$python" -I -m local_assistant.ownuser migrate --checkout "$repo" || exit 1
-    echo "Her projects folder, read-only for her (as you, no sudo):"
-    share || { echo "! She runs in her own user; her projects folder is not shared yet: scripts/share-projects.sh" >&2; exit 3; } ;;
+    share --after-move || { echo "! She runs in her own user; her projects folder is not shared yet: scripts/share-projects.sh" >&2; exit 3; } ;;
   --rollback|--remove-old)  # after the move: the root-owned tools do it, never this checkout's Python as root
     [[ -x "$estia" ]] || { echo "no move into her own user is on record: nothing to go back from" >&2; exit 1; }
     exec "$sudo" "$estia" "${1#--}" ;;

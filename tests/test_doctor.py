@@ -1712,9 +1712,14 @@ def test_doctor_names_what_every_account_may_open_in_your_home(home: Path, secti
     probe.home_open = ([Path("/Users/alex/.zshrc"), Path("/Users/alex/.config")], False)
     found = by_part(run(write_config(home, MINIMAL + section), probe))["Your home"]
     assert found.status == "warn"
-    assert found.text.startswith("every account may open .zshrc, .config, and her account passes through your home")
+    assert found.text.startswith(
+        "every account may open .zshrc, .config (the macOS default for a new file or folder), and her account passes "
+        "through your home"
+    )
     assert "(the usual names only: her account cannot list your home)" in found.text
-    assert found.fix == "Close what should stay yours, as you: chmod o-rwx /Users/alex/.zshrc /Users/alex/.config"
+    assert found.fix == (
+        "Close what should stay yours (no admin rights needed): chmod -h o-rwx /Users/alex/.zshrc /Users/alex/.config"
+    )
     assert probe.homes_opened == [(Path("/Users/alex"), shared)]
 
 
