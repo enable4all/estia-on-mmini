@@ -2,6 +2,7 @@
 
 import importlib.util
 import itertools
+import json
 import re
 import subprocess
 import unicodedata
@@ -2154,6 +2155,21 @@ def test_the_readme_shows_the_dark_architecture_diagram_and_both_files_are_there
         svg = (ROOT / "docs" / "images" / name).read_text(encoding="utf-8")
         assert svg.startswith("<svg") and "<title" in svg
         assert 'href="http' not in svg and "url(http" not in svg  # self-contained: it loads nothing from outside
+
+
+def test_the_diagram_hover_map_matches_the_drawing() -> None:
+    """docs/images/hotspots.json, the drawing's own map of its modules for estia.one's hover notes (owner, 22 Oct):
+    written by the drawing's build beside both files, in the drawing's units, every box inside it."""
+    spots = json.loads((ROOT / "docs" / "images" / "hotspots.json").read_text(encoding="utf-8"))
+    for name in ("estia-architecture-dark.svg", "estia-architecture-light.svg"):
+        svg = (ROOT / "docs" / "images" / name).read_text(encoding="utf-8")
+        assert f'viewBox="0 0 {spots["width"]} {spots["height"]}"' in svg
+    names = [spot["name"] for spot in spots["spots"]]
+    assert len(names) == len(set(names)) >= 40
+    for spot in spots["spots"]:
+        assert set(spot) == {"name", "group", "x", "y", "w", "h", "inventory"} and spot["group"] and spot["inventory"]
+        assert spot["x"] >= 0 and spot["x"] + spot["w"] <= spots["width"]
+        assert spot["y"] >= 0 and spot["y"] + spot["h"] <= spots["height"]
 
 
 def test_the_guide_has_one_h1_no_html_and_no_image() -> None:

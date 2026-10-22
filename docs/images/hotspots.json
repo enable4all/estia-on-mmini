@@ -1,0 +1,375 @@
+{
+  "width": 1732,
+  "height": 1272,
+  "spots": [
+    {
+      "name": "signal-cli",
+      "group": "Messages and calls",
+      "x": 554,
+      "y": 345,
+      "w": 256,
+      "h": 64,
+      "inventory": "signal-cli"
+    },
+    {
+      "name": "Call helper",
+      "group": "Messages and calls",
+      "x": 554,
+      "y": 417,
+      "w": 256,
+      "h": 52,
+      "inventory": "Call helper (signal-call-tunnel, Signal's RingRTC)"
+    },
+    {
+      "name": "Bridge",
+      "group": "Messages and calls",
+      "x": 554,
+      "y": 477,
+      "w": 256,
+      "h": 52,
+      "inventory": "Bridge"
+    },
+    {
+      "name": "Ollama",
+      "group": "Thinking",
+      "x": 554,
+      "y": 577,
+      "w": 256,
+      "h": 64,
+      "inventory": "Ollama (official build)"
+    },
+    {
+      "name": "Gemma 4",
+      "group": "Thinking",
+      "x": 554,
+      "y": 649,
+      "w": 256,
+      "h": 64,
+      "inventory": "Gemma"
+    },
+    {
+      "name": "AgentJev",
+      "group": "Thinking",
+      "x": 554,
+      "y": 721,
+      "w": 256,
+      "h": 52,
+      "inventory": "AgentJev (mail pre-filter)"
+    },
+    {
+      "name": "Voice service",
+      "group": "Voice",
+      "x": 826,
+      "y": 345,
+      "w": 256,
+      "h": 64,
+      "inventory": "Voice service"
+    },
+    {
+      "name": "Whisper",
+      "group": "Voice",
+      "x": 826,
+      "y": 417,
+      "w": 256,
+      "h": 52,
+      "inventory": "Whisper (WhisperKit)"
+    },
+    {
+      "name": "Kokoro",
+      "group": "Voice",
+      "x": 826,
+      "y": 477,
+      "w": 256,
+      "h": 52,
+      "inventory": "Kokoro"
+    },
+    {
+      "name": "Supertonic-3",
+      "group": "Languages and calls",
+      "x": 826,
+      "y": 577,
+      "w": 256,
+      "h": 64,
+      "inventory": "Supertonic-3 (FluidAudio)"
+    },
+    {
+      "name": "Speech detector",
+      "group": "Languages and calls",
+      "x": 826,
+      "y": 649,
+      "w": 256,
+      "h": 64,
+      "inventory": "Speech detector (Silero VAD)"
+    },
+    {
+      "name": "Turn detector",
+      "group": "Languages and calls",
+      "x": 826,
+      "y": 721,
+      "w": 256,
+      "h": 52,
+      "inventory": "Turn detector (Smart Turn v3.2)"
+    },
+    {
+      "name": "Calendar helper",
+      "group": "Helpers",
+      "x": 1098,
+      "y": 345,
+      "w": 256,
+      "h": 64,
+      "inventory": "Calendar helper"
+    },
+    {
+      "name": "Device helper",
+      "group": "Helpers",
+      "x": 1098,
+      "y": 417,
+      "w": 256,
+      "h": 52,
+      "inventory": "Device helper"
+    },
+    {
+      "name": "YouTube helper",
+      "group": "Helpers",
+      "x": 1098,
+      "y": 477,
+      "w": 256,
+      "h": 52,
+      "inventory": "YouTube helper"
+    },
+    {
+      "name": "Memory (SQLite)",
+      "group": "Memory and files",
+      "x": 1098,
+      "y": 577,
+      "w": 256,
+      "h": 64,
+      "inventory": "Database (SQLite)"
+    },
+    {
+      "name": "Documents helper",
+      "group": "Memory and files",
+      "x": 1098,
+      "y": 649,
+      "w": 256,
+      "h": 64,
+      "inventory": "Documents helper (Apple PDFKit and Vision)"
+    },
+    {
+      "name": "Project tools",
+      "group": "Memory and files",
+      "x": 1098,
+      "y": 721,
+      "w": 256,
+      "h": 52,
+      "inventory": "Project tools (read-only)"
+    },
+    {
+      "name": "Your phone",
+      "group": "Your devices",
+      "x": 24,
+      "y": 219.0,
+      "w": 192,
+      "h": 148,
+      "inventory": "Your phone (Signal app)"
+    },
+    {
+      "name": "Laptop",
+      "group": "Your devices",
+      "x": 24,
+      "y": 387.0,
+      "w": 192,
+      "h": 148,
+      "inventory": "Laptop or desktop (Signal Desktop)"
+    },
+    {
+      "name": "Signal servers",
+      "group": "Signal",
+      "x": 288,
+      "y": 313.0,
+      "w": 142,
+      "h": 128,
+      "inventory": "Signal"
+    },
+    {
+      "name": "Microsoft 365",
+      "group": "Read-only: mail and calendars",
+      "x": 1462,
+      "y": 73,
+      "w": 232,
+      "h": 52,
+      "inventory": "Microsoft 365 (Microsoft Graph)"
+    },
+    {
+      "name": "Google Calendar",
+      "group": "Read-only: mail and calendars",
+      "x": 1462,
+      "y": 133,
+      "w": 232,
+      "h": 52,
+      "inventory": "Google Calendar"
+    },
+    {
+      "name": "iCloud Calendar",
+      "group": "Read-only: mail and calendars",
+      "x": 1462,
+      "y": 193,
+      "w": 232,
+      "h": 52,
+      "inventory": "iCloud Calendar"
+    },
+    {
+      "name": "Fastmail",
+      "group": "Read-only: mail and calendars",
+      "x": 1462,
+      "y": 253,
+      "w": 232,
+      "h": 52,
+      "inventory": "Fastmail"
+    },
+    {
+      "name": "Nextcloud",
+      "group": "Read-only: mail and calendars",
+      "x": 1462,
+      "y": 313,
+      "w": 232,
+      "h": 52,
+      "inventory": "Nextcloud"
+    },
+    {
+      "name": "Other CalDAV",
+      "group": "Read-only: mail and calendars",
+      "x": 1462,
+      "y": 373,
+      "w": 232,
+      "h": 52,
+      "inventory": "Other CalDAV server"
+    },
+    {
+      "name": "Ollama search",
+      "group": "Questions out",
+      "x": 1462,
+      "y": 503,
+      "w": 232,
+      "h": 52,
+      "inventory": "Ollama web search"
+    },
+    {
+      "name": "Brave Search",
+      "group": "Questions out",
+      "x": 1462,
+      "y": 563,
+      "w": 232,
+      "h": 52,
+      "inventory": "Brave Search"
+    },
+    {
+      "name": "Web pages",
+      "group": "Questions out",
+      "x": 1462,
+      "y": 623,
+      "w": 232,
+      "h": 64,
+      "inventory": "Web pages"
+    },
+    {
+      "name": "YouTube",
+      "group": "Questions out",
+      "x": 1462,
+      "y": 695,
+      "w": 232,
+      "h": 52,
+      "inventory": "YouTube"
+    },
+    {
+      "name": "Google Maps",
+      "group": "Questions out",
+      "x": 1462,
+      "y": 755,
+      "w": 232,
+      "h": 52,
+      "inventory": "Google Maps (Places API, Routes API)"
+    },
+    {
+      "name": "Ollama library",
+      "group": "Models, downloaded once",
+      "x": 554,
+      "y": 73,
+      "w": 256,
+      "h": 52,
+      "inventory": "Ollama model library (ollama.com)"
+    },
+    {
+      "name": "Hugging Face",
+      "group": "Models, downloaded once",
+      "x": 554,
+      "y": 133,
+      "w": 256,
+      "h": 52,
+      "inventory": "Hugging Face"
+    },
+    {
+      "name": "GitHub",
+      "group": "Code and tools, downloaded",
+      "x": 826,
+      "y": 73,
+      "w": 256,
+      "h": 52,
+      "inventory": "GitHub"
+    },
+    {
+      "name": "crates.io",
+      "group": "Code and tools, downloaded",
+      "x": 1098,
+      "y": 73,
+      "w": 256,
+      "h": 52,
+      "inventory": "crates.io"
+    },
+    {
+      "name": "Homebrew",
+      "group": "Code and tools, downloaded",
+      "x": 826,
+      "y": 133,
+      "w": 528,
+      "h": 52,
+      "inventory": "Homebrew"
+    },
+    {
+      "name": "Spotify",
+      "group": "Music: commands out",
+      "x": 554,
+      "y": 985,
+      "w": 232,
+      "h": 52,
+      "inventory": "Spotify"
+    },
+    {
+      "name": "Philips Hue",
+      "group": "Home network only",
+      "x": 838,
+      "y": 985,
+      "w": 232,
+      "h": 52,
+      "inventory": "Philips Hue (Hue Bridge)"
+    },
+    {
+      "name": "Kasa and Tapo",
+      "group": "Home network only",
+      "x": 1078,
+      "y": 985,
+      "w": 232,
+      "h": 52,
+      "inventory": "TP-Link Kasa and Tapo"
+    },
+    {
+      "name": "Bose SoundTouch",
+      "group": "Home network only",
+      "x": 1318,
+      "y": 985,
+      "w": 232,
+      "h": 52,
+      "inventory": "Bose SoundTouch"
+    }
+  ]
+}
