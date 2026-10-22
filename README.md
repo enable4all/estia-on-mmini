@@ -27,7 +27,7 @@ All of it in plain words: [Safe and private](GUIDE.md#safe-and-private-in-plain-
   <a href="docs/images/estia-architecture-dark.svg"><img src="docs/images/estia-architecture-dark.svg" width="100%" alt="Estia is reached only through Signal, end-to-end encrypted, and runs on one Mac mini at home with no web app and no open port. Mail and calendars are read-only, searches, web pages, YouTube captions and Google Maps are questions out, models, code and tools are downloaded, and lights, plugs and speakers stay on the home network."></a>
 </p>
 
-<p align="center"><sub>Estia runs on one Mac mini at home and is reached only through Signal: texts, voice notes, photos, PDFs, locations and calls, end-to-end encrypted. No web app, no open port. She reads mail and calendars but never changes them. Searches, web pages, YouTube captions and Google Maps are questions out; mail, project and document text never go to a search engine or Google Maps. Models, code and tools are downloaded into the Mac. Lights, plugs and speakers are reached over the home network only, never through the TP-Link or Philips cloud. Click the diagram for the full-size version.</sub></p>
+Estia runs on one Mac mini at home and is reached only through Signal: texts, voice notes, photos, PDFs, locations and calls, end-to-end encrypted. No web app, no open port. She reads mail and calendars but never changes them. Searches, web pages, YouTube captions and Google Maps are questions out; mail, project and document text never go to a search engine or Google Maps. Models, code and tools are downloaded into the Mac. Lights, plugs and speakers are reached over the home network only, never through the TP-Link or Philips cloud. Click the diagram for the full-size version.
 
 ## What she does
 

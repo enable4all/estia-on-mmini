@@ -2146,6 +2146,10 @@ def test_the_readme_shows_the_dark_architecture_diagram_and_both_files_are_there
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert '<img src="docs/images/estia-architecture-dark.svg"' in readme
     assert "estia-architecture-light.svg" not in readme and "<picture>" not in readme.split("## Architecture")[1]
+    # its caption: a plain paragraph, left-aligned as the rest of the page (owner, 22 Oct), never centered or small
+    section = readme.split("## Architecture")[1].split("\n## ")[0]
+    caption = next(line for line in section.splitlines() if line.startswith("Estia runs on one Mac mini at home"))
+    assert "<" not in caption and "<sub>" not in section and section.count('align="center"') == 1  # the image's only
     for name in ("estia-architecture-dark.svg", "estia-architecture-light.svg"):
         svg = (ROOT / "docs" / "images" / name).read_text(encoding="utf-8")
         assert svg.startswith("<svg") and "<title" in svg
