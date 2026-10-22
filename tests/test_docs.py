@@ -2146,6 +2146,9 @@ def test_the_readme_shows_the_dark_architecture_diagram_and_both_files_are_there
     test compares that file with the repo's, so both stay in docs/images."""
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert '<img src="docs/images/estia-architecture-dark.svg"' in readme
+    # a click on it opens it on estia.one, where each part has its note (owner, 22 Oct)
+    assert '<a href="https://estia.one/#architecture"><img src="docs/images/estia-architecture-dark.svg"' in readme
+    assert "Click the diagram to open it on estia.one, where each part has a short note." in readme
     assert "estia-architecture-light.svg" not in readme and "<picture>" not in readme.split("## Architecture")[1]
     # its caption: a plain paragraph, left-aligned as the rest of the page (owner, 22 Oct), never centered or small
     section = readme.split("## Architecture")[1].split("\n## ")[0]
