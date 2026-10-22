@@ -285,6 +285,16 @@ class Devices:
         spoken = {spec.name: _spoken(_split_camel(spec.name)) for spec in self._specs}
         return {name for name, words in spoken.items() if words and f" {words} " in said}
 
+    def named_by(self, text: str, device: str) -> bool:
+        """Whether the text names this device: its whole name, or a word of its name that is no device word ("bedroom"
+        of "bedroom light"; "the light" names none of them). An unknown device: never."""
+        try:
+            spec = self.find(device)
+        except ValueError:
+            return False
+        own = {word for word in _words(_split_camel(spec.name)) if len(word) >= 3} - _DEVICE_WORDS
+        return spec.name in self.named(text) or bool(own & _words(text))
+
     def recently_switched(self) -> set[str]:
         """The devices a confirmed change reached within `RECENT_SWITCH_SECONDS` (an answer's, or a yes's)."""
         now = self._clock()

@@ -24,7 +24,7 @@ In Signal, her profile reads Estia (AI), or the name set as `name` in the config
 
 | Area | Example | What you get |
 |---|---|---|
-| Chat | "What's a good question to ask about free will?" | A short, direct answer. The conversation is remembered. |
+| Chat | "What's a good question to ask about free will?" | A short, direct answer. The conversation is remembered, her own notes too: reminders set, the digest, calendar changes. |
 | Voice notes | Send a voice note | Transcribed on the Mac, answered in text, and optionally read back as a voice note (`/voice`) |
 | Calls | Call her | A spoken conversation that can be interrupted. A short summary text follows a call of two or more turns. |
 | Calendar | "What's on Friday?" | That day's events from each calendar, with times and places |

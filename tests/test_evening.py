@@ -1,7 +1,7 @@
 """The evening note (owner, D4, 15 Oct): code's three fixed questions at the user's time, off unless the user's typed
 /evening on (or [initiative] evening). It goes through the initiative's gate where it applies (quiet hours, /quiet,
 /lock, busy, practice; at most once a day), never needs /initiative on and never counts toward its caps; it goes only
-to the one account that turned it on, is a note (never in Gemma's history), and is never followed up after a silence.
+to the one account that turned it on, is a note (in her history only as code's), and is never followed up after a silence.
 Off, her request is byte for byte as before (fake clock, never wall time; the bridge on a fake signal-cli)."""
 
 import hashlib
@@ -376,7 +376,7 @@ async def test_quiet_off_names_the_evening_note_it_resumes(store: Store) -> None
     assert both.set_quiet(False) == prompts.QUIET_OFF.format(rules=rules)
 
 
-# at most once, never in her history
+# at most once, in her history only as code's note
 
 
 async def test_a_note_being_sent_at_a_stop_is_never_sent_again_that_evening(store: Store) -> None:
@@ -389,7 +389,7 @@ async def test_a_note_being_sent_at_a_stop_is_never_sent_again_that_evening(stor
     assert sender.sent == []
 
 
-async def test_the_note_never_reaches_her_history_and_the_reply_is_an_ordinary_message(store: Store) -> None:
+async def test_the_note_reaches_her_history_only_as_codes_and_the_reply_is_an_ordinary_message(store: Store) -> None:
     initiative, sender, _ = make(store, evening(), "2026-10-14 21:00")
     await initiative.tick()
     assert sender.sent == [(ME, NOTE)]
@@ -397,8 +397,10 @@ async def test_the_note_never_reaches_her_history_and_the_reply_is_an_ordinary_m
     store.assign_seq(reply)
     conversation = store.current_conversation()
     messages = ContextBuilder(store, Profile(store), TZ).build(conversation)
-    shown = json.dumps(messages)
-    assert "What went well" not in shown and "/evening" not in shown
+    hers = json.dumps([m["content"] for m in messages if m["role"] in ("assistant", "user")])
+    assert "What went well" not in hers and "/evening" not in hers  # never as her words
+    [note] = [m["content"] for m in messages if m["role"] == "tool"]  # code's note, its footer as the user saw it
+    assert "What went well" in note and note.endswith("(evening note · /evening off to stop)")
     assert messages[-1]["role"] == "user" and messages[-1]["content"].endswith("Good day. Taxes still open.")
     assert [m.text for m in store.window_messages(conversation.id, 0)] == ["Good day. Taxes still open."]
 

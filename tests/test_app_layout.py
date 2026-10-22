@@ -149,6 +149,6 @@ def test_app_and_the_hosts_are_readable_sizes() -> None:
         name: len((SRC / f"{name}.py").read_text().splitlines())
         for name in ("app", "call_host", "documents_host", "lifecycle", "status_host")
     }
-    assert sizes["app"] <= 1750, sizes
+    assert sizes["app"] <= 1760, sizes  # 1750 until 0.9.6: C2 (links out of notes) and rule 6 (notes in her history)
     assert sizes["call_host"] <= 450 and sizes["lifecycle"] <= 350, sizes
     assert sizes["status_host"] <= 250 and sizes["documents_host"] <= 200, sizes

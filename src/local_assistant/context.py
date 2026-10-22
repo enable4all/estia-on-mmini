@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from local_assistant import prompts
+from local_assistant import code_notes, prompts
+from local_assistant.code_notes import Note
 from local_assistant.config import DEFAULT_NAME, DEFAULT_STYLE
 from local_assistant.profile import Profile
 from local_assistant.soul import Soul, load_soul, soul_part
@@ -25,6 +26,8 @@ log = logging.getLogger(__name__)
 
 SNAPSHOT_KEY = "profile_snapshot"
 RATIO_KEY = "chars_per_token"
+NOTES_FROM_KEY = "code_notes_from"  # "<conversation id>:<seq>": code's notes before it left her input (their limit)
+_NOTE_OVERHEAD = 60  # a note's call, its result's role markers and its line before the words
 DEFAULT_CHARS_PER_TOKEN = 3.5
 _MESSAGE_OVERHEAD = 8  # role markers and the time stamp
 _TRACE_RESULT_CHARS = 300
@@ -35,9 +38,12 @@ def without_fake_notices(text: str) -> str:
     Used on Gemma's new answers (it may imitate them) and on stored replies (before the fix, notices were sent inside
     the reply text)."""
     paragraphs = text.split("\n\n")
-    notices = ("profile changes", "(while we were quiet")
-    kept = [p for p in paragraphs if not p.lstrip(" \t\n#*_~").lower().startswith(notices)]
+    notices = ("profile changes", "(while we were quiet", "the bridge's note to the user")  # the last: code_notes
+    kept = [p for p in paragraphs if not _STAMP.sub("", p.lstrip(" \t\n#*_~")).lower().startswith(notices)]
     return "\n\n".join(kept)
+
+
+_STAMP = re.compile(r"^\[[^\]\n]{1,40}\]\s*")  # a time stamp before a notice
 
 
 PHOTO_PREFIX = "[photo]"  # how a photo message is stored: "[photo] <caption>"
@@ -164,13 +170,58 @@ class ContextBuilder:
     def after_outside(self, conversation: Conversation, message_id: int) -> bool:
         """Whether her context for this message still holds a reply or summary that followed outside text: an earlier
         message of the conversation in the window, or summarised, whose answer read outside text (or that was an audio
-        file or a photo). A new conversation (/new) starts without it."""
+        file or a photo), or a note of code's in her input that quotes outside text (`outside_notes`). A new
+        conversation (/new) starts without it."""
         for found_id, seq in self._store.outside_seqs(conversation.id):
             if found_id == message_id:
                 continue
             if seq > conversation.summary_upto_seq or conversation.summary:
                 return True
-        return False
+        return bool(self.outside_notes(conversation, message_id))
+
+    def notes(self, conversation: Conversation) -> list[Note]:
+        """Code's notes in her history: sent after the window's start and after their own (`NOTES_FROM_KEY`); none in a
+        practice conversation (its own rules, as before)."""
+        if conversation.kind == "practice":
+            return []
+        start = max(conversation.summary_upto_seq, self._notes_from(conversation.id))
+        return [Note(message, command) for message, command in self._store.code_notes(conversation.id, start)]
+
+    def outside_notes(self, conversation: Conversation, message_id: int) -> list[str]:
+        """The words of code's notes quoting outside text in her input for this message (the guards read them)."""
+        return [note.text for note in self.quoted_notes(conversation, message_id)]
+
+    def quoted_notes(self, conversation: Conversation, message_id: int) -> list[Note]:
+        """Code's notes quoting outside text in her input for this message, in order (`Note.private`: mail, a calendar
+        or documents)."""
+        ordered = code_notes.in_order(self.window(conversation), self.notes(conversation), message_id)
+        return [item for item in ordered if isinstance(item, Note) and item.outside]
+
+    def mark_outside_notes(self, message_id: int) -> None:
+        """Her input for this message held a note quoting outside text: its answer stays outside text for later turns
+        once the note has left her input (the notes' limit, a summary)."""
+        self._store.mark_outside_notes(message_id)
+
+    def _notes_from(self, conversation_id: int) -> int:
+        found, _, seq = (self._store.get_state(NOTES_FROM_KEY) or "").partition(":")
+        return int(seq) if found == str(conversation_id) and seq.isdigit() else 0
+
+    def note_tokens(self, note: Note) -> int:
+        """A note's estimated size in her input (cut at code_notes.NOTE_MAX_CHARS)."""
+        return math.ceil(min(len(note.text), code_notes.NOTE_MAX_CHARS) / self.chars_per_token()) + _NOTE_OVERHEAD
+
+    def _limit_notes(self, conversation: Conversation) -> None:
+        """Past NOTES_MAX_TOKENS of notes in her input, their start moves on, keeping the newest NOTES_KEEP_TOKENS."""
+        notes = self.notes(conversation)
+        sizes = [self.note_tokens(note) for note in notes]
+        if sum(sizes) <= code_notes.NOTES_MAX_TOKENS:
+            return
+        kept, keep_from = 0, len(notes)
+        while keep_from > 1 and kept + sizes[keep_from - 1] <= code_notes.NOTES_KEEP_TOKENS:
+            keep_from -= 1
+            kept += sizes[keep_from]
+        self._store.set_state(NOTES_FROM_KEY, f"{conversation.id}:{notes[keep_from - 1].message.seq or 0}")
+        log.info("code's notes at their limit: %d older notes left her input", keep_from)
 
     def turn_before(self, message: Message) -> list[str]:
         """The texts of the turn before this message (the user's, hers and code's notes)."""
@@ -271,7 +322,10 @@ class ContextBuilder:
         # first, a lower id, and gets its place only when answered), not the highest id; none before it is stored
         found = (message.id for message in reversed(window) if message.direction == "in")
         answered = next(found, None) if newest else None
-        for message in window:
+        for message in code_notes.in_order(window, self.notes(conversation), answered):
+            if isinstance(message, Note):  # code's note: a code_notes call and its result, never her words
+                built.extend(code_notes.pair(message, self._tz))
+                continue
             chat = self.to_chat(message, (images or {}).get(message.id, ()), newest=message.id == answered)
             if notes and message.id == answered:
                 chat = _with_notes(chat, self._profile.notes_block(message.text))
@@ -296,7 +350,9 @@ class ContextBuilder:
         return [assistant, *results]
 
     def enforce_limit(self, conversation: Conversation) -> Conversation:
-        """Emergency trim: far over budget, drop the oldest messages without a summary (logged)."""
+        """Emergency trim: far over budget, drop the oldest messages without a summary (logged); code's notes keep to
+        their own limit (`_limit_notes`)."""
+        self._limit_notes(conversation)
         messages = self.window(conversation)
         total = self.window_tokens_of(messages)
         if total <= self._emergency_tokens or len(messages) < 2:

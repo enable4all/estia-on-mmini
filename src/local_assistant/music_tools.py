@@ -3,8 +3,8 @@
 Code does the work: what "play X" means (the user's own playlist, Liked Songs, an artist, a playlist search, then a
 track search), which speaker (the default, else the one Spotify has active; a Bose SoundTouch is woken from
 standby), the volume (a speaker that was not playing starts at volume_start; nothing ever goes above volume_cap),
-and the note that says what really changed, with a Spotify link. Results go to Gemma; nothing from Spotify is
-stored or learned.
+and the note that says what really changed, with a Spotify link (the names in it without links: a public playlist's
+name is anyone's text). Results go to Gemma; nothing from Spotify is stored or learned.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from local_assistant import soundtouch
+from local_assistant.calendar_tools import clean_note
 from local_assistant.config import Config
 from local_assistant.spotify import SpotifyError
 from local_assistant.spotify_auth import SpotifyAuthError, SpotifySignInExpired
@@ -29,6 +30,7 @@ STEP = 10
 WAKE_WAIT_S = 15.0
 WAKE_POLL_S = 1.5
 REMIND_DAYS = 30
+NAME_CHARS = 200  # a name from Spotify in the note (a playlist, a track, an artist)
 _LIKED = {
     "liked",
     "liked songs",
@@ -222,7 +224,8 @@ class MusicTools:
             level = target
         await self._spotify.play(device_id, context_uri=choice.context_uri, uris=list(choice.uris) or None)
         at = f" at {level} %" if level is not None else ""
-        self._notes.append(f"Music: playing {choice.label} on {speaker['name']}{at} · {choice.link}")
+        label = clean_note(choice.label, NAME_CHARS) or "music"  # names in the note, never their links
+        self._notes.append(f"Music: playing {label} on {speaker['name']}{at} · {choice.link}")
         log.info("spotify: playing on a speaker")
         return f"Done: playing on {speaker['name']}{at} (the note says what)."
 
@@ -325,7 +328,11 @@ class MusicTools:
         item = state.get("item") if isinstance(state, dict) else None
         if not isinstance(state, dict) or not isinstance(item, dict):
             return f"Nothing is playing. Speakers Spotify sees: {names}."
-        artists = ", ".join(str(a.get("name")) for a in item.get("artists", []) if isinstance(a, dict))
+        artists = ", ".join(
+            name
+            for a in item.get("artists", [])
+            if isinstance(a, dict) and (name := clean_note(str(a.get("name")), NAME_CHARS))
+        )
         found = state.get("device")
         device: dict[str, Any] = found if isinstance(found, dict) else {}
         playing = "playing" if state.get("is_playing") else "paused"
@@ -333,7 +340,8 @@ class MusicTools:
         at = f" at {volume} %" if isinstance(volume, int) else ""
         paused = "" if state.get("is_playing") else " (paused)"
         # what plays is Spotify content: it goes to the user's note, Gemma hears only where and how loud
-        self._notes.append(f"Music: {item.get('name')} by {artists}{paused} on {device.get('name')}{at}")
+        track = clean_note(str(item.get("name")), NAME_CHARS)
+        self._notes.append(f"Music: {track} by {artists}{paused} on {device.get('name')}{at}")
         return f"Done: {playing} on {device.get('name')}{at} (the note says what). Speakers Spotify sees: {names}."
 
 

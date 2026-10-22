@@ -52,7 +52,7 @@ class Reply:
     not_set: str = ""
     not_set_spoken: str = ""  # the same to say on a call, in English (the spoken reasons: nothing to type)
     # she said she switched a light or plug while nothing was switched in this answer: code's line, a note (and said on a
-    # call), never in her history
+    # call), in her history only as code's (code_notes)
     device: str = ""
     device_spoken: str = ""
     # [chords]: code's note with the fixed lines of each chords call (or why her chords were left out), never in her
@@ -60,6 +60,9 @@ class Reply:
     chords: str = ""
     chords_spoken: str = ""
     chords_results: tuple[chord_checks.Result, ...] = ()  # this answer's chords calls (a call keeps them for after it)
+    # this answer read outside text, or had a note of code's quoting it in her input: the notes after it that may quote
+    # it are marked so (code_notes)
+    read_outside: bool = False
 
     @property
     def hers(self) -> str:
@@ -393,7 +396,15 @@ class Brain:
         retrying = _once(on_retry)
         if practice is not None:
             return await self._practise(conversation, message, practice, limit_tokens, shown, retrying)
-        turn = Turn(message=message, after_outside=self._context.after_outside(conversation, message.id))
+        quoted = self._context.quoted_notes(conversation, message.id)
+        turn = Turn(
+            message=message,
+            after_outside=self._context.after_outside(conversation, message.id),
+            outside_notes=tuple(note.text for note in quoted),
+            private_notes=tuple(note.text for note in quoted if note.private),
+        )
+        if quoted:  # this answer stays outside text once the notes have left her input
+            self._context.mark_outside_notes(message.id)
         # code's video lines, last in the prompt: a kept video's (reading it again), a YouTube link in this message's
         # (what read_link reads); none on a call, so never with a call's glance
         glance = "\n\n".join(part for part in (glance, self._tools.video_hint(message)) if part)
@@ -407,6 +418,7 @@ class Brain:
         ]
         # the user asked for a reminder, a wake-up or a call now or in their message before ("and at 17:00?")
         asked_before = any(mentions_reminder(text) for text in said[-2:]) or mentions_reminder(message.text)
+        turn.asked_reminder = asked_before  # after outside text, a reminder needs it (tools)
         calls = 0
         if reads:  # code's own reads, as if she had called them first
             if on_tools is not None:
@@ -546,6 +558,7 @@ class Brain:
                 chords=chords_note,
                 chords_spoken=chords_spoken,
                 chords_results=tuple(turn.chords),
+                read_outside=turn.untrusted or turn.read_mail_or_calendar or turn.used_web or bool(turn.outside_notes),
             )
 
     def _chords_checked(

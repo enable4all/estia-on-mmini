@@ -3,8 +3,9 @@
 Days are local midnight to local midnight in the configured time zone (never "now + 24 h"), so the
 daylight-saving change keeps whole days. Event text is data: titles and places are stripped of
 chat-template tokens and hidden characters, line breaks are collapsed, links are removed from places,
-everything is length-capped. Events the calendar owner declined are left out; unanswered invitations are
-marked. A dead secret address or an unreachable Google gives one line instead of the events, never an
+everything is length-capped; in the digest, a note of code's, every link of a title or a place is left out
+(`clean_note`), while Gemma's tools keep their text. Events the calendar owner declined are left out;
+unanswered invitations are marked. A dead secret address or an unreachable Google gives one line instead of the events, never an
 exception. With several calendars each event's title starts with its calendar's name ("Work: 1:1 with Sam"),
 and a calendar that could not be read is named with why and the fix, below the others' events.
 """
@@ -24,7 +25,7 @@ from local_assistant import prompts
 from local_assistant.calendar_feed import Agenda, CalendarFeed, Event, FeedError, FeedGone, FeedNotSet, Missed
 from local_assistant.config import DEFAULT_CALENDAR, Config
 from local_assistant.fetcher import strip_control_tokens
-from local_assistant.signal_text import unmarked
+from local_assistant.signal_text import netted, unlinked, unmarked
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ PLACE_CHARS = 40
 CALENDAR_CHARS = 30
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 _LINK = re.compile(r"(?:https?://|www\.)\S+|\b(?:[a-z0-9-]+\.)+[a-z]{2,}/\S*", re.IGNORECASE)  # bare meeting links too
+_PLACE_ENDS = " ,;·-"  # a place's separators left at an end
 Notify = Callable[[str], Awaitable[None]]
 
 
@@ -55,10 +57,33 @@ def clean(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
+def clean_note(text: str, limit: int, strip: str = "") -> str:
+    """Outside text that a note of code's quotes (the digest, the calendar watch's notes, the music note, a Maps link's
+    label, the /learn reply): clean's one line of at most `limit` characters, `strip` taken off its ends, every link
+    left out (`signal_text.unlinked`: never shown, not defanged), and then the structural net (`signal_text.netted`),
+    the guarantee past what `unlinked` recognises. The net runs after the links go and before the cap: it breaks every
+    dot, colon, @, slash, % or underscore that joins a link's parts, so the cap can only shorten a word the net has
+    already made safe, never cut one into a link ("evil.com1x" is "evil com1x" before any cut)."""
+    return clean(netted(_quoted(text, limit)), limit).strip(strip)
+
+
+def _quoted(text: str, limit: int) -> str:
+    """Outside text as far as clean reads it (`limit` * 4 characters; a word cut there is left out whole, as it may be
+    part of a link), without hidden characters or chat-template tokens, and without links."""
+    bound = limit * 4
+    if len(text) > bound:
+        end = bound
+        if not text[bound].isspace():  # cut inside a word: that word goes whole
+            while end and not text[end - 1].isspace():
+                end -= 1
+        text = text[:end]
+    return unlinked(strip_control_tokens(text))
+
+
 def clean_place(text: str) -> str:
     """A short place: markers (*, ~, `) and then links (meeting links) removed, so markup cannot split a link that
     Signal's text styles would join ("**evil**.com")."""
-    return clean(_LINK.sub(" ", unmarked(text)), PLACE_CHARS).strip(" ,;·-")
+    return clean(_LINK.sub(" ", unmarked(text)), PLACE_CHARS).strip(_PLACE_ENDS)
 
 
 def resolve_start(word: str, today: date) -> date:
@@ -125,7 +150,7 @@ class CalendarTools:
         if self._none_read(agenda):
             return "\n".join(missed)
         coming = [e for e in self._on(agenda.events, today) if e.all_day or e.end > now or e.start >= now]
-        lines = [f"• {self._line(event, today)}" for event in coming]
+        lines = [f"• {self._line(event, today, note=True)}" for event in coming]
         if len(lines) > TODAY_LINES:
             lines = [*lines[:TODAY_LINES], f"…and {len(lines) - TODAY_LINES} more"]
         blocks = [_block("Today", lines), _block("Tomorrow", self._tomorrow(agenda.events, tomorrow))]
@@ -331,21 +356,23 @@ class CalendarTools:
         return sorted(found, key=lambda event: (not event.all_day, event.start))
 
     @staticmethod
-    def _title(event: Event) -> str:
-        """The cleaned title; with several calendars, its calendar's name first ("Work: 1:1 with Sam")."""
-        title = clean(event.title, TITLE_CHARS) or "(no title)"
+    def _title(event: Event, *, note: bool = False) -> str:
+        """The cleaned title; with several calendars, its calendar's name first ("Work: 1:1 with Sam"). In a note
+        (the digest) without its links; Gemma's tools keep it as it was."""
+        title = (clean_note(event.title, TITLE_CHARS) if note else clean(event.title, TITLE_CHARS)) or "(no title)"
         return f"{clean(event.calendar, CALENDAR_CHARS)}: {title}" if event.calendar else title
 
-    def _line(self, event: Event, day: date, now: datetime | None = None) -> str:
-        """One event as a line; with `now` (today's lines), a timed event's mark from code after its times."""
-        title = self._title(event)
+    def _line(self, event: Event, day: date, now: datetime | None = None, *, note: bool = False) -> str:
+        """One event as a line; with `now` (today's lines), a timed event's mark from code after its times; `note`:
+        the digest's, its title and place without links."""
+        title = self._title(event, note=note)
         if event.all_day:
             last = event.end.date() - timedelta(days=1)  # Google's all-day end date is exclusive
             text = f"All day: {title}" + (f" (until {_on_day(last, day)})" if last > day else "")
         else:
             mark = f" ({self._mark(event, day, now)})" if now is not None else ""
             text = f"{self._times(event, day)}{mark} {title}"
-        place = clean_place(event.place)
+        place = clean_note(unmarked(event.place), PLACE_CHARS, _PLACE_ENDS) if note else clean_place(event.place)
         if place:
             text += f" ({place})"
         if event.response == "needs-action":
@@ -379,11 +406,12 @@ class CalendarTools:
         return text
 
     def _tomorrow(self, events: Iterable[Event], day: date) -> list[str]:
-        """Tomorrow's all-day items, then its first TOMORROW_TIMED events by start, one per line."""
+        """Tomorrow's all-day items, then its first TOMORROW_TIMED events by start, one per line (the digest's: titles
+        without links)."""
         items = self._on(events, day)
         timed = [event for event in items if not event.all_day and event.start >= self._midnight(day)]
-        lines = [f"• All day: {self._title(event)}" for event in items if event.all_day]
-        lines += [f"• {event.start:%H:%M} {self._title(event)}" for event in timed[:TOMORROW_TIMED]]
+        lines = [f"• All day: {self._title(event, note=True)}" for event in items if event.all_day]
+        lines += [f"• {event.start:%H:%M} {self._title(event, note=True)}" for event in timed[:TOMORROW_TIMED]]
         if len(timed) > TOMORROW_TIMED:
             lines.append(f"…and {len(timed) - TOMORROW_TIMED} more")
         return lines

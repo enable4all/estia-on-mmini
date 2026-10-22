@@ -1103,7 +1103,7 @@ Undo: remove `[calls]` and restart. The bridge then uses Homebrew's signal-cli a
 from an allowed account rings out, never rejected, and a note goes to the caller: "I can't take calls yet: my voice
 is still loading (up to 15 minutes after an install, a move or a macOS update). I'll text you when it's ready." That
 note goes at most once in 10 minutes, so a second call soon after gets none. Once her voice is ready, the code sends
-the note "My voice is ready: you can call me now." (never in the model's history):
+the note "My voice is ready: you can call me now." (in the model's history only as the bridge's note):
 
 - to a caller whose call rang meanwhile: at once, also in quiet hours;
 - to every allowed account when a read 2 minutes or more after the bridge started still found her voice not ready (a
@@ -2180,8 +2180,10 @@ Notes you may see:
 - **What Gemma sees:** rules, then the profile snapshot (your part only, up to 4,000 characters), the summary, recent
   messages (about 12,000 tokens, with earlier tool calls replayed in short form), and your new message with its local time,
   preceded by her notes that may matter for it (at most 1,500 characters of her 12,000: shared rarer words first, then the
-  newest; never on a `/babble` turn). Fixed parts come first, so Ollama can reuse its cache. The bridge's notices (profile
-  changes, busy, offline) are never part of it.
+  newest; never on a `/babble` turn). Fixed parts come first, so Ollama can reuse its cache. The bridge's own messages
+  (profile changes, reminders set, the digest, every line it sent) come in it as the bridge's notes, never as her words,
+  after the messages they followed; one that quotes mail, calendar, file, music or page text is marked as outside text.
+  The busy note and the other lines about an answer being written are left out.
 - **Summaries:** when recent messages pass about 12,000 tokens, the older half is summarised in the background. Above 20,000
   tokens the oldest messages are dropped without a summary (an emergency, logged).
 - **Snapshot:** the profile Gemma sees changes only at `/new`, after a summary, after a forget or a `/fix` and at start.

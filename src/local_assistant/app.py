@@ -22,15 +22,16 @@ import stat
 import sys
 import time
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from typing import Any, TextIO
 
-from local_assistant import hostsec, prompts
+from local_assistant import code_notes, hostsec, prompts
 from local_assistant.babble import Babble, Session, tidy
 from local_assistant.brain import Brain
 from local_assistant.calendar_feed import CalendarFeed
 from local_assistant.calendar_graph import OutlookCalendars
-from local_assistant.calendar_tools import CalendarTools
+from local_assistant.calendar_tools import CalendarTools, clean_note
 from local_assistant.calendar_watch import CalendarWatch
 from local_assistant.call_host import CALL_MAX_TOKENS, CallGlance, CallHost, rundown_reads
 from local_assistant.calls import CallManager, CallSettings, Turn
@@ -97,7 +98,7 @@ from local_assistant.signal_io import (
     call_env,
     signal_cli_command,
 )
-from local_assistant.signal_text import Styled, styled
+from local_assistant.signal_text import Styled, netted, styled, unlinked
 from local_assistant.spotify import Spotify
 from local_assistant.spotify_auth import SpotifyAuthError, SpotifyTokens, login
 from local_assistant.status_host import StatusHost
@@ -155,6 +156,7 @@ WARM_UP_GLANCE_SECONDS = 8.0
 DOCUMENTS_FIRST_SECONDS = 30.0
 # shorter than this is a slip of the thumb, not speech (OpenClaw's minimum)
 MIN_AUDIO_BYTES = 1024
+PAGE_TITLE_CHARS = 200  # a page's title in the /learn reply: the fetcher's own cap
 # a photo message is stored as text "[photo] caption", a voice message as "[voice] transcript";
 # their files are in the attachments table
 _KINDS: dict[Kind, MessageKind] = {
@@ -342,7 +344,7 @@ class App:
                 cfg,
                 mail=self.mail_digest,
                 calendar=digest_calendar,
-                send=self._alert,
+                send=partial(self._alert, private=True),  # mail senders and subjects, calendar titles and places
                 clock=clock,
                 mail_ready=self._mail_synced,
                 calendar_seconds=cfg.calendar_helper_timeout + 5,
@@ -915,8 +917,8 @@ class App:
         if not self.guard.known(aci, decision.device):  # a device she does not answer (yet): held, never read
             self._discard(decision.photos + decision.audio + decision.documents)
             note = self.guard.hold(aci, decision.device)
-            if note:  # a security notice, also while locked: the phone sees it too
-                await self._deliver(aci, note, "the held-device note")
+            if note and (sent := await self._deliver(aci, note, "the held-device note")):  # also while locked
+                self.lifecycle.keep_sent(aci, note, sent)  # in her history: she knows a message was held
             return
         self.guard.seen(aci, decision.device)  # a device she answers: its days of silence start again
         words = decision.text.split() if decision.kind is Kind.COMMAND else []
@@ -1021,7 +1023,9 @@ class App:
         if practising is not None and self.devices is not None:
             self.devices.cancel()  # a practice message is never a device's yes
         if message.kind == "command":
-            await self._reply(message, await self.commands.handle(message), "command", "answered")
+            answer = await self.commands.handle(message)
+            quotes = code_notes.quotes_outside(message.text), code_notes.quotes_private(message.text)
+            await self._reply(message, answer, "command", "answered", outside=quotes[0], private=quotes[1])
             return
         if message.kind == "unsupported":
             await self._reply(message, prompts.TEXT_ONLY_VOICE if self.voice else prompts.TEXT_ONLY, "note", "answered")
@@ -1031,6 +1035,8 @@ class App:
         self._busy[message.id] = busy
         text: str
         notes: list[str] = []
+        outside: set[str] = set()  # the notes that quote outside text (code_notes)
+        private: set[str] = set()  # those quoting mail, a calendar or documents
         kind: MessageKind
         status: MessageStatus
         try:
@@ -1051,7 +1057,7 @@ class App:
                 if saved and words and practising is None:  # her answer to the words sent with it follows
                     await self._send(
                         self.store.add_outgoing(
-                            message.conversation_id, message.peer_aci, "note", document_note, message.id
+                            message.conversation_id, message.peer_aci, "note", document_note, message.id, private=True
                         )
                     )
                     document_note = None
@@ -1076,6 +1082,7 @@ class App:
                 text, kind, status = unheard[0], "note", unheard[1]
             elif document_note is not None:  # saved (or not), no words with it: code's note, no Gemma
                 text, kind, status = document_note, "note", "answered"
+                outside = private = {document_note}  # the PDF's name
             elif confirmed is not None:
                 text, kind, status = confirmed, "note", "answered"
             elif attachments and not images:  # no usable photo: a note, no Gemma (files go first, in finally)
@@ -1096,7 +1103,7 @@ class App:
                 if self.language != ENGLISH and self.devices is not None and self.devices.pending:
                     # Gemma in another language may claim it is done: code's words only
                     text = "\n".join(part for part in (self.devices.question(), reply.not_set) if part)
-                # separate "note" messages: sent to the user, never part of Gemma's history (it would imitate them)
+                # separate "note" messages, never her words: in her history as code_notes results (code_notes.py)
                 device_note = self.devices.take_note() if self.devices else ""
                 music_note = self.music.take_note() if self.music else ""
                 notes = [
@@ -1116,6 +1123,7 @@ class App:
                 ]
                 kind = "text"
                 status = "answered"
+                outside = {reply.sources, music_note} | ({reply.chords, reply.notice} if reply.read_outside else set())
                 log.info(
                     "message %d answered: %d tool calls, %d prompt tokens",
                     message.id,
@@ -1136,7 +1144,7 @@ class App:
             device_note = self.devices.take_note() if self.devices else ""
             music_note = self.music.take_note() if self.music else ""
             # what changed before Gemma failed is still reported (and never carried to a later answer)
-            notes = [note for note in (device_note, music_note) if note]
+            notes, outside = [note for note in (device_note, music_note) if note], {music_note}
         finally:
             typing.cancel()
             busy.cancel()
@@ -1144,11 +1152,12 @@ class App:
             self._drop_attachments(message.id)  # photos live only until answered
             with contextlib.suppress(SignalError, NotAllowedError):
                 await self.signal.typing(message.peer_aci, stop=True)
-        await self._reply(message, text, kind, status)
+        await self._reply(message, text, kind, status, outside=text in outside, private=text in private)
         for note in notes:
-            await self._send(
-                self.store.add_outgoing(message.conversation_id, message.peer_aci, "note", note, message.id)
+            out_id = self.store.add_outgoing(
+                message.conversation_id, message.peer_aci, "note", note, message.id, outside=note in outside
             )
+            await self._send(out_id)
         if kind == "text" and self._speaks(message):
             await self._speak(message, text)
         self.profiler.note_activity()
@@ -1209,11 +1218,14 @@ class App:
         typed = message.text.partition("\n")[2]  # the user's words sent with the file stay with it
         self.store.set_message_text(message.id, f"{mark} {transcript.text}" + (f"\n{typed}" if typed else ""))
         self._drop_attachments(message.id)  # heard: the audio is not needed any more
-        if self.store.get_state(VOICE_ECHO_KEY) == "on":
-            echo = prompts.VOICE_ECHO.format(text=transcript.text)
-            await self._send(
-                self.store.add_outgoing(message.conversation_id, message.peer_aci, "note", echo, message.id)
+        # someone else's voice (an audio file): its echo without links (unlinked, then the net), as code's other notes
+        heard = netted(unlinked(transcript.text)) if mark == prompts.AUDIO_MARK else transcript.text
+        if heard and self.store.get_state(VOICE_ECHO_KEY) == "on":
+            echo = prompts.VOICE_ECHO.format(text=heard)
+            out_id = self.store.add_outgoing(  # someone else's voice: outside text
+                message.conversation_id, message.peer_aci, "note", echo, message.id, outside=mark == prompts.AUDIO_MARK
             )
+            await self._send(out_id)
         return None
 
     def _speaks(self, message: Message) -> bool:
@@ -1308,11 +1320,11 @@ class App:
         """The mail sync finished a round since the start (the digest's mail part waits for it)."""
         return self.mail_sync is None or self.mail_sync.rounds > 0
 
-    async def _alert(self, text: str) -> None:
-        """A watcher's alert or recovery: a note to every allowed user (never part of Gemma's history)."""
+    async def _alert(self, text: str, *, private: bool = False) -> None:
+        """A watcher's alert or recovery, the digest: a note to every allowed user (`private`: mail or calendar text)."""
         conversation = self.store.current_conversation()
         for aci in sorted(self.cfg.allowed_acis):
-            await self._send(self.store.add_outgoing(conversation.id, aci, "note", text, None))
+            await self._send(self.store.add_outgoing(conversation.id, aci, "note", text, None, private=private))
         log.warning("alert sent: %d line(s)", text.count("\n") + 1)
 
     def _on_new(self) -> None:
@@ -1321,8 +1333,8 @@ class App:
         self.videos.clear()
 
     async def _tool_note(self, message: Message, text: str) -> None:
-        """Code's note during an answer (before a long video is read): sent at once, never in Gemma's history; it
-        says what takes the time, so the busy note is not needed."""
+        """Code's note during an answer (before a long video is read): sent at once, never in that answer's own history
+        (code_notes.in_order); it says what takes the time, so the busy note is not needed."""
         busy = self._busy.get(message.id)
         if busy is not None:
             busy.cancel()
@@ -1346,7 +1358,8 @@ class App:
         if result.over_cap_by:  # one batch: nothing of it was saved
             return prompts.LEARN_FULL.format(limit=self.profile.max_chars, over=result.over_cap_by)
         added = [fact for fact in self.profile.facts() if fact.id in result.added]
-        lines = [f"Learned from {page.title or page.final_url}:"]
+        # the page's own title is outside text: without its links, else the link the user sent (not where it led)
+        lines = [f"Learned from {clean_note(page.title, PAGE_TITLE_CHARS) or url}:"]
         lines += [f"Saved #{fact.id}: {fact.text}" for fact in added] or ["Nothing new: I already know what it says."]
         if result.duplicates:
             lines.append(f"Already known: {len(result.duplicates)}")
@@ -1404,9 +1417,20 @@ class App:
         except Exception:
             log.exception("message %d: could not send the failure note", message_id)
 
-    async def _reply(self, message: Message, text: str, kind: MessageKind, status: MessageStatus) -> None:
+    async def _reply(
+        self,
+        message: Message,
+        text: str,
+        kind: MessageKind,
+        status: MessageStatus,
+        *,
+        outside: bool = False,
+        private: bool = False,
+    ) -> None:
         with self.store.tx():
-            out_id = self.store.add_outgoing(message.conversation_id, message.peer_aci, kind, text, message.id)
+            out_id = self.store.add_outgoing(
+                message.conversation_id, message.peer_aci, kind, text, message.id, outside=outside, private=private
+            )
             self.store.set_status(message.id, status)
         await self._send(out_id)
 

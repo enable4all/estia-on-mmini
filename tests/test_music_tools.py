@@ -3,11 +3,13 @@ from pathlib import Path
 import pytest
 
 from local_assistant.config import Config
-from local_assistant.music_tools import MusicTools
+from local_assistant.music_tools import NAME_CHARS, MusicTools
+from local_assistant.signal_text import styled
 from local_assistant.spotify import SpotifyError
 from local_assistant.spotify_auth import LIFETIME_SECONDS, SpotifySignInExpired
 from tests.conftest import ME
 from tests.fakes.fake_spotify import FakeSpotify
+from tests.no_links import CAP_WORDS, CASES, PLANTED, assert_no_tappable_link, capped
 
 NOW = 1_800_000_000.0
 
@@ -223,3 +225,49 @@ async def test_volume_needs_a_number_and_after_outside_text_may_only_go_down(tmp
     assert await music.control("volume") == "Say which volume: 0-100."
     assert await music.control("volume", 20, only_down=True) == "Done: volume 20 %."
     assert (await music.control("volume", 50, only_down=True)).startswith("Not done: music starts or gets louder")
+
+
+@pytest.mark.parametrize("link", PLANTED)
+async def test_the_note_names_what_plays_without_the_links_in_its_name(tmp_path: Path, link: str) -> None:
+    """A public playlist, a track or an artist named with a link: code's note leaves the link out (owner, 21 Oct);
+    only Spotify's own link, built from what Spotify answers, is shown. What Gemma hears stays as it was."""
+    spotify = FakeSpotify()
+    spotify.found[("jazz", "playlist")][0]["name"] = f"Jazz {link} Classics"
+    music, _ = make(tmp_path, spotify)
+    assert await music.play("jazz") == "Done: playing on Kitchen speaker at 30 % (the note says what)."
+    note = music.take_note()
+    assert note == "Music: playing Jazz Classics on Kitchen speaker at 30 % · https://open.spotify.com/playlist/jazz"
+    assert "evil" not in styled(note).text
+    spotify.playing = {
+        "is_playing": True,
+        "device": {"name": "Kitchen speaker", "volume_percent": 30},
+        "item": {"name": f"So {link} What", "artists": [{"name": f"Miles {link}"}, {"name": "Bill Evans"}]},
+    }
+    assert (await music.status()).startswith("Done: playing on Kitchen speaker at 30 % (the note says what).")
+    assert music.take_note() == "Music: So What by Miles, Bill Evans on Kitchen speaker at 30 %"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [case[0] for case in CASES] + [capped(NAME_CHARS, word) for word in CAP_WORDS],
+)
+async def test_the_note_leaves_out_what_the_re_review_got_through(tmp_path: Path, name: str) -> None:
+    """The re-review and the net (21 Oct): a playlist's, a track's or an artist's name with a planted link leaves the
+    play note and the status note with no tappable link (the net may keep a broken word; the link is gone)."""
+    spotify = FakeSpotify()
+    spotify.found[("jazz", "playlist")][0]["name"] = name
+    music, _ = make(tmp_path, spotify)
+    await music.play("jazz")
+    note = music.take_note()
+    assert note is not None and note.endswith(" on Kitchen speaker at 30 % · https://open.spotify.com/playlist/jazz")
+    assert note.startswith("Music: playing ")
+    assert_no_tappable_link(note.split(" · ")[0])
+    spotify.playing = {
+        "is_playing": True,
+        "device": {"name": "Kitchen speaker", "volume_percent": 30},
+        "item": {"name": name, "artists": [{"name": name}]},
+    }
+    await music.status()
+    status = music.take_note()
+    assert status is not None and status.startswith("Music: ") and status.endswith(" on Kitchen speaker at 30 %")
+    assert_no_tappable_link(status)

@@ -774,6 +774,7 @@ DOCUMENT_MARK = "[document]"  # a message with a PDF is stored as "[document] <w
 
 # one file per area, prompts/<area>.py: its public names are re-exported here, so prompts.X stays prompts.X
 from local_assistant.prompts.calls import *
+from local_assistant.prompts.code_notes import *
 from local_assistant.prompts.doctor import *
 from local_assistant.prompts.documents import *
 from local_assistant.prompts.guard import *

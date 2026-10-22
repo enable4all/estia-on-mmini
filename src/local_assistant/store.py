@@ -33,10 +33,11 @@ FollowUpStatus = Literal["open", "sent", "done", "cancelled", "expired"]
 InitiativeKind = Literal["followup", "calendar", "early_start", "lookback", "improvise", "announce", "evening"]
 InitiativeOutcome = Literal["sending", "sent", "unknown", "skipped", "failed"]
 ConversationKind = Literal["chat", "practice"]
+NoteHistory = Literal["note", "outside", "private"]  # how code's message enters her history (schema v14)
 DocSource = Literal["folder", "signal"]  # found in the documents folder, or saved there from a Signal message
 COUNTED: tuple[InitiativeOutcome, ...] = ("sending", "sent", "unknown")  # what counts toward the caps
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 SCHEMA_V1 = """
 CREATE TABLE conversations (
@@ -239,7 +240,7 @@ DELETE FROM mail_sync WHERE folder = 'sent';
 
 # v7: reminders and wake-up calls the user set, the check-ins Estia may send (follow-ups) and the log of the messages
 # she sends first (metadata only), in one migration so the initiative part needs no schema change of its own.
-# messages.footer: a code line sent after a message she starts; never in Gemma's history or the history search.
+# messages.footer: a code line sent after a message she starts; never in Gemma's history as hers, nor in the search.
 MIGRATION_V7 = """
 CREATE TABLE reminders (
     id INTEGER PRIMARY KEY,
@@ -381,6 +382,19 @@ MIGRATION_V13 = """
 ALTER TABLE profile_facts ADD COLUMN in_notes INTEGER NOT NULL DEFAULT 0;
 """
 
+# v14: code's notes in her history (owner, 21-22 Oct: hard rule 6 removed, "in the messaging conversation, she is aware"):
+# a note or a command's answer code sends is marked for her history, 'outside' when it quotes outside text (pages, music,
+# the web), 'private' when that text is mail, a calendar or documents (never to a web search, Google Maps or Spotify).
+# NULL: never in her history: every text, every incoming row, the notes from before (no mark: as they were) and those an
+# older release writes after a rollback. messages.outside_notes: an incoming message whose answer had a note quoting
+# outside text in her input, so it stays outside text once the note has left it (`outside_seqs`).
+MIGRATION_V14 = """
+ALTER TABLE messages ADD COLUMN history TEXT CHECK (history IN ('note', 'outside', 'private'));
+"""
+MIGRATION_V14_NOTES = """
+ALTER TABLE messages ADD COLUMN outside_notes INTEGER NOT NULL DEFAULT 0;
+"""
+
 # v11: the evening note (/evening) in the initiative log, as kind 'evening'. SQLite cannot change a CHECK, so the table
 # is made again with it: every row and its id kept, its indexes too. Nothing refers to the log, so nothing else moves.
 MIGRATION_V11 = """
@@ -489,8 +503,10 @@ class Message:
     reply_to_id: int | None
     seq: int | None
     created_at: str
-    footer: str | None = None  # a code line sent after the text (a message she starts); never in Gemma's history
+    footer: str | None = None  # a code line sent after the text (a message she starts); never in her history as hers
     source_device: int | None = None  # incoming: the sender's device that sent it (1: their phone); None: not named
+    # code's note or command answer: "note" or "outside" (it quotes outside text) in her history (code_notes); None never
+    history: NoteHistory | None = None
 
 
 DeviceSource = Literal["primary", "allowed", "held"]
@@ -820,6 +836,8 @@ def _message(row: sqlite3.Row) -> Message:
         created_at=row["created_at"],
         footer=row["footer"],
         source_device=row["source_device"],
+        # a database read only (doctor, the draft) and not moved to v14 yet has no such column; a Row's `in` reads values
+        history=row["history"] if "history" in row.keys() else None,  # noqa: SIM118
     )
 
 
@@ -990,6 +1008,12 @@ class Store:
             columns = {row[1] for row in self._conn.execute("PRAGMA table_info(profile_facts)")}
             script = MIGRATION_V13 if "in_notes" not in columns else ""
             self._conn.executescript(f"BEGIN;\n{script}\nPRAGMA user_version = 13;\nCOMMIT;")
+        if version < 14:  # the same: only where it is missing
+            columns = {row[1] for row in self._conn.execute("PRAGMA table_info(messages)")}
+            script = (MIGRATION_V14 if "history" not in columns else "") + (
+                MIGRATION_V14_NOTES if "outside_notes" not in columns else ""
+            )
+            self._conn.executescript(f"BEGIN;\n{script}\nPRAGMA user_version = 14;\nCOMMIT;")
 
     def close(self) -> None:
         self._conn.close()
@@ -1146,16 +1170,22 @@ class Store:
         reply_to_id: int | None,
         *,
         footer: str | None = None,
+        outside: bool = False,
+        private: bool = False,
     ) -> int:
         """An outgoing message, pending until sent. `footer`: a code line sent after the text (a message she starts),
-        kept apart so it never reaches Gemma's history or the history search."""
+        kept apart so it never reaches Gemma's history as hers or the history search. Code's note or a command's answer
+        is marked for her history once sent (code_notes), `outside` when it quotes outside text, `private` when that
+        text is mail, a calendar or documents."""
         now = utc_now()
+        quoted: NoteHistory = "private" if private else "outside" if outside else "note"
+        history = quoted if kind in ("note", "command") else None
         with self.tx():
             cursor = self._conn.execute(
                 "INSERT INTO messages (conversation_id, direction, peer_aci, kind, text, status, reply_to_id, seq,"
-                " footer, created_at, updated_at) VALUES (?, 'out', ?, ?, ?, 'pending', ?,"
-                " (SELECT COALESCE(MAX(seq), 0) + 1 FROM messages), ?, ?, ?)",
-                (conversation_id, peer_aci, kind, text, reply_to_id, footer, now, now),
+                " footer, history, created_at, updated_at) VALUES (?, 'out', ?, ?, ?, 'pending', ?,"
+                " (SELECT COALESCE(MAX(seq), 0) + 1 FROM messages), ?, ?, ?, ?)",
+                (conversation_id, peer_aci, kind, text, reply_to_id, footer, history, now, now),
             )
         return _rowid(cursor)
 
@@ -1224,6 +1254,18 @@ class Store:
             (conversation_id, after_seq),
         ).fetchall()
         return [_message(row) for row in rows]
+
+    def code_notes(self, conversation_id: int, after_seq: int) -> list[tuple[Message, str]]:
+        """Code's sent notes and command answers marked for her history after `after_seq`, in conversation order, each
+        with the command it answers ("" for a note)."""
+        rows = self._conn.execute(
+            "SELECT m.*, COALESCE(c.text, '') AS command_text FROM messages m"
+            " LEFT JOIN messages c ON m.kind = 'command' AND c.id = m.reply_to_id AND c.kind = 'command'"
+            " WHERE m.conversation_id = ? AND m.direction = 'out' AND m.status = 'sent' AND m.history IS NOT NULL"
+            " AND m.seq IS NOT NULL AND m.seq > ? ORDER BY m.seq",
+            (conversation_id, after_seq),
+        ).fetchall()
+        return [(_message(row), str(row["command_text"])) for row in rows]
 
     def turn_before(self, conversation_id: int, before_seq: int) -> list[Message]:
         """The turn before a message: the user's last message before it and everything that followed it (her answer
@@ -2301,14 +2343,20 @@ class Store:
             cursor = self._conn.execute("DELETE FROM initiative_log WHERE created_at < ?", (before,))
         return cursor.rowcount
 
+    def mark_outside_notes(self, message_id: int) -> None:
+        """Her input for this incoming message held a note of code's quoting outside text (code_notes)."""
+        with self.tx():
+            self._conn.execute("UPDATE messages SET outside_notes = 1 WHERE id = ?", (message_id,))
+
     def outside_seqs(self, conversation_id: int) -> list[tuple[int, int]]:
         """The incoming messages of a conversation (id, seq) whose answer read outside text (a tool in OUTSIDE_TOOLS or
-        with an OUTSIDE_TOOL_PREFIXES name) or that are outside text themselves (an audio file, a photo)."""
+        with an OUTSIDE_TOOL_PREFIXES name, or a note of code's quoting it in her input: `mark_outside_notes`) or that
+        are outside text themselves (an audio file, a photo)."""
         prefixes = " OR ".join("t.name LIKE ? ESCAPE '\\'" for _ in OUTSIDE_TOOL_PREFIXES)
         names = ", ".join("?" for _ in OUTSIDE_TOOLS)
         rows = self._conn.execute(
             "SELECT m.id, m.seq FROM messages m WHERE m.conversation_id = ? AND m.direction = 'in'"
-            " AND m.seq IS NOT NULL AND (m.text LIKE '[audio file]%' OR m.text LIKE '[photo]%'"
+            " AND m.seq IS NOT NULL AND (m.text LIKE '[audio file]%' OR m.text LIKE '[photo]%' OR m.outside_notes = 1"
             f" OR EXISTS (SELECT 1 FROM tool_calls t WHERE t.message_id = m.id AND (t.name IN ({names}) OR {prefixes})))"
             " ORDER BY m.seq",
             (conversation_id, *OUTSIDE_TOOLS, *(prefix.replace("_", "\\_") + "%" for prefix in OUTSIDE_TOOL_PREFIXES)),

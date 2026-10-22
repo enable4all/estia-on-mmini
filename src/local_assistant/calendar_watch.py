@@ -11,8 +11,8 @@ A change is an event that starts within 24 hours and has not begun, moved by 15 
 knew, or gone: its uid is in no calendar while every calendar read fine, its own both times (the feed keeps an
 invitation that is in two calendars once, under the first that read fine, so a calendar that could not be read may
 hold it). The read reaches 48 hours ahead, so a meeting moved to tomorrow afternoon is a move, not a cancellation. New events are not reported. The note is written when it goes out, from a
-fresh read (titles cleaned and capped as in the digest, the calendar's name first when there are several), so what no
-longer holds is left out. An early start: at early_check, when tomorrow's first timed event starts before the digest
+fresh read (titles cleaned, capped and without links as in the digest, the calendar's name first when there are
+several), so what no longer holds is left out. An early start: at early_check, when tomorrow's first timed event starts before the digest
 time, the digest would come too late for it.
 """
 
@@ -31,7 +31,7 @@ from zoneinfo import ZoneInfo
 
 from local_assistant import prompts
 from local_assistant.calendar_feed import Agenda, Event, FeedError
-from local_assistant.calendar_tools import CALENDAR_CHARS, clean
+from local_assistant.calendar_tools import CALENDAR_CHARS, clean, clean_note
 from local_assistant.config import CalendarSource
 
 log = logging.getLogger(__name__)
@@ -268,7 +268,8 @@ class CalendarWatch:
     # the note's words
 
     def _title(self, event: Event) -> str:
-        title = clean(event.title, TITLE_CHARS) or "(no title)"
+        """The title as the digest shows it: cleaned, capped and without links (code's note, never Gemma's)."""
+        title = clean_note(event.title, TITLE_CHARS) or "(no title)"
         return f"{clean(event.calendar, CALENDAR_CHARS)}: {title}" if event.calendar else title
 
     def _line(self, change: Change, events: dict[str, Event], today: date) -> str:

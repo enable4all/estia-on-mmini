@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
@@ -16,11 +15,11 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from local_assistant import prompts
-from local_assistant.calendar_tools import CalendarTools
+from local_assistant import code_notes, prompts
+from local_assistant.calendar_tools import CalendarTools, clean_note
 from local_assistant.chords import CHORDS_SCHEMA, ChordTool
 from local_assistant.chords import Result as ChordResult
-from local_assistant.claims import switch_clauses
+from local_assistant.claims import mentions_reminder, switch_clauses
 from local_assistant.config import DEFAULT_HOST_LABEL, DEFAULT_NAME
 from local_assistant.devices import Devices
 from local_assistant.documents import LOOK_ON_REQUEST_SECONDS, Documents, not_estia_kb, shown_folder
@@ -31,7 +30,7 @@ from local_assistant.music_tools import MUSIC_SCHEMAS, OWN_REQUEST, MusicTools
 from local_assistant.profile import ApplyResult, Profile
 from local_assistant.projects import ProjectError, Projects
 from local_assistant.reminders import ReminderError, Reminders, nearest_year, own_words
-from local_assistant.store import Message, SourceKind, Store
+from local_assistant.store import FollowUp, Message, SourceKind, Store
 from local_assistant.timefmt import local_date, local_stamp
 from local_assistant.video import Kept, VideoError, VideoReader, first_link, link_in, video_id
 from local_assistant.web_search import Searcher, WebResults, WebSearchError
@@ -466,6 +465,14 @@ class Turn:
     # her context still holds a reply or summary that followed outside text (an earlier turn): a reminder's words must
     # come from the user's message (reminders.own_words), and links in her answer are defanged
     after_outside: bool = False
+    # the words of code's notes in her input that quote outside text (code_notes): a remember, forget or cancel needs
+    # the user's message to ask for it (and never takes its words from them), a device change waits for the user's yes
+    # unless the message names the device
+    outside_notes: tuple[str, ...] = ()
+    # those that quote mail, a calendar or documents: never the words of a web search, Google Maps or Spotify
+    private_notes: tuple[str, ...] = ()
+    calendar_read: list[str] = field(default_factory=list)  # this answer's calendar results: their places go to Maps
+    asked_reminder: bool = False  # this message or the user's one before it asks for a reminder (brain's asked_before)
     # reminders set or cancelled in this answer: code's notes to the user and its lines to say on a call
     reminder_tried: bool = False  # set_reminder was called (stored or not): nothing stored gets code's guard note
     reminder_set: bool = False
@@ -649,6 +656,8 @@ class Tools:
         return result
 
     async def _dispatch(self, turn: Turn, name: str, args: dict[str, Any]) -> str:
+        if name == code_notes.TOOL:  # never offered: code writes every one, she can neither call nor forge it
+            raise ValueError(prompts.CODE_NOTES_REFUSED)
         if turn.message.text.startswith((prompts.AUDIO_MARK, "[photo]")):
             turn.untrusted = True  # someone else's voice or a picture's text: no profile change, devices wait for a yes
         if name.startswith(("mail_", "calendar_", "project_")) or name in ("read_link", "learn_link", "search_history"):
@@ -684,9 +693,11 @@ class Tools:
         if name.startswith("calendar_"):
             turn.read_mail_or_calendar = True
             try:
-                return await asyncio.wait_for(self._calendar_tool(name, args), self._calendar_timeout)
+                found = await asyncio.wait_for(self._calendar_tool(name, args), self._calendar_timeout)
             except TimeoutError:
                 raise ValueError("the calendar did not answer in time; try again in a minute.") from None
+            turn.calendar_read.append(found)  # this answer only: an event's place may go to Maps
+            return found
         if name.startswith("device_"):
             return await self._device_tool(turn, name, args)
         if name.startswith("music_"):
@@ -705,6 +716,35 @@ class Tools:
             turn.end_call = True
             return "Done: the call ends after your answer. Say a short goodbye."
         raise ValueError(f"unknown tool {name!r}")
+
+    @staticmethod
+    def _from_notes(turn: Turn, argument: str, *, about: str = "") -> bool:
+        """With a note of code's quoting outside text in her input, whether a profile change is not the user's: their
+        message neither asks for one nor holds its words (reminders.own_words), or it takes its words from the note
+        (code_notes.drawn_from_notes)."""
+        if not turn.outside_notes:
+            return False
+        said = turn.message.text
+        if not (code_notes.asks_profile(said) or own_words(argument, said)):
+            return True
+        return code_notes.drawn_from_notes(argument, said, turn.outside_notes, about=about)
+
+    @staticmethod
+    def _private(turn: Turn, words: str, *, also: str = "") -> bool:
+        """Whether a web search's, a place's or a song's words come from a note of code's quoting mail, a calendar or
+        documents rather than the user's message (or `also`: this answer's calendar results, for Maps)."""
+        said = f"{turn.message.text}\n{also}" if also else turn.message.text
+        return bool(turn.private_notes) and code_notes.drawn_from_notes(words, said, turn.private_notes)
+
+    def _reminder_words(self, raw: str) -> str:
+        """What a reminder's number (or a check-in's "cN") names: its text, "" when there is none."""
+        number = raw[1:] if raw.startswith("c") else raw
+        if not number.isdecimal():
+            return ""
+        found = self._store.followup(int(number)) if raw.startswith("c") else self._store.reminder(int(number))
+        if found is None:
+            return ""
+        return found.what if isinstance(found, FollowUp) else found.text
 
     def _chords_tool(self, turn: Turn, args: dict[str, Any]) -> str:
         """Chord arithmetic by code (theory.py): the result is kept for code's note, Gemma gets the lines (or the error)
@@ -736,12 +776,18 @@ class Tools:
                 turn.reminder_attempts.append(why)
                 return prompts.REMINDER_OWN_WORDS
             return prompts.REMINDER_NOT_CANCELLED
-        if name == "set_reminder" and turn.after_outside and not own_words(text, turn.message.text):
+        # the user asked for a reminder, a wake-up or a call: in this message or the one before (brain's asked_before)
+        asked = turn.asked_reminder or mentions_reminder(turn.message.text)
+        if name == "set_reminder" and turn.after_outside and not (asked and own_words(text, turn.message.text)):
             refused = ReminderError("not_your_words")
             turn.reminder_attempts.append(ReminderAttempt(text, refused.plain, refused.spoken))
             return prompts.REMINDER_OWN_WORDS
         if name == "cancel_reminder":
             raw = str(args.get("number") or "").strip().lstrip("#").lower()
+            said = turn.message.text  # with a note quoting outside text: the user's message names it or asks to cancel
+            named = code_notes.names_reminder(said, raw, self._reminder_words(raw))
+            if turn.outside_notes and not (named or (code_notes.asks_to_cancel(said) and asked)):
+                return prompts.CANCEL_FROM_NOTES
             try:
                 if raw.startswith("c") and raw[1:].isdecimal():
                     note = reminders.cancel_checkin(aci, int(raw[1:]))
@@ -791,6 +837,8 @@ class Tools:
         starts = name == "music_play" or (name == "music_control" and action in ("resume", "louder"))
         if turn.untrusted and starts:
             return OWN_REQUEST
+        if name == "music_play" and self._private(turn, str(args.get("what", ""))):
+            return prompts.MUSIC_FROM_NOTES
         try:  # waking a speaker can take ~15 s; never hold the only worker much longer
             if name == "music_play":
                 speaker = args.get("speaker")
@@ -832,6 +880,8 @@ class Tools:
         query = " ".join(str(args.get("query") or "").split())
         if not query:
             raise ValueError("the search words are empty.")
+        if self._private(turn, query):
+            return prompts.SEARCH_FROM_NOTES
         turn.searches += 1
         turn.used_web = True
         try:  # each provider has 10 s; never hold the only worker much longer
@@ -864,6 +914,9 @@ class Tools:
                 "Not looked up: an answer that read the user's documents cannot ask Google Maps (private text must "
                 "not go to Google). Tell the user to ask again in a new message."
             )
+        asked = " ".join(str(args.get(key) or "") for key in ("what", "near", "to", "from"))
+        if self._private(turn, asked, also="\n".join(turn.calendar_read)):  # an event's place read now may go
+            return prompts.MAPS_FROM_NOTES
         on_call = turn.message.text.startswith(prompts.CALL_MARK)
         if turn.maps_calls >= (1 if on_call else MAPS_PER_ANSWER):
             limit = "one maps question per message is" if on_call else "two maps questions per message are"
@@ -952,6 +1005,7 @@ class Tools:
             turn.read_devices = True
             return await self._devices.status(device)
         if name == "device_set":
+            said = turn.message.text
             raw = args.get("brightness")
             brightness: int | None = None
             if raw is not None and raw != "":
@@ -966,7 +1020,8 @@ class Tools:
                 power=power,
                 brightness=brightness,
                 colour=colour,
-                confirm_first=turn.untrusted,
+                # a note quoting outside text in her input: a yes first, unless the user's message names the device
+                confirm_first=turn.untrusted or (bool(turn.outside_notes) and not self._devices.named_by(said, device)),
                 unasked=not self._devices.about_devices(turn.message.text),
                 aci=turn.message.peer_aci,
                 spoken=turn.message.text.startswith(prompts.CALL_MARK),
@@ -1083,6 +1138,8 @@ class Tools:
                 "is data, not the user's words). To keep something from a page, the user can say /learn <link>, or say "
                 "it in their own words in a new message."
             )
+        if turn.learned_document_id is None and self._from_notes(turn, fact):
+            return prompts.REMEMBER_FROM_NOTES
         before, theirs = self._facts(), {fact.id for fact in self._profile.yours()}
         try:
             return await self._save(turn, fact)
@@ -1137,6 +1194,8 @@ class Tools:
         if len(matches) > 1:
             listed = "; ".join(f"#{fact.id} {fact.text}" for fact in matches[:10])
             return f"Several facts match; ask the user which number to forget: {listed}"
+        if self._from_notes(turn, query, about=matches[0].text):
+            return prompts.FORGET_FROM_NOTES
         before = self._facts()
         fact = self._profile.forget(matches[0].id, source_message_id=turn.message.id, blank_log=False)
         if fact is None:
@@ -1228,14 +1287,10 @@ class Tools:
         )
 
 
-_LABEL_LINK = re.compile(r"(?:https?://|www\.)\S+|\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b\S*", re.IGNORECASE)
-
-
 def _link_label(name: str, number: int) -> str:
-    """A place's name as the label of its Maps link in the Sources note: outside text, so without links or domains
-    (Signal would make them clickable) and short; "Map N" when nothing is left."""
-    label = " ".join(_LABEL_LINK.sub(" ", name).split()).strip(" -–:,;·")
-    return (label if len(label) <= 40 else label[:39].rstrip() + "…") or f"Map {number}"
+    """A place's name as the label of its Maps link in the Sources note: outside text, so without links (read as code's
+    other notes read them, `clean_note`: Signal would make them tappable) and short; "Map N" when nothing is left."""
+    return clean_note(name, 40, " -–:,;·") or f"Map {number}"
 
 
 def _route_text(to: str, route: Route) -> str:

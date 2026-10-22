@@ -79,7 +79,8 @@ INITIATIVE_USAGE = "Usage: /initiative on (I may message you first now and then)
 
 # The evening note (owner, D4, 15 Oct): code's own three questions, never the model's; off unless the user's typed
 # /evening on|HH:MM (or [initiative] evening); only to the account that turned it on; never needs /initiative on and
-# never counts toward its caps. A note: never in her history; the reply is an ordinary message. {time}: "21:00".
+# never counts toward its caps. A note: in her history only as code's (code_notes); the reply is an ordinary message.
+# {time}: "21:00".
 EVENING_NOTE = "Evening. What went well today? What is still open? One thing for tomorrow?"
 EVENING_RULE = "the evening note at {time}"  # what /quiet off resumes (after the initiative's limits when it is on)
 EVENING_ON = "On: three short questions about the day, every day at {time}, from {start}. /evening off stops it."

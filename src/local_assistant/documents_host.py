@@ -164,5 +164,6 @@ class DocumentsHost:
         documents.mark_announced(found)
         conversation = self.app.store.current_conversation()
         for aci in sorted(self.app.cfg.allowed_acis):
-            await self.app._send(self.app.store.add_outgoing(conversation.id, aci, "note", text, None))
+            out_id = self.app.store.add_outgoing(conversation.id, aci, "note", text, None, private=True)  # PDF names
+            await self.app._send(out_id)
         log.info("documents: the note on %d new document(s) sent", len(found))

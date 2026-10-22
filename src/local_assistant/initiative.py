@@ -27,8 +27,8 @@ numbers, mail and calendar words, guilt, chat tokens, the footer) and sends noth
 
 At most once: the message and a `sending` row are stored together before it goes out; after a crash the row becomes
 `unknown` and the message `ignored` (recovery never sends it), and a send that failed is never tried again. Gemma's
-part is stored as an outgoing text (the user's reply has its context), the footer apart (never in her history or the
-search). Logs and the log table hold ids, kinds, days and reason words, never text.
+part is stored as an outgoing text (the user's reply has its context), the footer apart (never in her history as hers,
+nor in the search). Logs and the log table hold ids, kinds, days and reason words, never text.
 
 The evening note (owner, D4) stands apart: code's three fixed questions (no Gemma) at the user's time, off unless the
 user's typed /evening on or /evening HH:MM (the state table, which wins) or `[initiative] evening`. It needs no
@@ -125,7 +125,8 @@ PLAN_KEY = "initiative:improvise_plan"  # this week's slots for the improvised n
 LOOKBACK_KEY = "initiative:lookback_week"  # the ISO week whose look back went out or was skipped
 EARLY_KEY = "initiative:early_day"  # the day whose early-start check is done
 PRIORITY: tuple[InitiativeKind, ...] = ("announce", "calendar", "early_start", "followup", "lookback", "improvise")
-NOTES: tuple[InitiativeKind, ...] = ("announce", "calendar", "early_start", "evening")  # code's: notes, out of history
+NOTES: tuple[InitiativeKind, ...] = ("announce", "calendar", "early_start", "evening")  # code's words: notes
+OUTSIDE_NOTES: tuple[InitiativeKind, ...] = ("calendar", "early_start")  # they quote calendar text (code_notes)
 WAITS = (
     "quiet_hours",
     "busy",
@@ -1261,7 +1262,13 @@ class Initiative:
             with self._store.tx():
                 conversation = self._store.current_conversation()
                 out_id = self._store.add_outgoing(
-                    conversation.id, peer, "note" if note else "text", text, None, footer=footer
+                    conversation.id,
+                    peer,
+                    "note" if note else "text",
+                    text,
+                    None,
+                    footer=footer,
+                    private=item.kind in OUTSIDE_NOTES,  # an event's title and place: private outside text
                 )
                 entry = self._store.log_initiative(item.kind, day, "sending", message_id=out_id, at=iso(now))
             await self._send(out_id)

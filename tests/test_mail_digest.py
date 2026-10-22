@@ -1,11 +1,14 @@
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from local_assistant.config import Config, MailAccount
-from local_assistant.mail_digest import MailDigest, MailNumbers
+from local_assistant.mail_digest import NOTE_CHARS, MailDigest, MailNumbers
 from local_assistant.part_status import PartStatus, Reason, mail_part
 from local_assistant.store import MailFields, Store
 from tests.conftest import ME, TZ
+from tests.no_links import CAP_WORDS, CASES, PLANTED, assert_no_link, assert_no_tappable_link, capped
 
 # Thursday 2026-10-08 09:15 in Amsterdam
 DIGEST_TIME = datetime(2026, 10, 8, 9, 15, tzinfo=TZ).timestamp()
@@ -358,3 +361,90 @@ def test_one_bad_round_after_a_long_downtime_is_not_flagged_either(tmp_path: Pat
     assert digest.stale_lines() == []
     clock.now += 5 * 60  # the next round failed too (or has not fixed it): flagged
     assert digest.stale_lines() == ["[work] not read since Mon 09:10: no answer."]
+
+
+def test_the_digest_leaves_out_every_link_and_the_mail_tool_keeps_its_text(tmp_path: Path, store: Store) -> None:
+    """Owner, 21 Oct: the 09:15 digest quotes a sender, a summary or a subject without its links (never shown, not
+    defanged; a sender with only an address is named by the part before the @). The mail_digest tool's text, Gemma's,
+    stays byte for byte as in 0.9.5."""
+    digest = make(tmp_path, store, Clock(DIGEST_TIME))
+    for n, link in enumerate(PLANTED):
+        add(
+            store,
+            f"g{n}",
+            "reply",
+            f"Asks you to log in at {link} today.",
+            f"2026-10-0{n + 3}T07:00:00+00:00",
+            sender=f"Security {link}",
+            subject=f"Subject {link}",
+        )
+    add(
+        store,
+        "g8",
+        "action",
+        "",
+        "2026-10-08T07:00:00+00:00",
+        sender="",
+        address="phish@evil.example",
+        subject="Pay at evil.com/pay now",
+    )
+    add(
+        store,
+        "g9",
+        "action",
+        "",
+        "2026-10-08T07:30:00+00:00",
+        sender="paypal.com@evil.example",
+        address="paypal.com@evil.example",
+        subject="https://evil.example/login",
+    )
+    part = digest.digest_part()
+    assert_no_link(part, "Security: Asks you to log in at today.", "phish: Pay at now (today)")
+    assert part == (
+        "**Mail (family)**\nNeeds a reply:\n"
+        + "".join(f"{n + 1}. Security: Asks you to log in at today. ({5 - n} d)\n" for n in range(5))
+        + "Actions:\n6. phish: Pay at now (today)\n7. (no name): (no subject) (today)"
+    )
+    assert digest.compose() == (
+        "Mail, Thu 8 Oct:\n"
+        "Needs a reply:\n"
+        "1. [family] Security https://evil.example/login: Asks you to log in at https://evil.example/login today. (5 d)\n"
+        "2. [family] Security www.evil.example/x: Asks you to log in at www.evil.example/x today. (4 d)\n"
+        "3. [family] Security evil.com: Asks you to log in at evil.com today. (3 d)\n"
+        "4. [family] Security **evil**.com: Asks you to log in at **evil**.com today. (2 d)\n"
+        "5. [family] Security phish@evil.example: Asks you to log in at phish@evil.example today. (1 d)\n"
+        "Actions:\n"
+        "6. [family] phish@evil.example: Pay at evil.com/pay now (today)\n"
+        "7. [family] paypal.com@evil.example: https://evil.example/login (today)"
+    )
+
+
+@pytest.mark.parametrize("text", [case[0] for case in CASES])
+def test_the_digest_leaves_out_what_the_re_review_got_through(tmp_path: Path, store: Store, text: str) -> None:
+    """The re-review and the net (21 Oct): a planted link in a sender, a subject and a summary leaves the digest with
+    no tappable link (a broken word may stay; the link is gone). Gemma's mail_digest tool keeps them byte for byte."""
+    digest = make(tmp_path, store, Clock(DIGEST_TIME))
+    add(store, "g1", "reply", "", "2026-10-06T07:00:00+00:00", sender=text, subject=text)
+    add(store, "g2", "reply", text, "2026-10-07T07:00:00+00:00", sender="Bank")
+    part = digest.digest_part()
+    lines = part.splitlines()[2:]
+    assert lines[0].startswith("1. ") and lines[0].endswith("(2 d)") and lines[1].startswith("2. Bank: ")
+    assert_no_tappable_link(part)
+    assert f"1. [family] {text}: {text} (2 d)\n2. [family] Bank: {text} (1 d)" in digest.compose()
+
+
+@pytest.mark.parametrize("word", CAP_WORDS)
+def test_the_digest_s_cap_never_makes_a_link_of_a_word_that_is_none(tmp_path: Path, store: Store, word: str) -> None:
+    digest = make(tmp_path, store, Clock(DIGEST_TIME))
+    add(
+        store,
+        "g1",
+        "reply",
+        "",
+        "2026-10-07T07:00:00+00:00",
+        sender=capped(NOTE_CHARS, word),
+        subject=capped(NOTE_CHARS, word),
+    )
+    part = digest.digest_part()
+    assert "1. AAAA" in part
+    assert_no_tappable_link(part)

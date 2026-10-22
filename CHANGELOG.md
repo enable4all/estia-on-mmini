@@ -7,6 +7,22 @@ to 0.9.3 were written on GitHub and say more (security, requirements, install, t
 
 ## [Unreleased]
 
+## [0.9.6] - 2026-10-22
+
+### Added
+
+- **An architecture diagram** in the README: what runs on the Mac, and what it talks to.
+
+### Changed
+
+- **She knows the whole chat:** reminders set, the digest and her other notes reach her as the bridge's notes, never as
+  her own words; mail, calendar and page text in them stays data, with the same guards.
+
+### Security
+
+- **No outside links in her notes:** the digest, the calendar notes and the other notes leave out links from mail,
+  calendars, Spotify, Google Maps, audio files and pages.
+
 ## [0.9.5] - 2026-10-19
 
 ### Changed
@@ -234,7 +250,8 @@ The first public release.
   code-level rules, not eliminated; signal-cli is an unofficial Signal client; on 16 or 24 GB the smaller model,
   Gemma 4 12B, failed some of her safety tests.
 
-[Unreleased]: https://github.com/enable4all/estia-one-mmini/compare/v0.9.5...HEAD
+[Unreleased]: https://github.com/enable4all/estia-one-mmini/compare/v0.9.6...HEAD
+[0.9.6]: https://github.com/enable4all/estia-one-mmini/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/enable4all/estia-one-mmini/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/enable4all/estia-one-mmini/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/enable4all/estia-one-mmini/compare/v0.9.2...v0.9.3

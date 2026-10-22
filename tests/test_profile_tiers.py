@@ -8,7 +8,7 @@ import pytest
 
 from local_assistant import prompts
 from local_assistant.profile import Op, Profile
-from local_assistant.store import Store
+from local_assistant.store import SCHEMA_VERSION, Store
 
 YOURS = "The user's daughter Mia plays the violin."
 NOTE = "The user often cycles to work along the river."
@@ -231,7 +231,7 @@ def test_a_database_from_version_12_gets_the_part_column_and_keeps_every_fact_wh
     conn.close()
     store = Store.open(path)
     try:
-        assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 13
+        assert store._conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION  # v13, then on
         profile = two_part(store)
         assert [f.text for f in profile.yours()] == [YOURS] and [f.text for f in profile.notes()] == [NOTE]
         assert all(not fact.in_notes for fact in store.facts())

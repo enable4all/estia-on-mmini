@@ -159,7 +159,15 @@ The full threat model is in [setup_assistant.md, section 8](setup_assistant.md#8
   anything but a note the code writes: a mail, a calendar entry, a page, a search or map result, YouTube captions, a
   project file, a document, a photo or a shared audio file can pause the music or turn it down, make a device change
   wait for your yes, or fill a note the code writes (the digest; a calendar change, or a new PDF in the documents
-  folder, starts one); it never starts a message the model writes, a call, a reminder or a device change.
+  folder, starts one); it never starts a message the model writes, a call, a reminder or a device change. A note the
+  code writes reaches the model's chat history only as the bridge's note, never as her words, and without the hidden
+  turn markers that outside text could carry; one that quotes outside text is marked as outside text there. While such
+  a note is in her history: a reminder is set only when your own message asks for one, in your words; a fact is saved
+  or forgotten only when your message asks for it, never in the note's words; a reminder is cancelled only when your
+  message names it or asks to cancel one; a light or plug your message does not name waits for your yes; a link in her
+  answers reaches you defanged. A web search, Google Maps or Spotify request never takes its words from mail, calendar
+  or document text in a note (an event's place read from the calendar in that answer may go to Google Maps); the check
+  compares words, so a paraphrase or a translation is not caught (a known gap).
 - YouTube: only a video link in the user's current message is read, and only its 11-character video ID reaches the
   YouTube helper, never the link; a video found by a web search is never read. The helper asks only
   https://www.youtube.com (every request and redirect checked, at most 3 redirects), with no proxy settings, no
@@ -183,8 +191,8 @@ The full threat model is in [setup_assistant.md, section 8](setup_assistant.md#8
   once, only to allowed accounts; `/quiet` pauses them and `/initiative off` turns them off.
 - The evening note is opt-in too (off until the user types `/evening on` or the config sets its time) and written by
   code alone: three fixed questions, no model. It goes only to the allowed account that turned it on, at most once an
-  evening, waits for quiet hours, `/quiet` and `/lock`, and is never in the model's chat history; `/evening off` stops
-  it.
+  evening, waits for quiet hours, `/quiet` and `/lock`, and reaches the model's chat history only as the bridge's note,
+  never as her words; `/evening off` stops it.
 - Keys live in mode 0600 files or the login keychain. Logs hold only what happened and when, never message text, and so does
   `status.json` (each part's last use for doctor and `/status`: times and fixed reasons only).
 - A privacy check (`scripts/privacy_scan.py`) keeps private files, keys and personal values out of the repo. It runs in
@@ -224,6 +232,8 @@ her folders before the move into her own user: a copy taken then still works. In
 
 ## Known accepted gaps
 
+- Several allowed accounts share one history: each one's chats, notes, digest, documents and location reach the
+  others. Allow only people who may see all of it.
 - signal-cli is an unofficial client, and Signal's terms list automated messaging and dialing as not allowed: Signal can
   disable her account. Keep the volume low (one household), and give her a separate number, never your own.
 - Signal's own delivery receipts go to any sender, so a stranger can tell that the number is registered.

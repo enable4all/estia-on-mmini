@@ -21,13 +21,21 @@ Insanely secure, and every claim can be checked in the open-source code.
 
 All of it in plain words: [Safe and private](GUIDE.md#safe-and-private-in-plain-words). Known gaps: [SECURITY.md](SECURITY.md#known-accepted-gaps).
 
+## Architecture
+
+<p align="center">
+  <a href="docs/images/estia-architecture-dark.svg"><img src="docs/images/estia-architecture-dark.svg" width="100%" alt="Estia is reached only through Signal, end-to-end encrypted, and runs on one Mac mini at home with no web app and no open port. Mail and calendars are read-only, searches, web pages, YouTube captions and Google Maps are questions out, models, code and tools are downloaded, and lights, plugs and speakers stay on the home network."></a>
+</p>
+
+<p align="center"><sub>Estia runs on one Mac mini at home and is reached only through Signal: texts, voice notes, photos, PDFs, locations and calls, end-to-end encrypted. No web app, no open port. She reads mail and calendars but never changes them. Searches, web pages, YouTube captions and Google Maps are questions out; mail, project and document text never go to a search engine or Google Maps. Models, code and tools are downloaded into the Mac. Lights, plugs and speakers are reached over the home network only, never through the TP-Link or Philips cloud. Click the diagram for the full-size version.</sub></p>
+
 ## What she does
 
 One line and one example each. Every detail and limit: [What she can do](GUIDE.md#what-she-can-do).
 
 <img src="docs/brand/tags/core.svg" alt="Core" height="22"> Works once setup is done.
 
-- **Chat.** A short, direct answer. The conversation is remembered. Example: "What's a good question to ask about free will?"
+- **Chat.** A short, direct answer. The conversation is remembered, her own notes too: reminders set, the digest, calendar changes. Example: "What's a good question to ask about free will?"
 
 - **Memory.** Saves what you tell her, known in every message, and notes from your chats, given when they matter. Facts can be listed, corrected or removed. Example: "Remember that …", then `/profile`, `/fix` or `/forget`.
 

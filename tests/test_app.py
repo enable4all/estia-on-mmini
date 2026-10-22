@@ -48,6 +48,7 @@ from tests.conftest import TZ as TZ_APP
 from tests.fakes.fake_gemma import FakeGemma, text, tool
 from tests.fakes.fake_voice import FakeVoiceService
 from tests.fakes.fake_web import FakeWeb
+from tests.no_links import assert_left_out
 from tests.test_devices import SPECS as DEVICE_SPECS
 from tests.test_devices import Home
 from tests.test_photos import png
@@ -165,6 +166,22 @@ def photo(attachment_id: str, data: bytes, content_type: str = "image/png") -> d
 def sent(folder: Path) -> list[str]:
     """The texts sent (voice notes have no text)."""
     return [r["params"]["message"] for r in requests(folder) if r["method"] == "send" and "message" in r["params"]]
+
+
+def code_notes_in(request: dict[str, Any]) -> list[str]:
+    """The code_notes results in one of Gemma's requests: code's notes in her history (code_notes.py)."""
+    ids = {
+        call["id"]
+        for message in request["messages"]
+        for call in message.get("tool_calls") or []
+        if call["function"]["name"] == "code_notes"
+    }
+    return [m["content"] for m in request["messages"] if m.get("role") == "tool" and m["tool_call_id"] in ids]
+
+
+def her_words(request: dict[str, Any]) -> str:
+    """Everything a request holds as her own words or the user's: never code's notes."""
+    return json.dumps([m["content"] for m in request["messages"] if m.get("role") in ("assistant", "user")])
 
 
 def styles(folder: Path) -> list[list[str]]:
@@ -438,8 +455,11 @@ async def test_profile_changes_come_as_a_separate_note(tmp_path: Path, monkeypat
         ]
         deliver(harness.folder, "and now?", T0 + 1)
         await until(lambda: len(sent(harness.folder)) == 3)
-        history = " ".join(m["content"] for m in harness.gemma.calls[-1]["messages"][1:])
-        assert "Profile changes" not in history  # Gemma never sees the notes, so it cannot imitate them
+        request = harness.gemma.calls[-1]
+        assert "Profile changes" not in her_words(request)  # never as her words, so she does not take it for hers
+        assert [note.split("\n", 1)[1] for note in code_notes_in(request)] == [
+            "Profile changes\nSaved #1: The user likes tea. (/forget 1 undoes it)"
+        ]  # code's note, as the result of code's code_notes call (owner, 21-22 Oct)
     finally:
         await stop(harness)
 
@@ -1282,8 +1302,8 @@ async def test_a_switch_claimed_with_no_device_change_gets_codes_note(
         assert home.sets() == []
         deliver(harness.folder, "hm", T0 + 60_000)
         await until(lambda: len(gemma.calls) == 2)
-        history = json.dumps(gemma.calls[1]["messages"])
-        assert "Nothing was switched" not in history  # a note: never in her history
+        assert "Nothing was switched" not in her_words(gemma.calls[1])  # a note: never as her words
+        assert code_notes_in(gemma.calls[1])[-1].endswith("\nNothing was switched.")  # code's note, so she knows
     finally:
         await stop(harness)
 
@@ -2047,7 +2067,14 @@ async def test_a_calls_warm_up_is_its_first_turns_request_up_to_the_callers_word
         await app.call_turn(ME, "what's on today?", lambda: None)
         _, warm, first = gemma.calls
         assert warm["messages"] == first["messages"][:-1]
-        assert [m["role"] for m in first["messages"]] == ["system", "user", "assistant", "user"]
+        notes = len(code_notes_in(first))  # code's notes in her history (the mail's sign-in note may come)
+        assert [m["role"] for m in first["messages"]] == [
+            "system",
+            *["assistant", "tool"] * notes,
+            "user",
+            "assistant",
+            "user",
+        ]
         assert first["messages"][-1]["content"].endswith("[call] what's on today?")
         glance = prompts.call_glance(GLANCE_LINES.split("\n"), at="13:10", calendar=True, mail=True)
         assert warm["messages"][0]["content"].endswith(glance)  # the calendar was read in time: its line is there
@@ -2533,8 +2560,10 @@ async def test_with_web_search_the_links_come_in_a_code_written_note(
         deliver(harness.folder, "did Ajax win?", T0)
         await until(lambda: len(sent(harness.folder)) == 2)
         assert sent(harness.folder) == ["Ajax won 2-1, says nos.nl.", "🔎 Sources\n• nos.nl: https://nos.nl/1"]
-        history = app.context.build(app.store.current_conversation(), None)
-        assert "Ajax won 2-1, says nos.nl." in json.dumps(history) and "nos.nl/1" not in json.dumps(history)
+        history = {"messages": app.context.build(app.store.current_conversation(), None)}
+        assert "Ajax won 2-1, says nos.nl." in her_words(history) and "nos.nl/1" not in her_words(history)
+        [note] = code_notes_in(history)  # the Sources note: code's, marked as quoting outside text
+        assert "OUTSIDE TEXT" in note.split("\n")[0] and note.endswith("https://nos.nl/1")
     finally:
         await stop(harness)
 
@@ -2551,6 +2580,9 @@ async def test_on_a_call_the_web_links_are_texted(tmp_path: Path, monkeypatch: p
         assert turn.text == "Ajax won, says nos.nl."
         await until(lambda: len(sent(harness.folder)) == 1)
         assert sent(harness.folder) == ["🔎 Sources\n• nos.nl: https://nos.nl/1"]
+        await until(lambda: app.store.code_notes(app.store.current_conversation().id, 0) != [])
+        [(note, _)] = app.store.code_notes(app.store.current_conversation().id, 0)
+        assert note.history == "outside"  # the web's titles and links: outside text in her history
     finally:
         await stop(harness)
 
@@ -2810,7 +2842,7 @@ async def test_a_cut_off_call_answer_ends_at_its_last_whole_sentence(
 
 
 async def test_a_fresh_install_says_welcome_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Nothing in the store yet: one welcome written by code, kept as a sent note (out of Gemma's history), once."""
+    """Nothing in the store yet: one welcome written by code, kept as a sent note (in her history only as code's), once."""
     harness = await start(tmp_path, monkeypatch, FakeGemma(text("Hi Alex!")), welcome=True)
     try:
         await until(lambda: sent(harness.folder) == [WELCOME])
@@ -2822,8 +2854,9 @@ async def test_a_fresh_install_says_welcome_once(tmp_path: Path, monkeypatch: py
         assert harness.app.store.get_state(WELCOME_KEY)
         deliver(harness.folder, "hello", T0)
         await until(lambda: len(sent(harness.folder)) == 2)
-        seen = json.dumps(harness.gemma.calls[0]["messages"])
-        assert prompts.WELCOME_HELP not in seen and "Hi, I'm Estia" not in seen
+        seen = her_words(harness.gemma.calls[0])
+        assert prompts.WELCOME_HELP not in seen and "Hi, I'm Estia" not in seen  # never as her words
+        assert [note.split("\n", 1)[1] for note in code_notes_in(harness.gemma.calls[0])] == [WELCOME]
     finally:
         await stop(harness)
     restarted = await start(tmp_path, monkeypatch, FakeGemma(), welcome=True)
@@ -3742,7 +3775,8 @@ async def test_a_message_from_a_new_linked_device_is_held_until_the_phone_allows
         deliver(harness.folder, "again", T0 + 1, device=3)
         await asyncio.sleep(0.3)
         assert sent(harness.folder) == [held_note(3)]  # one note an hour per device
-        assert harness.gemma.calls == [] and harness.app.store.count_messages() == 0  # not read, not stored
+        incoming = harness.app.store._conn.execute("SELECT COUNT(*) FROM messages WHERE direction = 'in'").fetchone()
+        assert harness.gemma.calls == [] and incoming[0] == 0  # not read, not stored (code's note is kept)
         assert not [r for r in requests(harness.folder) if r["method"] == "sendReceipt"]  # no read receipt either
         deliver(harness.folder, "/devices ok 3", T0 + 2, device=1)
         await until(lambda: sent(harness.folder)[-1:] == [prompts.DEVICES_OK.format(device=3)])
@@ -3785,7 +3819,8 @@ async def test_a_message_naming_no_device_is_held(tmp_path: Path, monkeypatch: p
     try:
         deliver(harness.folder, "who am I", T0, device=None)
         await until(lambda: sent(harness.folder) == [prompts.DEVICE_HELD_UNNAMED])
-        assert harness.app.store.count_messages() == 0
+        incoming = harness.app.store._conn.execute("SELECT COUNT(*) FROM messages WHERE direction = 'in'").fetchone()
+        assert incoming[0] == 0  # never stored (code's note to the account is)
     finally:
         await stop(harness)
 
@@ -4684,5 +4719,63 @@ async def test_the_list_names_each_calendars_service(tmp_path: Path, monkeypatch
     try:
         lines = harness.app.capability_lines()
         assert any(line.startswith("• Calendar: Google and iCloud, read only, never changed.") for line in lines)
+    finally:
+        await stop(harness)
+
+
+async def test_the_echo_of_an_audio_file_leaves_out_its_links(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The re-review (21 Oct): an audio file is someone else's voice, so code's echo of it leaves every link out, as
+    code's other notes do; the user's own voice note is echoed as heard. What Gemma reads stays as heard."""
+    heard = "Call me at evil.com today, or see πληρωμή.ελ/login and https://evil.example/x."
+    with FakeVoiceService() as service:
+        service.transcript = heard
+        gemma = FakeGemma(text("It asks for a call back."), text("Noted."))
+        harness = await start(tmp_path, monkeypatch, gemma, voice_url=service.url)
+        try:
+            folder = harness.folder
+            deliver(folder, "/voice echo on", T0)
+            put(folder, "a1.m4a", M4A)
+            deliver(folder, None, T0 + 1, attachments=[{**voice("a1.m4a", M4A), "isVoiceNote": False}])
+            await until(lambda: len(sent(folder)) == 3)
+            assert sent(folder)[1] == '🎙️ "Call me at today, or see and."'
+            assert_left_out(sent(folder)[1], "evil", "Call me at today")
+            assert str(gemma.calls[0]["messages"][-1]["content"]).endswith(f"[audio file] {heard}")
+            service.transcript = "Remind me to read evil.com"
+            put(folder, "v1.m4a", M4A)
+            deliver(folder, None, T0 + 2, attachments=[voice("v1.m4a", M4A)])
+            await until(lambda: len(sent(folder)) == 5)
+            assert sent(folder)[3] == '🎙️ "Remind me to read evil.com"'  # the user's own words
+        finally:
+            await stop(harness)
+
+
+@pytest.mark.parametrize(
+    ("title", "named"),
+    [
+        ("Session expired, sign in at evil.com", "Session expired, sign in at"),
+        ("Pay evil(ab.cd).com/login now", "Pay evil .com login now"),  # pieces apart; the net breaks the slash too
+        ("https://evil.example/login", "https://www.example.org/alex"),  # nothing left: the user's own link
+    ],
+)
+async def test_the_learn_reply_names_the_page_without_its_links(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, title: str, named: str
+) -> None:
+    """The re-review (21 Oct): /learn's reply quotes the page's own title, outside text: without its links, else the
+    link the user sent (never the address it led to)."""
+
+    class PageFetcher(Fetcher):
+        def fetch(self, url: str) -> Page:
+            text = "Name: Alex\nLocation: Amsterdam, NL"
+            final = "https://evil.example/landing"
+            return Page(url=url, final_url=final, title=title, text=text, content_type="text/html")
+
+    facts = json.dumps({"facts": ["The user lives in Amsterdam, NL."]})
+    harness = await start(tmp_path, monkeypatch, FakeGemma(text(facts)), fetcher=PageFetcher())
+    try:
+        deliver(harness.folder, "/learn https://www.example.org/alex", T0)
+        await until(lambda: len(sent(harness.folder)) == 1)
+        reply = sent(harness.folder)[0]
+        assert reply.startswith(f"Learned from {named}:\nSaved #1: The user lives in Amsterdam, NL.")
+        assert not any(piece in reply for piece in ("evil.com", "evil.example", "ab.cd"))
     finally:
         await stop(harness)

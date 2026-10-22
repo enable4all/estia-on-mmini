@@ -5,9 +5,20 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from local_assistant.calendar_feed import Agenda, Event, FeedError, Missed
-from local_assistant.calendar_watch import CalendarWatch
+from local_assistant.calendar_watch import TITLE_CHARS, CalendarWatch
 from local_assistant.config import CalendarSource
+from tests.no_links import (
+    CAP_WORDS,
+    CASES,
+    PLANTED,
+    assert_no_link,
+    assert_no_tappable_link,
+    capped,
+    cut_inside_a_link,
+)
 
 TZ = ZoneInfo("Europe/Amsterdam")
 
@@ -281,3 +292,77 @@ async def test_an_early_start_before_the_digest_time() -> None:
     assert await cal.early_start(evening) is False and await cal.early_note(evening) is None
     feed.error = FeedError("unreachable")
     assert await cal.early_start(evening) is None
+
+
+@pytest.mark.parametrize("link", PLANTED)
+async def test_the_early_start_note_leaves_out_every_link_of_the_title(link: str) -> None:
+    """Owner, 21 Oct: a stranger's invite added to the calendar names its phishing link in her 20:00 note; code's notes
+    leave every link out (never shown, not defanged), the title's other words and styling stay."""
+    feed = Feed()
+    feed.items = [event(f"Verify account: {link} **URGENT**", "2026-10-15 07:00", response="needs-action")]
+    note = await watch(feed).early_note(at("2026-10-14 20:00").timestamp())
+    assert note is not None
+    assert_no_link(note, "Early start tomorrow: 07:00 Verify account", "URGENT")
+    assert note == "Early start tomorrow: 07:00 Verify account: **URGENT**."
+
+
+@pytest.mark.parametrize("link", PLANTED)
+async def test_the_calendar_change_note_leaves_out_every_link_of_the_title(link: str) -> None:
+    feed = Feed()
+    title = f"Verify account: {link} **URGENT**"
+    feed.items = [event(title, "2026-10-14 22:00", uid="spam@example.com")]
+    cal = watch(feed)
+    await cal.check(NOW.timestamp())
+    feed.items = [event(title, "2026-10-14 23:00", uid="spam@example.com")]
+    note = await cal.change_note((NOW + timedelta(minutes=30)).timestamp())
+    assert note is not None
+    assert_no_link(note[0], "Calendar change: Verify account", "URGENT", "moved 22:00 → 23:00")
+    assert note[0] == "Calendar change: Verify account: **URGENT** moved 22:00 → 23:00 (today)."
+
+
+async def test_a_link_cut_by_the_cap_never_stays_in_part() -> None:
+    """The links go before any cut: the cap never leaves "https://evil.ex…", and a link cut by clean's own first cut
+    (4 times the cap) is left out whole, also when the links before it are left out."""
+    feed = Feed()
+    feed.items = [
+        event("Board meeting about the budget for next year at https://evil.example/login", "2026-10-15 07:00"),
+        event(cut_inside_a_link(TITLE_CHARS), "2026-10-15 08:00"),
+    ]
+    cal = watch(feed)
+    evening = at("2026-10-14 20:00").timestamp()
+    assert (
+        await cal.early_note(evening) == "Early start tomorrow: 07:00 Board meeting about the budget for next year at."
+    )
+    feed.items = feed.items[1:]
+    note = await cal.early_note(evening)
+    assert note is not None and note.startswith("Early start tomorrow: 08:00 Dentist x")
+    assert_no_link(note, "Dentist")
+
+
+@pytest.mark.parametrize("title", [case[0] for case in CASES])
+async def test_the_calendar_notes_leave_out_what_the_re_review_got_through(title: str) -> None:
+    """The re-review and the net (21 Oct): a planted link in a title leaves the early-start note and the change note
+    with no tappable link (the net may keep a broken word; the link is gone)."""
+    feed = Feed()
+    feed.items = [event(title, "2026-10-15 07:00", response="needs-action")]
+    note = await watch(feed).early_note(at("2026-10-14 20:00").timestamp())
+    assert note is not None and note.startswith("Early start tomorrow: 07:00 ") and note.endswith(".")
+    assert_no_tappable_link(note)
+    feed.items = [event(title, "2026-10-14 22:00", uid="spam@example.com")]
+    cal = watch(feed)
+    await cal.check(NOW.timestamp())
+    feed.items = [event(title, "2026-10-14 23:00", uid="spam@example.com")]
+    change = await cal.change_note((NOW + timedelta(minutes=30)).timestamp())
+    assert change is not None and change[0].startswith("Calendar change: ") and "moved 22:00 → 23:00" in change[0]
+    assert_no_tappable_link(change[0])
+
+
+@pytest.mark.parametrize("word", CAP_WORDS)
+async def test_the_cap_never_makes_a_link_of_a_word_that_is_none(word: str) -> None:
+    """A word that is no link as a whole ("evil.com1xxx") cut by the cap right after ".com" would be one
+    ("evil.com…"): the net breaks it before the cap, so no cut makes a tappable link."""
+    feed = Feed()
+    feed.items = [event(capped(TITLE_CHARS, word), "2026-10-15 07:00")]
+    note = await watch(feed).early_note(at("2026-10-14 20:00").timestamp())
+    assert note is not None and "Early start tomorrow: 07:00 AAAA" in note
+    assert_no_tappable_link(note)

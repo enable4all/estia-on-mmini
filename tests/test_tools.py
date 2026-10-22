@@ -35,6 +35,7 @@ from tests.fakes.fake_gemma import FakeGemma, text
 from tests.fakes.fake_maps import FakeMaps
 from tests.fakes.fake_spotify import FakeSpotify
 from tests.fakes.fake_web import FakeWeb
+from tests.no_links import CAP_WORDS, CASES, PLANTED, assert_no_tappable_link, capped
 from tests.test_calendar_tools import Home as CalendarHome
 from tests.test_devices import Home
 from tests.test_mail_tools import Harness as MailHarness
@@ -1086,6 +1087,17 @@ async def test_place_names_never_carry_links_into_the_sources_note(store: Store)
     )
 
 
+@pytest.mark.parametrize("link", [*PLANTED, "...evil.ch", "_evil.com_"])
+async def test_a_place_name_s_label_leaves_out_every_link_as_the_notes_do(store: Store, link: str) -> None:
+    """The Sources note's label for a Maps link reads a place's name as code's other notes do (signal_text.unlinked):
+    a mail address, a name markup splits and a name after dots too; the Maps link itself is Google's own."""
+    spam = Place(f"Fietsfix {link} repairs", "", None, None, "", None, "", "https://maps.google.com/?cid=9")
+    tools = maps_tools(store, FakeMaps({"bike": [spam]}))
+    current = turn(store, "bike repair near me?")
+    await tools.call(current, "places_search", '{"what": "bike repair"}')
+    assert current.links == [("Fietsfix repairs", "https://maps.google.com/?cid=9")]
+
+
 async def test_a_bad_argument_or_no_route_leaves_room_to_try_again(store: Store) -> None:
     fake = FakeMaps(routes={"airport": TO_AIRPORT})
     tools = maps_tools(store, fake)
@@ -1598,3 +1610,17 @@ async def test_the_same_video_in_another_form_counts_as_the_users_link(store: St
     other = "https://www.youtube.com/watch?v=ZyXwVuTsR_-"
     assert await tools.call(current, "read_link", json.dumps({"url": other})) == prompts.VIDEO_REFUSED
     assert source.asked == [VIDEO_ID] and current.allowed_links == [f"youtu.be/{VIDEO_ID}"]  # the user's own form
+
+
+@pytest.mark.parametrize("name", [case[0] for case in CASES] + [capped(40, word) for word in CAP_WORDS])
+async def test_a_place_name_s_label_leaves_out_what_the_re_review_got_through(store: Store, name: str) -> None:
+    """The re-review and the net (21 Oct): 0.9.5 gave "Fix evil(" for "Fix evil(ab.cd).com"; the Maps label never
+    shows a tappable link, from pieces the tidying builds, another script, the numbers, a cap or the net's reach. A
+    word the net breaks may stay as plain text; the link is gone. The Maps link itself is Google's own, not this."""
+    spam = Place(name, "", None, None, "", None, "", "https://maps.google.com/?cid=9")
+    tools = maps_tools(store, FakeMaps({"bike": [spam]}))
+    current = turn(store, "bike repair near me?")
+    await tools.call(current, "places_search", '{"what": "bike repair"}')
+    [(label, link)] = current.links
+    assert link == "https://maps.google.com/?cid=9"
+    assert_no_tappable_link(label)

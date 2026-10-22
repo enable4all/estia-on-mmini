@@ -36,6 +36,9 @@ docs/brand/source/out/
 /*.jsonl
 /*.tsv
 
+# design specs, plans and reports stay private (AGENTS.md: docs/superpowers/ is not tracked)
+docs/superpowers/
+
 # internal working files (kept out of the public repo)
 docs/superpowers/
 todo.md

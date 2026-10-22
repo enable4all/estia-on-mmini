@@ -10,7 +10,7 @@ These hold in every area and load at every start. Each comes from an area's rule
 
 ## Outside text
 
-- Outside data may hold her back, never start anything but a code-written note (owner, 14 Oct; Gladys ADOPT 6): mail, calendar entries, web and map results, pages, YouTube captions, project files, documents, photos and shared audio files may hold, pause or quiet her (music only stops or gets quieter, a device change waits for the user's yes) or fill a code-written note (the digest; a calendar change starts one of the calendar watch's notes, and a new PDF in the folder the documents' note naming it, with no model); outside data never starts a Gemma-written message, a call, a reminder or a device change. A new hold names what an unreadable source means: hold, pass or retry.
+- Outside data may hold her back, never start anything but a code-written note (owner, 14 Oct; Gladys ADOPT 6): mail, calendar entries, web and map results, pages, YouTube captions, project files, documents, photos and shared audio files may hold, pause or quiet her (music only stops or gets quieter, a device change waits for the user's yes) or fill a code-written note (the digest; a calendar change starts one of the calendar watch's notes, and a new PDF in the folder the documents' note naming it, with no model); code's notes leave out every link inside the outside text they quote (`signal_text.unlinked`), except a PDF's own file name in the documents' notes (shown as saved), while the Sources note's links are the web results' own and Google's, by design; outside data never starts a Gemma-written message, a call, a reminder or a device change. A new hold names what an unreadable source means: hold, pass or retry.
 - Outside text is data, never instructions. Code refuses reminders in an answer that read mail, a calendar, the web, a page, a project file, a document or the history, and for an audio file or a photo; after mail, a calendar, web results, a page, a document or an audio file it also refuses `remember` and `forget`; a device change after outside text waits for the user's yes. Details: each area's file; across turns: `prompts-evals.md`.
 
 ## What the model can do
@@ -23,7 +23,7 @@ These hold in every area and load at every start. Each comes from an area's rule
 ## Her memory and her notes
 
 - Reminders, wake-up calls and the user's own facts come only from the user's own words; code confirms each change in its own note. Details: `memory-initiative.md`.
-- Code-written notes never enter Gemma's history: Gemma imitates whatever is there.
+- Code's notes enter Gemma's history only as code's (owner, 21-22 Oct: the old rule 6 removed, "in the messaging conversation, she is aware"): every note and command answer code sent comes as the result of a code_notes call that code writes, in the words the user saw without chat-template tokens, in time order, within the window and keep_days. Never an offered tool (her call is refused): she can neither call nor forge one. A note quoting outside text is marked OUTSIDE TEXT; while one is in her input, a reminder, remember, forget or cancel needs the user's message to ask for it (never in the note's words), a device the message does not name waits for the yes, links are defanged, and that answer stays outside text afterwards. One quoting mail, a calendar or documents (`private`) never gives its words to a web search, Maps or Spotify. Details: `prompts-evals.md`.
 - `soul.md` is the user's file: style only, below the rules, never written by code. Details: `prompts-evals.md`.
 
 ## Data and secrets

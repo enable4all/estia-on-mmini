@@ -2129,8 +2129,27 @@ def test_the_readme_stays_a_short_front_page() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert len(readme.splitlines()) < README_LINES
     headings = [line for line in readme.splitlines() if line.startswith("## ")]
-    assert headings == ["## Security", "## What she does", "## Install", "## Everything else", "## License"]
+    assert headings == [
+        "## Security",
+        "## Architecture",
+        "## What she does",
+        "## Install",
+        "## Everything else",
+        "## License",
+    ]
     assert "[GUIDE.md](GUIDE.md)" in readme
+
+
+def test_the_readme_shows_the_dark_architecture_diagram_and_both_files_are_there() -> None:
+    """Owner, 22 Oct: GitHub shows the dark diagram only, no light/dark swap; the site shows the light one, and its drift
+    test compares that file with the repo's, so both stay in docs/images."""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert '<img src="docs/images/estia-architecture-dark.svg"' in readme
+    assert "estia-architecture-light.svg" not in readme and "<picture>" not in readme.split("## Architecture")[1]
+    for name in ("estia-architecture-dark.svg", "estia-architecture-light.svg"):
+        svg = (ROOT / "docs" / "images" / name).read_text(encoding="utf-8")
+        assert svg.startswith("<svg") and "<title" in svg
+        assert 'href="http' not in svg and "url(http" not in svg  # self-contained: it loads nothing from outside
 
 
 def test_the_guide_has_one_h1_no_html_and_no_image() -> None:

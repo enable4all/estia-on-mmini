@@ -271,7 +271,7 @@ def summary(count: int, first: tuple[float, bool] | None, failed: int, *, tz: Zo
 @dataclass(frozen=True)
 class Created:
     reminder: Reminder
-    note: str  # the code-written confirmation for the user (a note, never in Gemma's history)
+    note: str  # the code-written confirmation for the user (a note: in Gemma's history only as code's, code_notes)
     spoken: str  # the same in a line to say on a call (English)
     result: str  # what Gemma's tool gets
 

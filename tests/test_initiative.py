@@ -572,7 +572,7 @@ async def test_calendar_comes_first_and_the_follow_up_then_keeps_its_own_rule(st
     assert sender.sent == [(ME, f"Calendar change: Dentist moved 10:00 → 11:30 (tomorrow).\n{footer}")]
     assert calendar.told_calls == [["change"]]
     note = store.message(store.initiative_entries()[0].message_id or 0)
-    assert note.kind == "note"  # code's words: never in her history
+    assert (note.kind, note.history) == ("note", "private")  # code's words, quoting the calendar (code_notes)
     clock.now += 60
     await initiative.tick()
     assert len(sender.sent) == 1 and store.followup(checkin).due_at == at("2026-10-15 17:00")  # type: ignore[union-attr]

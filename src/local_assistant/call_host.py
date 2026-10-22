@@ -8,7 +8,7 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from typing import TYPE_CHECKING
 
 from local_assistant import chords, prompts
@@ -210,7 +210,8 @@ class CallHost:
         # [chords]: the chords note is not sent during the call: said now, texted in one message after it
         self.chords_in_call += [(result, reply.sources) for result in reply.chords_results]
         notes = [note for note in (reply.sources, device_note, reply.notice, reply.reminder, reply.device) if note]
-        await self.call_notes(aci, conversation_id, said_id, notes)
+        outside = {reply.sources} | ({reply.notice} if reply.read_outside else set())  # quoting outside text
+        await self.call_notes(aci, conversation_id, said_id, notes, outside=outside)
         log.info("call turn %d answered: %d tool calls", said_id, reply.tool_calls)
         spoken = (reply.chords_spoken, reply.device_spoken, question, code_line, reply.reminder_spoken)
         code_text = " ".join(line for line in spoken if line)  # English
@@ -367,14 +368,14 @@ class CallHost:
         """The voice service can take a call now (both engines ready)."""
         return self.app._call_voice is not None and voice_ready(await self.app._call_voice.health())
 
-    async def call_note(self, aci: str, text: str) -> None:
+    async def call_note(self, aci: str, text: str, *, outside: bool = False) -> None:
         conversation_id = self.app.store.current_conversation().id
-        await self.app._send(self.app.store.add_outgoing(conversation_id, aci, "note", text, None))
+        await self.app._send(self.app.store.add_outgoing(conversation_id, aci, "note", text, None, outside=outside))
 
     async def call_chords(self, aci: str) -> None:
         """[chords]: after the call, one message from code: every chords result of the call in call order, its fixed
         lines word for word (the exact chords, sections as found), then its source: the web page that holds the
-        chords, else the turn's Sources lines. Sent only when a transpose ran; stored as a note, never in her history.
+        chords, else the turn's Sources lines. Sent only when a transpose ran; stored as a note quoting outside text.
         The results wait in memory for this call only (a restart during the call loses them: a known gap)."""
         results, self.chords_in_call = self.chords_in_call, []
         self.chords_after = [result for result, _ in results if result.ok]  # the summary's check reads them
@@ -390,11 +391,12 @@ class CallHost:
                 listed = [line for line in sources.splitlines()[1:] if line.strip()]
                 source = "\nSources:\n" + "\n".join(listed) if listed else ""
             parts.append(result.lines + source)
-        await self.call_note(aci, f"{prompts.CHORDS_AFTER_CALL}\n" + "\n\n".join(parts))
+        await self.call_note(aci, f"{prompts.CHORDS_AFTER_CALL}\n" + "\n\n".join(parts), outside=True)  # its source
         log.info("calls: the chords message after the call sent (%d results)", len(parts))
 
     async def call_summary(self, aci: str, lines: list[str], minutes: int) -> None:
-        """A short summary of the call as a note (kept out of Gemma's history). After a call with a chords result, a
+        """A short summary of the call as a note (in her history as code's note quoting outside text: Gemma wrote it,
+        and the call may have read some). After a call with a chords result, a
         summary sentence with another chord is left out: code's message holds the exact ones."""
         transcript = "\n".join(lines)[-12_000:]
         messages = [
@@ -412,9 +414,13 @@ class CallHost:
             if checked.left_out:
                 log.warning("call summary: %d sentences with chords not worked out left out", checked.left_out)
                 summary = checked.text
-        if summary:
-            await self.call_note(aci, prompts.CALL_SUMMARY.format(minutes=minutes, summary=summary))
+        if summary:  # Gemma's words about a call that may have read outside text: marked so (code_notes)
+            await self.call_note(aci, prompts.CALL_SUMMARY.format(minutes=minutes, summary=summary), outside=True)
 
-    async def call_notes(self, aci: str, conversation_id: int, reply_to: int | None, notes: list[str]) -> None:
+    async def call_notes(
+        self, aci: str, conversation_id: int, reply_to: int | None, notes: list[str], *, outside: Collection[str] = ()
+    ) -> None:
+        """Code's notes after a call turn; `outside`: the ones that quote outside text (code_notes)."""
         for note in notes:
-            await self.app._send(self.app.store.add_outgoing(conversation_id, aci, "note", note, reply_to))
+            out_id = self.app.store.add_outgoing(conversation_id, aci, "note", note, reply_to, outside=note in outside)
+            await self.app._send(out_id)

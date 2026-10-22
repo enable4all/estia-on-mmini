@@ -2,7 +2,7 @@
 
 Her voice can take up to about 15 minutes to load: after a first install, a move into her own user or a macOS update
 the Neural Engine compiles it, and calls are not answered meanwhile. Code then texts each account that needs to know,
-in its own words (`prompts.VOICE_READY`), as a note: never in Gemma's history.
+in its own words (`prompts.VOICE_READY`), as a note: in Gemma's history only as code's note (code_notes).
 
 The note is owed
 - to a caller whose call rang while the voice was not ready (the "not ready" note says she texts when it is): sent as

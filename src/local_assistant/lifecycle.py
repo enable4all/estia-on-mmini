@@ -110,8 +110,8 @@ class Lifecycle:
     async def welcome(self) -> None:
         """A fresh install (nothing in the store) greets each allowed user once, in code's words. It is owed to the
         accounts allowed at that first start; one it could not reach is tried again at the next start, even when the
-        others chat by then. Only a delivered welcome is stored, as a sent note: never in Gemma's history, nothing for
-        recovery to send again. An install that already has messages never gets it. Locked: the next start."""
+        others chat by then. Only a delivered welcome is stored, as a sent note: in Gemma's history only as code's
+        note (code_notes), nothing for recovery to send again. An install that already has messages never gets it. Locked: the next start."""
         if self.app.store.get_state(WELCOME_KEY) or self.app.guard.locked:
             return
         owed = self.app.store.get_state(WELCOME_OWED_KEY)
@@ -139,6 +139,13 @@ class Lifecycle:
             log.info("welcome sent: %d chars", len(text))
         if not left:
             self.app.store.set_state(WELCOME_KEY, f"{self.app._clock():.0f}")
+
+    def keep_sent(self, aci: str, text: str, timestamp: int) -> None:
+        """A note delivered at once, not through the queue (a held device's): kept as a sent note in the current
+        conversation, so it is in her history (code_notes) and recovery never sends it again."""
+        with self.app.store.tx():
+            out_id = self.app.store.add_outgoing(self.app.store.current_conversation().id, aci, "note", text, None)
+            self.app.store.mark_sent(out_id, timestamp)
 
     async def recover(self) -> None:
         """After a restart: answer recent messages, one offline note for older ones, resend recent replies."""

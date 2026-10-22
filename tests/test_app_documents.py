@@ -180,6 +180,9 @@ async def test_the_hourly_look_announces_new_pdfs_once(tmp_path: Path, monkeypat
         now[0] = at(11, 1)
         await harness.app.documents_tick()
         await until(lambda: shown(harness.folder) == ["I found 1 new document: boiler.pdf."])
+        await until(lambda: harness.app.store.code_notes(harness.app.store.current_conversation().id, 0) != [])
+        [(note, _)] = harness.app.store.code_notes(harness.app.store.current_conversation().id, 0)
+        assert note.history == "private"  # a PDF's name: private outside text in her history (code_notes)
         now[0] = at(12, 2)
         await harness.app.documents_tick()
         assert len(sent(harness.folder)) == 1  # once

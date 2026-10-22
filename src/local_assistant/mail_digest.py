@@ -3,8 +3,8 @@
 Mail that needs a reply (urgent first, then oldest; unanswered, still in the Inbox, at most `reply_days`
 old; unlabelled mail from people the user writes to is listed with its subject) and actions that arrived
 since the previous digest. The morning digest gives each mailbox its own block under a bold heading
-(`digest_part`); the mail_digest tool (`compose`) keeps both mailboxes together, each line tagged with its
-mailbox. Both show the same mail: at most `BLOCK_LIMIT` replies and `BLOCK_LIMIT` actions over all mailboxes.
+(`digest_part`), its senders, summaries and subjects without links (a note of code's: never shown); the
+mail_digest tool (`compose`) keeps both mailboxes together, each line tagged with its mailbox, its text as it was. Both show the same mail: at most `BLOCK_LIMIT` replies and `BLOCK_LIMIT` actions over all mailboxes.
 Numbers are kept for the whole day, so "read 2" means the same mail in the digest, in search results and to
 Gemma's tools; the digest and the tool give them in the digest's order, so the digest reads 1..n whichever runs
 first.
@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 from local_assistant import prompts
+from local_assistant.calendar_tools import clean_note
 from local_assistant.config import Config
 from local_assistant.part_status import PartStatus, mail_part, reason_text, state
 from local_assistant.store import MailHeader, Store
@@ -35,6 +36,8 @@ BLOCK_LIMIT = 10
 EMPTY = "Mail: nothing needs you today."
 GLANCE_EMPTY = "Mail digest: nothing needs a reply or an action."
 STALE_ROUNDS = 2  # a failing mailbox whose last good read is older than this many sync rounds has not been read
+NOTE_CHARS = 255  # a sender or a subject in the digest: Outlook's own limit, so a real one is never cut
+NO_NAME = "(no name)"  # the digest's sender when nothing of it is left without links
 
 
 @dataclass(frozen=True)
@@ -134,7 +137,7 @@ class MailDigest:
         for name in self._order(replies, actions):
             lines = [f"**Mail ({name})**" if several else "**Mail**"]
             for title, mails in (("Needs a reply:", replies), ("Actions:", actions)):
-                mine = [self._line(mail, local, tagged=False) for mail in mails[:BLOCK_LIMIT] if mail.account == name]
+                mine = [self._line(mail, local, note=True) for mail in mails[:BLOCK_LIMIT] if mail.account == name]
                 more = sum(1 for mail in mails[BLOCK_LIMIT:] if mail.account == name)
                 if mine or more:
                     lines += [title, *mine, *([f"…and {more} more"] if more else [])]
@@ -221,18 +224,25 @@ class MailDigest:
         known = [m for m in self._store.unlabelled_from_known(since) if m.id not in {n.id for n in needs}]
         return needs, known, self._store.mail_actions(_iso(last), since)
 
-    def _block(self, mails: list[MailHeader], local: datetime, *, tagged: bool = True) -> list[str]:
-        lines = [self._line(mail, local, tagged=tagged) for mail in mails[:BLOCK_LIMIT]]
+    def _block(self, mails: list[MailHeader], local: datetime) -> list[str]:
+        lines = [self._line(mail, local) for mail in mails[:BLOCK_LIMIT]]
         if len(mails) > BLOCK_LIMIT:
             lines.append(f"…and {len(mails) - BLOCK_LIMIT} more")
         return lines
 
-    def _line(self, mail: MailHeader, local: datetime, *, tagged: bool = True) -> str:
-        """ "2. [work] Bob Lee: Asks about November shipping. (3 d)"; without the [mailbox] under its own heading."""
+    def _line(self, mail: MailHeader, local: datetime, *, note: bool = False) -> str:
+        """ "2. [work] Bob Lee: Asks about November shipping. (3 d)", as the mail_digest tool gives it (Gemma's). `note`:
+        the morning digest's, without the [mailbox] under its own heading, and the sender, the summary or the subject
+        without links (owner, 21 Oct: never shown; a sender with only an address is named by the part before the @)."""
         received = datetime.fromisoformat(mail.received_at).astimezone(self._tz)
         days = (local.date() - received.date()).days
         age = "today" if days <= 0 else f"{days} d"
-        who = mail.sender_name or mail.sender_address
-        what = mail.summary or mail.subject or "(no subject)"
-        tag = f"[{mail.account}] " if tagged else ""
-        return f"{self._numbers.number(mail.id)}. {tag}{who}: {what} ({age})"
+        if note:
+            # one line each: a line break in a sender's name or a subject could start a line that looks like code's own
+            local_part = mail.sender_address.partition("@")[0]
+            who = clean_note(mail.sender_name, NOTE_CHARS) or clean_note(local_part, NOTE_CHARS) or NO_NAME
+            what = clean_note(mail.summary, NOTE_CHARS) or clean_note(mail.subject, NOTE_CHARS) or "(no subject)"
+            return f"{self._numbers.number(mail.id)}. {' '.join(who.split())}: {' '.join(what.split())} ({age})"
+        who = " ".join((mail.sender_name or mail.sender_address).split())
+        what = " ".join((mail.summary or mail.subject or "(no subject)").split())
+        return f"{self._numbers.number(mail.id)}. [{mail.account}] {who}: {what} ({age})"

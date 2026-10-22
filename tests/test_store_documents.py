@@ -61,7 +61,7 @@ def test_upgrade_from_version_11_gives_every_file_the_reader_from_before(tmp_pat
     conn.commit()
     conn.close()
     store = Store.open(path)
-    assert SCHEMA_VERSION == 13 and store._conn.execute("PRAGMA user_version").fetchone()[0] == 13  # v13: in_notes
+    assert SCHEMA_VERSION == 14 and store._conn.execute("PRAGMA user_version").fetchone()[0] == 14  # v14: history
     assert [(file.path, file.reader, file.skipped) for file in store.doc_files()] == [
         ("scan.pdf", 1, ((1, "unreadable"),))
     ]

@@ -30,7 +30,7 @@ from tests.conftest import ME, T0, TZ
 from tests.fakes.fake_gemma import FakeGemma, text, tool
 from tests.fakes.fake_web import FakeWeb
 from tests.test_app import T0 as NOW  # recent: older messages count as missed during downtime
-from tests.test_app import call_settings, deliver, sent, start, stop, until
+from tests.test_app import call_settings, code_notes_in, deliver, her_words, sent, start, stop, until
 
 BASE = {"bot_number": "+306900000000", "allowed_acis": [ME]}
 
@@ -1210,7 +1210,7 @@ async def test_without_chords_her_words_are_not_checked(store: Store) -> None:
     assert len(gemma.calls) == 1
 
 
-# ---- the note in the app: after the Sources note, never in her history ----
+# ---- the note in the app: after the Sources note, in her history only as code's note ----
 
 
 async def test_on_texts_codes_note_follows_the_sources_note(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1233,8 +1233,11 @@ async def test_on_texts_codes_note_follows_the_sources_note(tmp_path: Path, monk
         assert note.startswith(
             "Chords\nDown 2 (a whole tone): from Am (A minor) to Gm (G minor)\nGm7 · C6 · Dbdim7 · Dm7"
         )
-        history = json.dumps(app.context.build(app.store.current_conversation(), None))
-        assert "Gm7" not in history  # code's note is never in her history (she would imitate it)
+        await until(lambda: len(app.store.code_notes(app.store.current_conversation().id, 0)) == 2)  # marked sent
+        history = {"messages": app.context.build(app.store.current_conversation(), None)}
+        assert "Gm7" not in her_words(history)  # code's note is never her words (she would imitate it)
+        assert code_notes_in(history)[-1].split("\n", 1)[1] == note  # code's, quoting a page
+        assert "OUTSIDE TEXT" in code_notes_in(history)[-1].split("\n")[0]
     finally:
         await stop(harness)
 
@@ -1288,8 +1291,11 @@ async def test_on_a_call_the_result_is_said_after_her_words_and_texted_after_the
             "Read as: Am7 D6 Ebdim7 Em7; the page's Key: Am\n"
             "Source: guitartuna.com: https://guitartuna.com/chords/spooky-dusty-springfield"
         )
-        history = json.dumps(app.context.build(app.store.current_conversation(), None))
-        assert "Gm7 C6" not in history and "Chords from the call" not in history
+        await until(lambda: len(app.store.code_notes(app.store.current_conversation().id, 0)) == 2)  # marked sent
+        history = {"messages": app.context.build(app.store.current_conversation(), None)}
+        assert "Gm7 C6" not in her_words(history) and "Chords from the call" not in her_words(history)
+        assert code_notes_in(history)[-1].split("\n", 1)[1].startswith("Chords from the call")  # code's, outside text
+        assert "OUTSIDE TEXT" in code_notes_in(history)[-1].split("\n")[0]
     finally:
         await stop(harness)
 

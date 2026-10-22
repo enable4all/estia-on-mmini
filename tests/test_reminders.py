@@ -431,7 +431,7 @@ def scheduler(
     return reminders, run, sent
 
 
-async def test_a_reminder_fires_on_time_as_a_note_out_of_gemmas_history(store: Store) -> None:
+async def test_a_reminder_fires_on_time_as_codes_note(store: Store) -> None:
     clock = Clock()
     reminders, run, sent = scheduler(store, clock)
     created = reminders.set(ME, at="17:00", text="call the dentist")
@@ -444,7 +444,7 @@ async def test_a_reminder_fires_on_time_as_a_note_out_of_gemmas_history(store: S
     done = store.reminder(created.reminder.id)
     assert done is not None and (done.status, done.outcome, done.fired) == ("done", "sent", 1)
     note = store.message(done.message_id or 0)
-    assert (note.kind, note.status) == ("note", "sent")  # a note: never in Gemma's history
+    assert (note.kind, note.status, note.history) == ("note", "sent", "note")  # code's note: in her history as code's
     await run.tick()
     assert len(sent.texts) == 1
 
